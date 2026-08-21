@@ -1,5 +1,10 @@
 # Agent Guide
 
+## External specifications
+
+- MCP 开发（server 接入、传输、配置字段、tools/resources/prompts 等协议行为）遵循 [Model Context Protocol](https://modelcontextprotocol.io/) 官方规范。
+- Skill 开发（`SKILL.md`、frontmatter、附带资源、打包与分发）遵循 [Agent Skills Specification](https://agentskills.io/specification)。
+
 ## Agent skills
 
 ### Issue tracker
