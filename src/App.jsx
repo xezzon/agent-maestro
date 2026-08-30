@@ -1,49 +1,171 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useState } from "react";
+import {
+  deletePlugin,
+  deleteProvider,
+  getConfig,
+  savePlugin,
+  saveProvider,
+} from "./lib/api";
+import PluginForm from "./components/PluginForm";
+import PluginList from "./components/PluginList";
+import ProviderForm from "./components/ProviderForm";
+import ProviderList from "./components/ProviderList";
 import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [config, setConfig] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [providerForm, setProviderForm] = useState(null); // { provider } | null
+  const [pluginForm, setPluginForm] = useState(null); // { plugin } | null
+  const [busy, setBusy] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  const refresh = useCallback(async () => {
+    try {
+      setConfig(await getConfig());
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Runs a mutation; backend errors surface in the banner and leave any open
+  // form untouched so the user can correct and retry.
+  const mutate = async (fn) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveProvider = async (input) => {
+    await mutate(async () => {
+      setConfig(await saveProvider(input));
+      setProviderForm(null);
+    });
+  };
+
+  const handleDeleteProvider = async (provider) => {
+    if (
+      !window.confirm(
+        `确定删除 Provider「${provider.id}」？其保存的密钥也会从系统密钥链中删除。`,
+      )
+    ) {
+      return;
+    }
+    await mutate(async () => {
+      setConfig(await deleteProvider(provider.id));
+    });
+  };
+
+  const handleSavePlugin = async (input) => {
+    await mutate(async () => {
+      setConfig(await savePlugin(input));
+      setPluginForm(null);
+    });
+  };
+
+  const handleTogglePlugin = async (plugin) => {
+    await mutate(async () => {
+      setConfig(await savePlugin({ ...plugin, enabled: !plugin.enabled }));
+    });
+  };
+
+  const handleDeletePlugin = async (plugin) => {
+    if (!window.confirm(`确定删除 Plugin「${plugin.id}」？`)) {
+      return;
+    }
+    await mutate(async () => {
+      setConfig(await deletePlugin(plugin.id));
+    });
+  };
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <main className="app">
+      <header className="app-header">
+        <h1>Agent Maestro</h1>
+        <p className="subtitle">Agent 工具的统一配置中心 · Provider / Plugin / 密钥</p>
+      </header>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      {error && (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      )}
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
+      {loading ? (
+        <p className="empty-hint">加载中…</p>
+      ) : (
+        <>
+          <section className="panel">
+            <div className="panel-header">
+              <h2>Provider</h2>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={busy}
+                onClick={() => setProviderForm({ provider: null })}
+              >
+                添加 Provider
+              </button>
+            </div>
+            <ProviderList
+              providers={config?.providers ?? []}
+              onEdit={(provider) => setProviderForm({ provider })}
+              onDelete={handleDeleteProvider}
+            />
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <h2>Plugin</h2>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={busy}
+                onClick={() => setPluginForm({ plugin: null })}
+              >
+                添加 Plugin
+              </button>
+            </div>
+            <PluginList
+              plugins={config?.plugins ?? []}
+              onToggle={handleTogglePlugin}
+              onEdit={(plugin) => setPluginForm({ plugin })}
+              onDelete={handleDeletePlugin}
+            />
+          </section>
+        </>
+      )}
+
+      {providerForm && (
+        <ProviderForm
+          initial={providerForm.provider}
+          submitting={busy}
+          onSubmit={handleSaveProvider}
+          onCancel={() => setProviderForm(null)}
         />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      )}
+
+      {pluginForm && (
+        <PluginForm
+          initial={pluginForm.plugin}
+          submitting={busy}
+          onSubmit={handleSavePlugin}
+          onCancel={() => setPluginForm(null)}
+        />
+      )}
     </main>
   );
 }
