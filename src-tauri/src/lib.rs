@@ -4,7 +4,7 @@ mod store;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use provider::Provider;
+use provider::{Protocol, Provider};
 use store::{Store, StoreError};
 use tauri::{Manager, State};
 
@@ -22,6 +22,19 @@ fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provide
     Ok(config.providers.clone())
 }
 
+#[tauri::command]
+fn create_provider(
+    store: State<'_, AppStore>,
+    slug: String,
+    protocol: Protocol,
+    base_url: String,
+) -> Result<(), String> {
+    let mut guard = lock(&store)?;
+    guard
+        .create_provider(&slug, protocol, &base_url)
+        .map_err(|e| e.message())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -34,7 +47,7 @@ pub fn run() {
             app.manage(AppStore(Mutex::new(store)));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_providers])
+        .invoke_handler(tauri::generate_handler![list_providers, create_provider])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

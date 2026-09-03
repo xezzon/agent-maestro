@@ -7,6 +7,7 @@ import {
   Flex,
   Form,
   Input,
+  message,
   Radio,
   Spin,
   Tag,
@@ -38,11 +39,11 @@ function toProviderList(providersByKey) {
 }
 
 export default function ProvidersPage() {
-  // TODO(create_provider)：保存动作改为调用后端后，本地预览状态移除。
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [creating, setCreating] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
   const reload = useCallback(async () => {
@@ -62,28 +63,36 @@ export default function ProvidersPage() {
   }, [reload]);
 
   function openCreate() {
-    form.resetFields();
     setCreating(true);
   }
 
   function cancelCreate() {
     setCreating(false);
-    form.resetFields();
   }
 
-  // TODO(create_provider)：命令接入后改为调用后端并刷新列表。
-  function handleSave(values) {
-    setProviders((prev) => [
-      {
+  // 命令成功即已落盘；用已知数据置顶插入，避免整表重载。重启后仍回 slug 序（version:1 无创建时间字段）。
+  async function handleSave(values) {
+    setSaving(true);
+    try {
+      await invoke("create_provider", {
         slug: values.slug,
-        base_url: { [values.protocol]: values.baseUrl },
-        api_key_set: false,
-        model_count: 0,
-      },
-      ...prev,
-    ]);
-    setCreating(false);
-    form.resetFields();
+        protocol: values.protocol,
+        baseUrl: values.baseUrl,
+      });
+      const created = {
+        [values.slug]: {
+          base_url: { [values.protocol]: values.baseUrl },
+          api_key: "",
+          models: [],
+        },
+      };
+      setProviders((prev) => [...toProviderList(created), ...prev]);
+      setCreating(false);
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setSaving(false);
+    }
   }
 
   if (loadError) {
@@ -122,7 +131,12 @@ export default function ProvidersPage() {
         <Flex vertical gap={16}>
           {creating && (
             <Card title="新建 Provider">
-              <Form form={form} layout="vertical" onFinish={handleSave}>
+              <Form
+                form={form}
+                layout="vertical"
+                preserve={false}
+                onFinish={handleSave}
+              >
                 <Form.Item
                   name="slug"
                   label="Slug"
@@ -187,8 +201,10 @@ export default function ProvidersPage() {
                 </Form.Item>
 
                 <div className="card-actions">
-                  <Button onClick={cancelCreate}>取消</Button>
-                  <Button type="primary" onClick={() => form.submit()}>
+                  <Button disabled={saving} onClick={cancelCreate}>
+                    取消
+                  </Button>
+                  <Button type="primary" loading={saving} onClick={() => form.submit()}>
                     保存
                   </Button>
                 </div>
