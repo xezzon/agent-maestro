@@ -189,7 +189,7 @@ export default function ProvidersPage() {
                         }
                         if (url.protocol !== "http:" && url.protocol !== "https:") {
                           return Promise.reject(
-                            new Error("Base URL 仅支持 http(s) 协议"),
+                            new Error("Base URL 仅支持 http(s) 地址"),
                           );
                         }
                         return Promise.resolve();
