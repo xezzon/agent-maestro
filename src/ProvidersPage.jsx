@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
   Button,
   Card,
   Empty,
@@ -7,9 +8,11 @@ import {
   Form,
   Input,
   Radio,
+  Spin,
   Tag,
   Typography,
 } from "antd";
+import { invoke } from "@tauri-apps/api/core";
 
 const SLUG_PATTERN = /^[a-z][a-z0-9-_]*$/;
 
@@ -24,12 +27,39 @@ const PROTOCOL_OPTIONS = [
   },
 ];
 
+// 后端直接返回以 slug 为 key 的 providers 原始结构；类型映射在 JS 侧完成。
+function toProviderList(providersByKey) {
+  return Object.entries(providersByKey ?? {}).map(([slug, provider]) => ({
+    slug,
+    base_url: provider.base_url ?? {},
+    api_key_set: (provider.api_key ?? "") !== "",
+    model_count: provider.models?.length ?? 0,
+  }));
+}
+
 export default function ProvidersPage() {
-  // TODO(list_providers)：命令接入后由后端加载，并驱动加载/错误/空状态。
-  // 当前为纯前端本地状态，仅用于预览布局；新建的 Provider 插入最前。
+  // TODO(create_provider)：保存动作改为调用后端后，本地预览状态移除。
   const [providers, setProviders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [creating, setCreating] = useState(false);
   const [form] = Form.useForm();
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      setProviders(toProviderList(await invoke("list_providers")));
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
 
   function openCreate() {
     form.resetFields();
@@ -56,18 +86,33 @@ export default function ProvidersPage() {
     form.resetFields();
   }
 
+  if (loadError) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="配置加载失败"
+        description={<pre className="error-detail">{loadError}</pre>}
+      />
+    );
+  }
+
   return (
     <div className="page">
       <div className="page-header">
         <Typography.Title level={4} style={{ margin: 0 }}>
           Provider
         </Typography.Title>
-        <Button type="primary" disabled={creating} onClick={openCreate}>
+        <Button type="primary" disabled={creating || loading} onClick={openCreate}>
           新建
         </Button>
       </div>
 
-      {providers.length === 0 && !creating ? (
+      {loading && providers.length === 0 ? (
+        <div className="page-loading">
+          <Spin />
+        </div>
+      ) : providers.length === 0 && !creating ? (
         <Empty description="尚未接入任何 Provider">
           <Button type="primary" onClick={openCreate}>
             新建 Provider
