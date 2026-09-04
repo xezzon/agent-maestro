@@ -1,3 +1,4 @@
+mod keychain;
 mod provider;
 mod store;
 
