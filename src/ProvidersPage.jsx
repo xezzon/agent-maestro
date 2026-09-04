@@ -8,7 +8,9 @@ import {
   Form,
   Input,
   message,
+  Popconfirm,
   Radio,
+  Space,
   Spin,
   Tag,
   Typography,
@@ -82,6 +84,7 @@ export default function ProvidersPage() {
   const [loadError, setLoadError] = useState(null);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   // 编辑中的 Provider：{ slug, protocol（当前单选的协议）, slots（各协议槽位的当前值） }
   const [editing, setEditing] = useState(null);
   const [form] = Form.useForm();
@@ -188,6 +191,20 @@ export default function ProvidersPage() {
       message.error(String(err));
     } finally {
       setSaving(false);
+    }
+  }
+
+  // 返回的 warnings 为「删除成功但密钥链清除失败」的降级提示。
+  async function handleDelete(slug) {
+    setDeleting(true);
+    try {
+      const warnings = await invoke("delete_provider", { slug });
+      setProviders((prev) => prev.filter((provider) => provider.slug !== slug));
+      (warnings ?? []).forEach((warning) => message.warning(warning));
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -310,13 +327,31 @@ export default function ProvidersPage() {
               key={provider.slug}
               title={provider.slug}
               extra={
-                <Button
-                  size="small"
-                  disabled={creating || !!editing || loading}
-                  onClick={() => openEdit(provider)}
-                >
-                  编辑
-                </Button>
+                <Space size={8}>
+                  <Button
+                    size="small"
+                    disabled={creating || !!editing || deleting || loading}
+                    onClick={() => openEdit(provider)}
+                  >
+                    编辑
+                  </Button>
+                  <Popconfirm
+                    title="删除 Provider"
+                    description={`将同时清除「${provider.slug}」的模型与密钥链条目，确定删除？`}
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                    onConfirm={() => handleDelete(provider.slug)}
+                  >
+                    <Button
+                      danger
+                      size="small"
+                      disabled={creating || !!editing || deleting || loading}
+                    >
+                      删除
+                    </Button>
+                  </Popconfirm>
+                </Space>
               }
             >
               {/* 只读展示用受控输入（非表单状态），数据变化即时反映 */}

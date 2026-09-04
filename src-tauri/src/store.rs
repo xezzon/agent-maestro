@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::keychain::Keychain;
 use crate::provider::{Endpoints, Protocol, Provider};
 use serde::{Deserialize, Serialize};
 
@@ -172,6 +173,39 @@ impl Store {
         Ok(())
     }
 
+    /// 删除 Provider（其模型数据随记录一并移除），并按其密钥引用清除密钥链条目。
+    ///
+    /// 未设置密钥（引用为空）时不触碰密钥链；引用存在时清除失败不阻塞删除：
+    /// 记录仍被删除并落盘，失败降级为返回值中的警告。
+    pub fn delete_provider(
+        &mut self,
+        slug: &str,
+        keychain: &mut dyn Keychain,
+    ) -> Result<Vec<String>, StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        let mut next = config.clone();
+        let Some(provider) = next.providers.get(slug) else {
+            return Err(StoreError::MissingSlug {
+                slug: slug.to_owned(),
+            });
+        };
+        let secret_reference = provider.api_key.clone();
+        next.providers.remove(slug);
+        self.persist(&next)?;
+        self.state = Ok(next);
+
+        let mut warnings = Vec::new();
+        if !secret_reference.is_empty() {
+            if let Err(e) = keychain.clear(&secret_reference) {
+                warnings.push(format!(
+                    "已删除 Provider「{slug}」，但其密钥链条目清除失败：{}。该条目可能残留于系统密钥链。",
+                    e.detail()
+                ));
+            }
+        }
+        Ok(warnings)
+    }
+
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
     fn persist(&self, config: &Config) -> Result<(), StoreError> {
         let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
@@ -197,10 +231,12 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keychain::FakeKeychain;
 
     #[test]
     fn unavailable_store_refuses_reads_and_writes() {
         let mut store = Store::unavailable("无法确定用户主目录（HOME）".to_owned());
+        let mut keychain = FakeKeychain::default();
 
         let err = store.get().unwrap_err();
         assert!(err.message().contains("无法确定用户主目录"));
@@ -210,6 +246,7 @@ mod tests {
         assert!(store
             .update_provider("foo", Protocol::OpenaiCompletions, "http://localhost:9")
             .is_err());
+        assert!(store.delete_provider("foo", &mut keychain).is_err());
     }
 
     #[test]
@@ -395,6 +432,170 @@ mod tests {
         assert!(err.message().contains("ghost"));
         assert!(store.get().unwrap().providers.is_empty());
         assert!(!path.exists(), "报错路径不得静默写入文件");
+    }
+
+    #[test]
+    fn delete_provider_removes_record_and_clears_keychain_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "providers": {
+                    "openrouter": {
+                        "base_url": {
+                            "openai-completions": "https://api.example.com/v1"
+                        },
+                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key",
+                        "models": [
+                            { "id": "z-model", "display_name": null },
+                            { "id": "a-model", "display_name": "A Model" }
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut store = Store::open(path.clone());
+        let reference = "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key";
+        let mut keychain = FakeKeychain::default();
+        keychain
+            .entries
+            .insert(reference.to_owned(), "sk-test".to_owned());
+
+        store.delete_provider("openrouter", &mut keychain).unwrap();
+
+        let reopened = Store::open(path);
+        assert!(reopened.get().unwrap().providers.is_empty());
+        assert!(
+            !keychain.entries.contains_key(reference),
+            "删除 Provider 后密钥链条目必须一并清除"
+        );
+    }
+
+    #[test]
+    fn delete_provider_succeeds_with_warning_when_keychain_clear_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "providers": {
+                    "ollama": {
+                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/ollama/api_key"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut store = Store::open(path.clone());
+        let mut keychain = FakeKeychain::default();
+        keychain.fail_clear = true;
+
+        let warnings = store.delete_provider("ollama", &mut keychain).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("ollama"));
+        let reopened = Store::open(path);
+        assert!(
+            reopened.get().unwrap().providers.is_empty(),
+            "密钥链清除失败时删除不得被阻塞"
+        );
+    }
+
+    #[test]
+    fn delete_provider_missing_slug_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path);
+        let mut keychain = FakeKeychain::default();
+
+        let err = store.delete_provider("ghost", &mut keychain).unwrap_err();
+
+        assert!(matches!(err, StoreError::MissingSlug { .. }));
+        assert!(err.message().contains("ghost"));
+    }
+
+    #[test]
+    fn deleted_slug_can_be_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+        let mut keychain = FakeKeychain::default();
+        store
+            .create_provider(
+                "ollama",
+                Protocol::OpenaiCompletions,
+                "http://localhost:11434/v1",
+            )
+            .unwrap();
+
+        store.delete_provider("ollama", &mut keychain).unwrap();
+        store
+            .create_provider(
+                "ollama",
+                Protocol::AnthropicMessages,
+                "http://127.0.0.1:8080",
+            )
+            .unwrap();
+
+        let reopened = Store::open(path);
+        let provider = &reopened.get().unwrap().providers["ollama"];
+        assert_eq!(
+            provider.base_url.anthropic_messages,
+            Some("http://127.0.0.1:8080".to_owned())
+        );
+        assert_eq!(provider.base_url.openai_completions, None);
+        assert!(provider.models.is_empty());
+    }
+
+    #[test]
+    fn delete_provider_without_reference_never_touches_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path);
+        store
+            .create_provider(
+                "ollama",
+                Protocol::OpenaiCompletions,
+                "http://localhost:11434/v1",
+            )
+            .unwrap();
+        let mut keychain = FakeKeychain::default();
+        keychain.fail_clear = true;
+
+        let warnings = store.delete_provider("ollama", &mut keychain).unwrap();
+
+        assert!(
+            warnings.is_empty(),
+            "未设置密钥（引用为空）的 Provider 删除时不得触碰密钥链"
+        );
+    }
+
+    #[test]
+    fn delete_provider_with_reference_but_missing_entry_succeeds_without_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "providers": {
+                    "ollama": {
+                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/ollama/api_key"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut store = Store::open(path);
+        let mut keychain = FakeKeychain::default();
+
+        let warnings = store.delete_provider("ollama", &mut keychain).unwrap();
+
+        assert!(warnings.is_empty(), "清除不存在的条目同样成功（幂等）");
     }
 
     #[test]
