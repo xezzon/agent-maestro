@@ -28,6 +28,25 @@ const PROTOCOL_OPTIONS = [
   },
 ];
 
+const BASE_URL_RULES = [
+  { required: true, message: "请输入 Base URL" },
+  {
+    validator: (_, value) => {
+      if (!value) return Promise.resolve();
+      let url;
+      try {
+        url = new URL(value);
+      } catch {
+        return Promise.reject(new Error("Base URL 不是合法的 URL"));
+      }
+      if (url.protocol !== "http:" && url.protocol !== "https:") {
+        return Promise.reject(new Error("Base URL 仅支持 http(s) 地址"));
+      }
+      return Promise.resolve();
+    },
+  },
+];
+
 // 后端直接返回以 slug 为 key 的 providers 原始结构；类型映射在 JS 侧完成。
 function toProviderList(providersByKey) {
   return Object.entries(providersByKey ?? {}).map(([slug, provider]) => ({
@@ -38,13 +57,35 @@ function toProviderList(providersByKey) {
   }));
 }
 
+// 新建/编辑共用的协议与端点字段（表单字段名一致：protocol、baseUrl）。
+function EndpointFields() {
+  return (
+    <>
+      <Form.Item
+        name="protocol"
+        label="协议"
+        rules={[{ required: true, message: "请选择协议" }]}
+      >
+        <Radio.Group className="protocol-radios" options={PROTOCOL_OPTIONS} />
+      </Form.Item>
+
+      <Form.Item name="baseUrl" label="Base URL" rules={BASE_URL_RULES}>
+        <Input placeholder="例如 http://localhost:11434/v1" />
+      </Form.Item>
+    </>
+  );
+}
+
 export default function ProvidersPage() {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
+  // 编辑中的 Provider：{ slug, protocol（当前单选的协议）, slots（各协议槽位的当前值） }
+  const [editing, setEditing] = useState(null);
   const [form] = Form.useForm();
+  const [editForm] = Form.useForm();
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -68,6 +109,31 @@ export default function ProvidersPage() {
 
   function cancelCreate() {
     setCreating(false);
+  }
+
+  function openEdit(provider) {
+    const slots = { ...provider.base_url };
+    // 默认选中已配置的协议；均未配置时回退到第一项
+    const configured = PROTOCOL_OPTIONS.find((option) => slots[option.value]);
+    const protocol = configured ? configured.value : PROTOCOL_OPTIONS[0].value;
+    setEditing({ slug: provider.slug, protocol, slots });
+  }
+
+  function cancelEdit() {
+    setEditing(null);
+  }
+
+  // Base URL 输入框绑定当前所选协议槽位：切换协议时换到对应槽位的值
+  function handleEditValuesChange(changed) {
+    if (changed.protocol !== undefined) {
+      editForm.setFieldValue("baseUrl", editing.slots[changed.protocol] ?? "");
+      setEditing((prev) => ({ ...prev, protocol: changed.protocol }));
+    } else if (changed.baseUrl !== undefined) {
+      setEditing((prev) => ({
+        ...prev,
+        slots: { ...prev.slots, [prev.protocol]: changed.baseUrl },
+      }));
+    }
   }
 
   // 命令成功即已落盘；用已知数据置顶插入，避免整表重载。重启后仍回 slug 序（version:1 无创建时间字段）。
@@ -95,6 +161,36 @@ export default function ProvidersPage() {
     }
   }
 
+  // 命令成功即已落盘；就地更新已知数据，避免整表重载。
+  async function handleUpdate(values) {
+    setSaving(true);
+    try {
+      await invoke("update_provider", {
+        slug: editing.slug,
+        protocol: values.protocol,
+        baseUrl: values.baseUrl,
+      });
+      setProviders((prev) =>
+        prev.map((provider) =>
+          provider.slug === editing.slug
+            ? {
+                ...provider,
+                base_url: {
+                  ...provider.base_url,
+                  [values.protocol]: values.baseUrl,
+                },
+              }
+            : provider,
+        ),
+      );
+      setEditing(null);
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (loadError) {
     return (
       <Alert
@@ -112,7 +208,7 @@ export default function ProvidersPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           Provider
         </Typography.Title>
-        <Button type="primary" disabled={creating || loading} onClick={openCreate}>
+        <Button type="primary" disabled={creating || !!editing || loading} onClick={openCreate}>
           新建
         </Button>
       </div>
@@ -160,45 +256,7 @@ export default function ProvidersPage() {
                   <Input placeholder="例如 ollama" />
                 </Form.Item>
 
-                <Form.Item
-                  name="protocol"
-                  label="协议"
-                  rules={[{ required: true, message: "请选择协议" }]}
-                >
-                  <Radio.Group
-                    className="protocol-radios"
-                    options={PROTOCOL_OPTIONS}
-                  />
-                </Form.Item>
-
-                <Form.Item
-                  name="baseUrl"
-                  label="Base URL"
-                  rules={[
-                    { required: true, message: "请输入 Base URL" },
-                    {
-                      validator: (_, value) => {
-                        if (!value) return Promise.resolve();
-                        let url;
-                        try {
-                          url = new URL(value);
-                        } catch {
-                          return Promise.reject(
-                            new Error("Base URL 不是合法的 URL"),
-                          );
-                        }
-                        if (url.protocol !== "http:" && url.protocol !== "https:") {
-                          return Promise.reject(
-                            new Error("Base URL 仅支持 http(s) 地址"),
-                          );
-                        }
-                        return Promise.resolve();
-                      },
-                    },
-                  ]}
-                >
-                  <Input placeholder="例如 http://localhost:11434/v1" />
-                </Form.Item>
+                <EndpointFields />
 
                 <div className="card-actions">
                   <Button disabled={saving} onClick={cancelCreate}>
@@ -212,16 +270,60 @@ export default function ProvidersPage() {
             </Card>
           )}
 
-          {providers.map((provider) => (
-            <Card key={provider.slug} title={provider.slug}>
-              <Form layout="vertical" disabled initialValues={provider}>
-                {Object.entries(provider.base_url ?? {}).map(([protocol]) => (
-                  <Form.Item
-                    key={protocol}
-                    name={["base_url", protocol]}
-                    label={protocol}
+          {editing && (
+            <Card title={`编辑 Provider：${editing.slug}`}>
+              <Form
+                form={editForm}
+                layout="vertical"
+                preserve={false}
+                initialValues={{
+                  protocol: editing.protocol,
+                  baseUrl: editing.slots[editing.protocol] ?? "",
+                }}
+                onValuesChange={handleEditValuesChange}
+                onFinish={handleUpdate}
+              >
+                <Form.Item label="Slug" extra="slug 创建后不可修改">
+                  <Input value={editing.slug} disabled />
+                </Form.Item>
+
+                <EndpointFields />
+
+                <div className="card-actions">
+                  <Button disabled={saving} onClick={cancelEdit}>
+                    取消
+                  </Button>
+                  <Button
+                    type="primary"
+                    loading={saving}
+                    onClick={() => editForm.submit()}
                   >
-                    <Input />
+                    保存
+                  </Button>
+                </div>
+              </Form>
+            </Card>
+          )}
+
+          {providers.map((provider) => (
+            <Card
+              key={provider.slug}
+              title={provider.slug}
+              extra={
+                <Button
+                  size="small"
+                  disabled={creating || !!editing || loading}
+                  onClick={() => openEdit(provider)}
+                >
+                  编辑
+                </Button>
+              }
+            >
+              {/* 只读展示用受控输入（非表单状态），数据变化即时反映 */}
+              <Form layout="vertical" disabled>
+                {Object.entries(provider.base_url ?? {}).map(([protocol, url]) => (
+                  <Form.Item key={protocol} label={protocol}>
+                    <Input disabled value={url} />
                   </Form.Item>
                 ))}
               </Form>

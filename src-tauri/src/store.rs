@@ -45,6 +45,8 @@ pub enum StoreError {
     Io { path: PathBuf, detail: String },
     /// 已存在同名 Provider。
     DuplicateSlug { slug: String },
+    /// Provider 不存在（update/delete 不做 upsert，绝不静默覆盖）。
+    MissingSlug { slug: String },
 }
 
 impl StoreError {
@@ -65,6 +67,7 @@ impl StoreError {
                 format!("读写配置文件失败：{}\n原因：{detail}", path.display())
             }
             StoreError::DuplicateSlug { slug } => format!("已存在同名 Provider：{slug}"),
+            StoreError::MissingSlug { slug } => format!("Provider 不存在：{slug}"),
         }
     }
 }
@@ -148,6 +151,27 @@ impl Store {
         Ok(())
     }
 
+    /// 更新指定协议槽位的端点；其余槽位、api_key 与模型保持不变。
+    /// slug 不存在时报错，不做 upsert。
+    pub fn update_provider(
+        &mut self,
+        slug: &str,
+        protocol: Protocol,
+        base_url: &str,
+    ) -> Result<(), StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        let mut next = config.clone();
+        let Some(target) = next.providers.get_mut(slug) else {
+            return Err(StoreError::MissingSlug {
+                slug: slug.to_owned(),
+            });
+        };
+        target.base_url.set(protocol, base_url);
+        self.persist(&next)?;
+        self.state = Ok(next);
+        Ok(())
+    }
+
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
     fn persist(&self, config: &Config) -> Result<(), StoreError> {
         let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
@@ -182,6 +206,9 @@ mod tests {
         assert!(err.message().contains("无法确定用户主目录"));
         assert!(store
             .create_provider("foo", Protocol::OpenaiCompletions, "http://localhost:9")
+            .is_err());
+        assert!(store
+            .update_provider("foo", Protocol::OpenaiCompletions, "http://localhost:9")
             .is_err());
     }
 
@@ -268,6 +295,106 @@ mod tests {
         assert_eq!(provider.base_url.anthropic_messages, None);
         assert_eq!(provider.api_key, "");
         assert!(provider.models.is_empty());
+    }
+
+    #[test]
+    fn update_provider_persists_and_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+        store
+            .create_provider(
+                "ollama",
+                Protocol::OpenaiCompletions,
+                "http://localhost:11434/v1",
+            )
+            .unwrap();
+
+        store
+            .update_provider(
+                "ollama",
+                Protocol::OpenaiCompletions,
+                "https://api.example.com/v1",
+            )
+            .unwrap();
+
+        let reopened = Store::open(path);
+        let provider = &reopened.get().unwrap().providers["ollama"];
+        assert_eq!(
+            provider.base_url.openai_completions,
+            Some("https://api.example.com/v1".to_owned())
+        );
+        assert_eq!(provider.base_url.anthropic_messages, None);
+        assert_eq!(provider.api_key, "");
+        assert!(provider.models.is_empty());
+    }
+
+    #[test]
+    fn update_provider_preserves_other_slots_api_key_and_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "providers": {
+                    "openrouter": {
+                        "base_url": {
+                            "openai-completions": "https://api.example.com/v1",
+                            "anthropic-messages": "https://anthropic.example.com/v1"
+                        },
+                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key",
+                        "models": [
+                            { "id": "z-model", "display_name": null },
+                            { "id": "a-model", "display_name": "A Model" }
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut store = Store::open(path.clone());
+
+        store
+            .update_provider(
+                "openrouter",
+                Protocol::OpenaiCompletions,
+                "https://gateway.example.com/v1",
+            )
+            .unwrap();
+
+        let reopened = Store::open(path);
+        let openrouter = &reopened.get().unwrap().providers["openrouter"];
+        assert_eq!(
+            openrouter.base_url.openai_completions,
+            Some("https://gateway.example.com/v1".to_owned())
+        );
+        assert_eq!(
+            openrouter.base_url.anthropic_messages,
+            Some("https://anthropic.example.com/v1".to_owned())
+        );
+        assert_eq!(
+            openrouter.api_key,
+            "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key"
+        );
+        assert_eq!(openrouter.models.len(), 2);
+        assert_eq!(openrouter.models[0].id, "z-model");
+        assert_eq!(openrouter.models[1].id, "a-model");
+    }
+
+    #[test]
+    fn update_provider_missing_slug_is_rejected_without_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+
+        let err = store
+            .update_provider("ghost", Protocol::OpenaiCompletions, "http://localhost:9")
+            .unwrap_err();
+        assert!(matches!(err, StoreError::MissingSlug { .. }));
+        assert!(err.message().contains("ghost"));
+        assert!(store.get().unwrap().providers.is_empty());
+        assert!(!path.exists(), "报错路径不得静默写入文件");
     }
 
     #[test]

@@ -37,14 +37,19 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
+    /// 设置指定协议槽位的端点（未选择的槽位不受影响）。
+    pub fn set(&mut self, protocol: Protocol, base_url: &str) {
+        let url = Some(base_url.to_owned());
+        match protocol {
+            Protocol::OpenaiCompletions => self.openai_completions = url,
+            Protocol::AnthropicMessages => self.anthropic_messages = url,
+        }
+    }
+
     /// 构造仅配置单个协议端点的端点集。
     pub fn for_protocol(protocol: Protocol, base_url: &str) -> Self {
         let mut endpoints = Self::default();
-        let url = Some(base_url.to_owned());
-        match protocol {
-            Protocol::OpenaiCompletions => endpoints.openai_completions = url,
-            Protocol::AnthropicMessages => endpoints.anthropic_messages = url,
-        }
+        endpoints.set(protocol, base_url);
         endpoints
     }
 }
