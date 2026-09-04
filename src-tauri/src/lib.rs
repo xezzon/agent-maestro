@@ -1,23 +1,36 @@
+mod keychain;
 mod provider;
 mod store;
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use keychain::FakeKeychain;
 use provider::{Protocol, Provider};
 use store::{Store, StoreError};
 use tauri::{Manager, State};
 
-/// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
-struct AppStore(Mutex<Store>);
+/// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）与密钥链（本票为内存 fake，真实实现见后续票）。
+struct AppStore {
+    store: Mutex<Store>,
+    keychain: Mutex<FakeKeychain>,
+}
 
-fn lock<'a>(store: &'a State<'a, AppStore>) -> Result<std::sync::MutexGuard<'a, Store>, String> {
-    store.0.lock().map_err(|_| "配置存储不可用".to_owned())
+fn lock_store<'a>(
+    app: &'a State<'a, AppStore>,
+) -> Result<std::sync::MutexGuard<'a, Store>, String> {
+    app.store.lock().map_err(|_| "配置存储不可用".to_owned())
+}
+
+fn lock_keychain<'a>(
+    app: &'a State<'a, AppStore>,
+) -> Result<std::sync::MutexGuard<'a, FakeKeychain>, String> {
+    app.keychain.lock().map_err(|_| "密钥链不可用".to_owned())
 }
 
 #[tauri::command]
 fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provider>, String> {
-    let guard = lock(&store)?;
+    let guard = lock_store(&store)?;
     let config = guard.get().map_err(StoreError::message)?;
     Ok(config.providers.clone())
 }
@@ -29,9 +42,31 @@ fn create_provider(
     protocol: Protocol,
     base_url: String,
 ) -> Result<(), String> {
-    let mut guard = lock(&store)?;
+    let mut guard = lock_store(&store)?;
     guard
         .create_provider(&slug, protocol, &base_url)
+        .map_err(|e| e.message())
+}
+
+#[tauri::command]
+fn update_provider(
+    store: State<'_, AppStore>,
+    slug: String,
+    protocol: Protocol,
+    base_url: String,
+) -> Result<(), String> {
+    let mut guard = lock_store(&store)?;
+    guard
+        .update_provider(&slug, protocol, &base_url)
+        .map_err(|e| e.message())
+}
+
+#[tauri::command]
+fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<Vec<String>, String> {
+    let mut store_guard = lock_store(&store)?;
+    let mut keychain_guard = lock_keychain(&store)?;
+    store_guard
+        .delete_provider(&slug, &mut *keychain_guard)
         .map_err(|e| e.message())
 }
 
@@ -55,10 +90,18 @@ pub fn run() {
                 Ok(path) => Store::open(path),
                 Err(detail) => Store::unavailable(detail),
             };
-            app.manage(AppStore(Mutex::new(store)));
+            app.manage(AppStore {
+                store: Mutex::new(store),
+                keychain: Mutex::new(FakeKeychain::default()),
+            });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_providers, create_provider])
+        .invoke_handler(tauri::generate_handler![
+            list_providers,
+            create_provider,
+            update_provider,
+            delete_provider
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
