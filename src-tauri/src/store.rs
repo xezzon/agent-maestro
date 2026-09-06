@@ -880,4 +880,146 @@ mod tests {
 
         assert!(path.exists());
     }
+
+    #[test]
+    fn provider_with_models_round_trips_through_disk_order_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+        let models = vec![
+            ModelEntry {
+                id: "accounts/fireworks/models/llama3.1".to_owned(),
+                display_name: Option::None,
+            },
+            ModelEntry {
+                id: "Z-model".to_owned(),
+                display_name: Option::Some("Z Model".to_owned()),
+            },
+            ModelEntry {
+                id: "gpt-4o".to_owned(),
+                display_name: Option::None,
+            },
+        ];
+
+        store
+            .create_provider(
+                "openrouter",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: None,
+                    models: models.clone(),
+                },
+            )
+            .unwrap();
+
+        let reopened = Store::open(path);
+        let provider = &reopened.get().unwrap().providers["openrouter"];
+        assert_eq!(
+            provider.models, models,
+            "含模型的 Provider 保存/加载往返一致、保序，display_name 允许为 null"
+        );
+    }
+
+    #[test]
+    fn same_model_id_can_exist_in_different_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+        let gpt_4o = || ModelEntry {
+            id: "gpt-4o".to_owned(),
+            display_name: Option::None,
+        };
+
+        store
+            .create_provider(
+                "openai",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://api.openai.com/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: None,
+                    models: vec![gpt_4o()],
+                },
+            )
+            .unwrap();
+        store
+            .create_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://127.0.0.1:8080/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: None,
+                    models: vec![
+                        gpt_4o(),
+                        ModelEntry {
+                            id: "gpt-4o-mini".to_owned(),
+                            display_name: Option::None,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+
+        let reopened = Store::open(path);
+        let config = reopened.get().unwrap();
+        assert_eq!(config.providers["openai"].models, vec![gpt_4o()]);
+        assert_eq!(
+            config.providers["gateway"].models,
+            vec![
+                gpt_4o(),
+                ModelEntry {
+                    id: "gpt-4o-mini".to_owned(),
+                    display_name: Option::None,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn store_does_not_validate_model_ids() {
+        // 业务校验（非空、Provider 内唯一）由前端内联完成；存储层原样保存，不拦不补。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+
+        store
+            .create_provider(
+                "foo",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: None,
+                    models: vec![
+                        ModelEntry {
+                            id: "gpt-4o".to_owned(),
+                            display_name: Option::None,
+                        },
+                        ModelEntry {
+                            id: "GPT-4O".to_owned(),
+                            display_name: Option::None,
+                        },
+                        ModelEntry {
+                            id: String::new(),
+                            display_name: Option::None,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+
+        let reopened = Store::open(path);
+        let models = &reopened.get().unwrap().providers["foo"].models;
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "gpt-4o");
+        assert_eq!(models[1].id, "GPT-4O", "大小写敏感：大小写变体可并存");
+        assert_eq!(models[2].id, "", "空 ID 同样不被存储层拦截");
+    }
 }

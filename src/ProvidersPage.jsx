@@ -84,6 +84,18 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
       </span>
       <span>模型数：{provider.models?.length ?? 0}</span>
     </div>
+    {(provider.models?.length ?? 0) > 0 && (
+      <ul className="provider-models">
+        {provider.models.map((model, index) => (
+          <li key={`${model.id}-${index}`}>
+            <Typography.Text>{model.display_name || model.id}</Typography.Text>
+            {model.display_name ? (
+              <Typography.Text type="secondary">{model.id}</Typography.Text>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    )}
     <div className="card-actions">
       <Button disabled={deleting} onClick={onEdit}>
         编辑
@@ -112,6 +124,16 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
  */
 function ProviderForm({ provider, providers, onFinish }) {
   const SLUG_PATTERN = /^[a-z][a-z0-9-_]*$/;
+  const PROTOCOL_OPTIONS = [
+    {
+      value: OPENAI_COMPLTIONS,
+      label: "openai-completions（OpenAI 兼容 Chat Completions）",
+    },
+    {
+      value: ANTHROPIC_MESSAGES,
+      label: "anthropic-messages（Anthropic Messages API）",
+    },
+  ];
   const BASE_URL_RULES = [
     { required: true, message: "请输入 Base URL" },
     {
@@ -130,14 +152,22 @@ function ProviderForm({ provider, providers, onFinish }) {
       },
     },
   ];
-  const PROTOCOL_OPTIONS = [
+  // 模型 ID 非空（空白串视为空）且同一 Provider 内唯一（大小写敏感）；
+  // 唯一性校验依赖当前表单内全部模型行的实时值。
+  const MODEL_ID_RULES = [
     {
-      value: OPENAI_COMPLTIONS,
-      label: "openai-completions（OpenAI 兼容 Chat Completions）",
-    },
-    {
-      value: ANTHROPIC_MESSAGES,
-      label: "anthropic-messages（Anthropic Messages API）",
+      validator: (_, value) => {
+        const id = value ?? "";
+        if (!id.trim()) {
+          return Promise.reject(new Error("请输入模型 ID"));
+        }
+        const occurrences = (form.getFieldValue("models") ?? []).filter(
+          (model) => model?.id === value,
+        ).length;
+        return occurrences > 1
+          ? Promise.reject(new Error(`模型 ID「${value}」在当前 Provider 内重复`))
+          : Promise.resolve();
+      },
     },
   ];
 
@@ -145,33 +175,21 @@ function ProviderForm({ provider, providers, onFinish }) {
   const [saving, setSaving] = useState(false);
 
   function handleSubmit() {
-    const submit = provider.slug ? handleUpdate : handleSave;
-    submit();
+    submitWith(provider.slug ? updateProvider : createProvider);
   }
 
-  // 命令成功即已落盘；用已知数据置顶插入，避免整表重载。重启后仍回 slug 序（version:1 无创建时间字段）。
-  async function handleSave() {
+  // 命令成功即已落盘，由父组件刷新列表。
+  async function submitWith(apiFn) {
     setSaving(true);
     try {
       await form.validateFields()
-        .then(createProvider)
+        .then(apiFn)
         .then(() => onFinish(true));
     } catch (err) {
-      message.error(String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // 命令成功即已落盘；就地更新已知数据，避免整表重载。
-  async function handleUpdate() {
-    setSaving(true);
-    try {
-      await form.validateFields()
-        .then(updateProvider)
-        .then(() => onFinish(true));
-    } catch (err) {
-      message.error(String(err));
+      // 校验失败已内联展示，无需重复报错；其余为命令调用失败。
+      if (!err?.errorFields) {
+        message.error(String(err));
+      }
     } finally {
       setSaving(false);
     }
@@ -180,7 +198,6 @@ function ProviderForm({ provider, providers, onFinish }) {
   return <Form
     form={form}
     layout="vertical"
-    preserve={false}
     initialValues={provider}
     onFinish={handleSubmit}
   >
@@ -218,6 +235,38 @@ function ProviderForm({ provider, providers, onFinish }) {
 
     <Form.Item name="base_url" label="Base URL" rules={BASE_URL_RULES}>
       <Input placeholder="例如 http://localhost:11434/v1" />
+    </Form.Item>
+
+    <Form.Item label="模型">
+      <Form.List name="models">
+        {(fields, { add, remove }) => (
+          <div className="model-rows">
+            {fields.map((field) => (
+              <Flex key={field.key} align="flex-start" gap={8} className="model-row">
+                <Form.Item
+                  name={[field.name, "id"]}
+                  rules={MODEL_ID_RULES}
+                  className="model-field"
+                >
+                  <Input placeholder="模型 ID，例如 gpt-4o" />
+                </Form.Item>
+                <Form.Item
+                  name={[field.name, "display_name"]}
+                  className="model-field"
+                >
+                  <Input placeholder="显示名（可选，留空回退显示模型 ID）" />
+                </Form.Item>
+                <Button disabled={saving} onClick={() => remove(field.name)}>
+                  删除
+                </Button>
+              </Flex>
+            ))}
+            <Button type="dashed" block disabled={saving} onClick={() => add()}>
+              添加模型
+            </Button>
+          </div>
+        )}
+      </Form.List>
     </Form.Item>
 
     <div className="card-actions">
@@ -300,7 +349,7 @@ export default function ProvidersPage() {
             creating && (
               <Card title="新建 Provider">
                 <ProviderForm
-                  provider={{ slug: "", protocol: null, base_url: "" }}
+                  provider={{ slug: "", protocol: null, base_url: "", models: [] }}
                   providers={providers}
                   onFinish={(refresh) => {
                     setCreating(false);
@@ -313,7 +362,7 @@ export default function ProvidersPage() {
             )
           }
           {providers.map((provider) =>
-            <ProviderCard provider={provider} onReload={reload} />
+            <ProviderCard key={provider.slug} provider={provider} onReload={reload} />
           )}
         </Flex>
       )}
