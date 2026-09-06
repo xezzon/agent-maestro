@@ -27,5 +27,5 @@ _避免_：model id（当指条目本身、而非 ID 字符串时）
 _避免_：token、credential（当作 Provider 的专有概念时）
 
 **密钥引用（secret reference）**：
-标识系统密钥链中某条密钥的 URI，形如 `secret://io.github.xezzon.agent-maestro/provider/<id>/api_key`。它代替密钥本身出现在配置中，使配置文件不包含任何秘密；值为空串则表示该 Provider 未设置凭证。
+标识系统密钥链中某条密钥的 URI，形如 `secret://io.github.xezzon.agent-maestro/provider/<slug>/api_key`。它代替密钥本身出现在配置中，使配置文件不包含任何秘密；配置里 `api_key` 为 null（键缺省）即表示该 Provider 未设置凭证。
 _避免_：密钥占位符、secret url

@@ -1,30 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-/// 读取侧兼容：显式空串与键缺失同样视为未配置（ADR 0003）。
-fn empty_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<String>::deserialize(deserializer)?.filter(|url| !url.is_empty()))
-}
-
 /// Provider 在各协议下的端点（每协议至多一个；见 ADR 0003）。
 ///
-/// `None` 即未配置；序列化时跳过（键缺省而非空串），读取时键缺失与显式空串同样视为未配置。
+/// `None` 即未配置；序列化时跳过（键缺省而非空串），键缺失同样读作 `None`。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Endpoints {
-    #[serde(
-        default,
-        deserialize_with = "empty_as_none",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_completions: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "empty_as_none",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_messages: Option<String>,
 }
 
@@ -43,9 +27,10 @@ pub struct ModelEntry {
 pub struct Provider {
     #[serde(default)]
     pub base_url: Endpoints,
-    /// 空串表示未设置凭证；否则为系统密钥链的 `secret://` 引用（见 ADR 0002）。
-    #[serde(default)]
-    pub api_key: String,
+    /// `None` 表示未设置凭证；`Some` 为系统密钥链的 `secret://` 引用（见 ADR 0002）。
+    /// 序列化时跳过 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     /// 保序数组：模型 ID 不做字符集限制，且同一 Provider 内不重复（大小写敏感）。
     #[serde(default)]
     pub models: Vec<ModelEntry>,
@@ -56,21 +41,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoints_read_tolerates_explicit_empty_slots() {
-        let parsed: Endpoints =
-            serde_json::from_str(r#"{"openai-completions":"","anthropic-messages":""}"#).unwrap();
-
-        assert_eq!(parsed, Endpoints::default());
-    }
-
-    #[test]
-    fn endpoints_renormalize_explicit_empty_slots_on_round_trip() {
+    fn endpoints_round_trip_explicit_empty_slots_verbatim() {
         let parsed: Endpoints = serde_json::from_str(r#"{"openai-completions":""}"#).unwrap();
 
-        assert_eq!(parsed.openai_completions, None);
+        assert_eq!(parsed.openai_completions, Some(String::new()));
         assert_eq!(
             serde_json::to_value(&parsed).unwrap(),
-            serde_json::json!({})
+            serde_json::json!({"openai-completions": ""})
         );
     }
 
@@ -85,7 +62,7 @@ mod tests {
             Some("http://127.0.0.1:8080".to_owned())
         );
         assert_eq!(parsed.base_url.openai_completions, None);
-        assert_eq!(parsed.api_key, "");
+        assert_eq!(parsed.api_key, None);
         assert!(parsed.models.is_empty());
     }
 
@@ -133,8 +110,9 @@ mod tests {
                 openai_completions: Some("https://api.example.com/v1".to_owned()),
                 anthropic_messages: Some("https://anthropic.example.com/v1".to_owned()),
             },
-            api_key: "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key"
-                .to_owned(),
+            api_key: Some(
+                "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key".to_owned(),
+            ),
             models: vec![ModelEntry {
                 id: "gpt-4o".to_owned(),
                 display_name: Some("GPT-4o".to_owned()),
@@ -145,5 +123,14 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&provider).unwrap()).unwrap();
 
         assert_eq!(parsed, provider);
+    }
+
+    #[test]
+    fn api_key_null_reads_as_unset_and_is_omitted() {
+        let parsed: Provider = serde_json::from_str(r#"{"api_key":null}"#).unwrap();
+        assert_eq!(parsed.api_key, None);
+
+        let text = serde_json::to_string(&parsed).unwrap();
+        assert!(!text.contains("api_key"), "未设置的 api_key 不得写入文件");
     }
 }

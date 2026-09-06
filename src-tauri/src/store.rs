@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::keychain::Keychain;
 use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 
@@ -141,7 +140,8 @@ impl Store {
         Ok(())
     }
 
-    /// 更新指定协议槽位的端点；其余槽位、api_key 与模型保持不变。
+    /// 整包替换指定 Provider 的端点与模型列表；api_key 一律保持原值不变
+    /// （凭证的三态更新契约见 ADR 0002，不经本方法实现）。
     /// slug 不存在时报错，不做 upsert。
     pub fn update_provider(&mut self, slug: &str, provider: Provider) -> Result<(), StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
@@ -161,15 +161,11 @@ impl Store {
         Ok(())
     }
 
-    /// 删除 Provider（其模型数据随记录一并移除），并按其密钥引用清除密钥链条目。
+    /// 删除 Provider（其模型数据随记录一并移除），并返回删除前的密钥引用，交由上层清除。
     ///
-    /// 未设置密钥（引用为空）时不触碰密钥链；引用存在时清除失败不阻塞删除：
-    /// 记录仍被删除并落盘，失败降级为返回值中的警告。
-    pub fn delete_provider(
-        &mut self,
-        slug: &str,
-        keychain: &mut dyn Keychain,
-    ) -> Result<Vec<String>, StoreError> {
+    /// 本方法不触碰密钥链：返回值中 `Some` 为需要清除的密钥引用，`None` 表示未设置
+    /// 凭证、无需清除；密钥链清除失败不得阻塞删除，由上层降级为警告（见命令层）。
+    pub fn delete_provider(&mut self, slug: &str) -> Result<Vec<Option<String>>, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         let mut next = config.clone();
         let Some(provider) = next.providers.get(slug) else {
@@ -177,21 +173,14 @@ impl Store {
                 slug: slug.to_owned(),
             });
         };
-        let secret_reference = provider.api_key.clone();
+
+        let secret_references = vec![provider.api_key.clone()];
+
         next.providers.remove(slug);
         self.persist(&next)?;
         self.state = Ok(next);
 
-        let mut warnings = Vec::new();
-        if !secret_reference.is_empty() {
-            if let Err(e) = keychain.clear(&secret_reference) {
-                warnings.push(format!(
-                    "已删除 Provider「{slug}」，但其密钥链条目清除失败：{}。该条目可能残留于系统密钥链。",
-                    e.detail()
-                ));
-            }
-        }
-        Ok(warnings)
+        Ok(secret_references)
     }
 
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
@@ -219,13 +208,11 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keychain::FakeKeychain;
-    use crate::provider::Endpoints;
+    use crate::provider::{Endpoints, ModelEntry};
 
     #[test]
     fn unavailable_store_refuses_reads_and_writes() {
         let mut store = Store::unavailable("无法确定用户主目录（HOME）".to_owned());
-        let mut keychain = FakeKeychain::default();
 
         let err = store.get().unwrap_err();
         assert!(err.message().contains("无法确定用户主目录"));
@@ -237,7 +224,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 }
             )
@@ -250,12 +237,12 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 }
             )
             .is_err());
-        assert!(store.delete_provider("foo", &mut keychain).is_err());
+        assert!(store.delete_provider("foo").is_err());
     }
 
     #[test]
@@ -276,10 +263,8 @@ mod tests {
             "providers": {
                 "ollama": {
                     "base_url": {
-                        "openai-completions": "http://localhost:11434/v1",
-                        "anthropic-messages": ""
+                        "openai-completions": "http://localhost:11434/v1"
                     },
-                    "api_key": "",
                     "models": [
                         { "id": "deepseek-chat", "display_name": "DeepSeek Chat" },
                         { "id": "deepseek-reasoner", "display_name": null }
@@ -296,7 +281,7 @@ mod tests {
             Some("http://localhost:11434/v1".to_owned())
         );
         assert_eq!(provider.base_url.anthropic_messages, None);
-        assert_eq!(provider.api_key, "");
+        assert_eq!(provider.api_key, None);
         assert_eq!(provider.models.len(), 2);
         assert_eq!(provider.models[0].id, "deepseek-chat");
         assert_eq!(
@@ -332,7 +317,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -345,7 +330,7 @@ mod tests {
             Some("http://localhost:11434/v1".to_owned())
         );
         assert_eq!(provider.base_url.anthropic_messages, None);
-        assert_eq!(provider.api_key, "");
+        assert_eq!(provider.api_key, None);
         assert!(provider.models.is_empty());
     }
 
@@ -362,7 +347,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -376,7 +361,7 @@ mod tests {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -389,7 +374,7 @@ mod tests {
             Some("https://api.example.com/v1".to_owned())
         );
         assert_eq!(provider.base_url.anthropic_messages, None);
-        assert_eq!(provider.api_key, "");
+        assert_eq!(provider.api_key, None);
         assert!(provider.models.is_empty());
     }
 
@@ -407,7 +392,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -419,7 +404,72 @@ mod tests {
     }
 
     #[test]
-    fn delete_provider_removes_record_and_clears_keychain_entry() {
+    fn update_provider_keeps_api_key_and_replaces_endpoints_and_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+        let reference = "secret://io.github.xezzon.agent-maestro/provider/ollama/api_key";
+        store
+            .create_provider(
+                "ollama",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: Option::Some(reference.to_owned()),
+                    models: vec![ModelEntry {
+                        id: "old-model".to_owned(),
+                        display_name: Option::None,
+                    }],
+                },
+            )
+            .unwrap();
+
+        store
+            .update_provider(
+                "ollama",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
+                        anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
+                    },
+                    api_key: Option::Some(
+                        "secret://io.github.xezzon.agent-maestro/provider/other/api_key".to_owned(),
+                    ),
+                    models: vec![ModelEntry {
+                        id: "new-model".to_owned(),
+                        display_name: Option::None,
+                    }],
+                },
+            )
+            .unwrap();
+
+        let provider = &store.get().unwrap().providers["ollama"];
+        assert_eq!(
+            provider.api_key.as_deref(),
+            Some(reference),
+            "api_key 不经 update_provider 变更，请求中携带的密钥负载被忽略"
+        );
+        assert_eq!(
+            provider.base_url.openai_completions.as_deref(),
+            Some("https://api.example.com/v1")
+        );
+        assert_eq!(
+            provider.base_url.anthropic_messages.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].id, "new-model", "模型列表整包替换");
+
+        let reopened = Store::open(path);
+        let provider = &reopened.get().unwrap().providers["ollama"];
+        assert_eq!(provider.api_key.as_deref(), Some(reference));
+        assert_eq!(provider.models[0].id, "new-model");
+    }
+
+    #[test]
+    fn delete_provider_returns_secret_reference_and_removes_record() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         fs::write(
@@ -442,53 +492,48 @@ mod tests {
         )
         .unwrap();
         let mut store = Store::open(path.clone());
-        let reference = "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key";
-        let mut keychain = FakeKeychain::default();
-        keychain
-            .entries
-            .insert(reference.to_owned(), "sk-test".to_owned());
 
-        store.delete_provider("openrouter", &mut keychain).unwrap();
+        let secret_references = store.delete_provider("openrouter").unwrap();
 
+        assert_eq!(
+            secret_references,
+            vec![Some(
+                "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key".to_owned()
+            )],
+            "删除后必须原样返回密钥引用，供上层清除密钥链条目"
+        );
         let reopened = Store::open(path);
         assert!(reopened.get().unwrap().providers.is_empty());
-        assert!(
-            !keychain.entries.contains_key(reference),
-            "删除 Provider 后密钥链条目必须一并清除"
-        );
     }
 
     #[test]
-    fn delete_provider_succeeds_with_warning_when_keychain_clear_fails() {
+    fn delete_provider_without_api_key_returns_no_reference() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        fs::write(
-            &path,
-            r#"{
-                "version": 1,
-                "providers": {
-                    "ollama": {
-                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/ollama/api_key"
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
         let mut store = Store::open(path.clone());
-        let mut keychain = FakeKeychain {
-            fail_clear: true,
-            ..Default::default()
-        };
+        store
+            .create_provider(
+                "ollama",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: None,
+                    models: Vec::new(),
+                },
+            )
+            .unwrap();
 
-        let warnings = store.delete_provider("ollama", &mut keychain).unwrap();
+        let secret_references = store.delete_provider("ollama").unwrap();
 
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("ollama"));
-        let reopened = Store::open(path);
-        assert!(
-            reopened.get().unwrap().providers.is_empty(),
-            "密钥链清除失败时删除不得被阻塞"
+        assert_eq!(
+            secret_references,
+            vec![None],
+            "未设置凭证时返回 None，上层无需清除密钥链"
         );
+        let reopened = Store::open(path);
+        assert!(reopened.get().unwrap().providers.is_empty());
     }
 
     #[test]
@@ -496,9 +541,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut store = Store::open(path);
-        let mut keychain = FakeKeychain::default();
 
-        let err = store.delete_provider("ghost", &mut keychain).unwrap_err();
+        let err = store.delete_provider("ghost").unwrap_err();
 
         assert!(matches!(err, StoreError::MissingSlug { .. }));
         assert!(err.message().contains("ghost"));
@@ -509,7 +553,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut store = Store::open(path.clone());
-        let mut keychain = FakeKeychain::default();
         store
             .create_provider(
                 "ollama",
@@ -518,13 +561,13 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
             .unwrap();
 
-        store.delete_provider("ollama", &mut keychain).unwrap();
+        store.delete_provider("ollama").unwrap();
         store
             .create_provider(
                 "ollama",
@@ -533,7 +576,7 @@ mod tests {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -550,61 +593,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_provider_without_reference_never_touches_keychain() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut store = Store::open(path);
-        store
-            .create_provider(
-                "ollama",
-                Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
-                    api_key: "".to_owned(),
-                    models: Vec::new(),
-                },
-            )
-            .unwrap();
-        let mut keychain = FakeKeychain {
-            fail_clear: true,
-            ..Default::default()
-        };
-
-        let warnings = store.delete_provider("ollama", &mut keychain).unwrap();
-
-        assert!(
-            warnings.is_empty(),
-            "未设置密钥（引用为空）的 Provider 删除时不得触碰密钥链"
-        );
-    }
-
-    #[test]
-    fn delete_provider_with_reference_but_missing_entry_succeeds_without_warning() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        fs::write(
-            &path,
-            r#"{
-                "version": 1,
-                "providers": {
-                    "ollama": {
-                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/ollama/api_key"
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        let mut store = Store::open(path);
-        let mut keychain = FakeKeychain::default();
-
-        let warnings = store.delete_provider("ollama", &mut keychain).unwrap();
-
-        assert!(warnings.is_empty(), "清除不存在的条目同样成功（幂等）");
-    }
-
-    #[test]
     fn persisted_file_omits_unconfigured_protocol_slots() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -618,7 +606,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -647,7 +635,7 @@ mod tests {
                             openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                             anthropic_messages: Option::None,
                         },
-                        api_key: "".to_owned(),
+                        api_key: None,
                         models: Vec::new(),
                     },
                 )
@@ -675,7 +663,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -690,7 +678,7 @@ mod tests {
                             "https://anthropic.example.com/v1".to_owned(),
                         ),
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -743,7 +731,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -753,7 +741,7 @@ mod tests {
         let openrouter = &reopened.get().unwrap().providers["openrouter"];
         assert_eq!(
             openrouter.api_key,
-            "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key"
+            Some("secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key".to_owned())
         );
         assert_eq!(openrouter.models.len(), 2);
         assert_eq!(openrouter.models[0].id, "z-model");
@@ -789,7 +777,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 }
             )
@@ -818,7 +806,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 }
             )
@@ -840,7 +828,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -854,7 +842,7 @@ mod tests {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://localhost:10".to_owned()),
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )
@@ -884,7 +872,7 @@ mod tests {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
                     },
-                    api_key: "".to_owned(),
+                    api_key: None,
                     models: Vec::new(),
                 },
             )

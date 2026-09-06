@@ -1,13 +1,12 @@
+mod command;
 mod keychain;
 mod provider;
 mod store;
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
-
+use command::{create_provider, delete_provider, list_providers, update_provider};
 use keychain::FakeKeychain;
-use provider::Provider;
-use store::{Store, StoreError};
+use std::sync::Mutex;
+use store::Store;
 use tauri::{Manager, State};
 
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）与密钥链（本票为内存 fake，真实实现见后续票）。
@@ -26,46 +25,6 @@ fn lock_keychain<'a>(
     app: &'a State<'a, AppStore>,
 ) -> Result<std::sync::MutexGuard<'a, FakeKeychain>, String> {
     app.keychain.lock().map_err(|_| "密钥链不可用".to_owned())
-}
-
-#[tauri::command]
-fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provider>, String> {
-    let guard = lock_store(&store)?;
-    let config = guard.get().map_err(StoreError::message)?;
-    Ok(config.providers.clone())
-}
-
-#[tauri::command]
-fn create_provider(
-    store: State<'_, AppStore>,
-    slug: String,
-    provider: Provider
-) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
-    guard
-        .create_provider(&slug, provider)
-        .map_err(|e| e.message())
-}
-
-#[tauri::command]
-fn update_provider(
-    store: State<'_, AppStore>,
-    slug: String,
-    provider: Provider
-) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
-    guard
-        .update_provider(&slug, provider)
-        .map_err(|e| e.message())
-}
-
-#[tauri::command]
-fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<Vec<String>, String> {
-    let mut store_guard = lock_store(&store)?;
-    let mut keychain_guard = lock_keychain(&store)?;
-    store_guard
-        .delete_provider(&slug, &mut *keychain_guard)
-        .map_err(|e| e.message())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
