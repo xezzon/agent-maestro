@@ -213,7 +213,7 @@ export default function ProvidersPage() {
       <Alert
         type="error"
         showIcon
-        message="配置加载失败"
+        title="配置加载失败"
         description={<pre className="error-detail">{loadError}</pre>}
       />
     );

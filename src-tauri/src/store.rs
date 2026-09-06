@@ -491,8 +491,10 @@ mod tests {
         )
         .unwrap();
         let mut store = Store::open(path.clone());
-        let mut keychain = FakeKeychain::default();
-        keychain.fail_clear = true;
+        let mut keychain = FakeKeychain {
+            fail_clear: true,
+            ..Default::default()
+        };
 
         let warnings = store.delete_provider("ollama", &mut keychain).unwrap();
 
@@ -563,8 +565,10 @@ mod tests {
                 "http://localhost:11434/v1",
             )
             .unwrap();
-        let mut keychain = FakeKeychain::default();
-        keychain.fail_clear = true;
+        let mut keychain = FakeKeychain {
+            fail_clear: true,
+            ..Default::default()
+        };
 
         let warnings = store.delete_provider("ollama", &mut keychain).unwrap();
 
