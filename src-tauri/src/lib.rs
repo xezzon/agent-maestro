@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use keychain::FakeKeychain;
-use provider::{Protocol, Provider};
+use provider::Provider;
 use store::{Store, StoreError};
 use tauri::{Manager, State};
 
@@ -39,12 +39,11 @@ fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provide
 fn create_provider(
     store: State<'_, AppStore>,
     slug: String,
-    protocol: Protocol,
-    base_url: String,
+    provider: Provider
 ) -> Result<(), String> {
     let mut guard = lock_store(&store)?;
     guard
-        .create_provider(&slug, protocol, &base_url)
+        .create_provider(&slug, provider)
         .map_err(|e| e.message())
 }
 
@@ -52,12 +51,11 @@ fn create_provider(
 fn update_provider(
     store: State<'_, AppStore>,
     slug: String,
-    protocol: Protocol,
-    base_url: String,
+    provider: Provider
 ) -> Result<(), String> {
     let mut guard = lock_store(&store)?;
     guard
-        .update_provider(&slug, protocol, &base_url)
+        .update_provider(&slug, provider)
         .map_err(|e| e.message())
 }
 

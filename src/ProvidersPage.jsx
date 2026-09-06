@@ -15,7 +15,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { invoke } from "@tauri-apps/api/core";
+import { createProvider, deleteProvider, listProviders, updateProvider } from "./api/provider";
 
 const SLUG_PATTERN = /^[a-z][a-z0-9-_]*$/;
 
@@ -59,7 +59,7 @@ function toProviderList(providersByKey) {
   }));
 }
 
-// 新建/编辑共用的协议与端点字段（表单字段名一致：protocol、baseUrl）。
+// 新建/编辑共用的协议与端点字段（表单字段名一致：protocol、base_url）。
 function EndpointFields() {
   return (
     <>
@@ -71,7 +71,7 @@ function EndpointFields() {
         <Radio.Group className="protocol-radios" options={PROTOCOL_OPTIONS} />
       </Form.Item>
 
-      <Form.Item name="baseUrl" label="Base URL" rules={BASE_URL_RULES}>
+      <Form.Item name="base_url" label="Base URL" rules={BASE_URL_RULES}>
         <Input placeholder="例如 http://localhost:11434/v1" />
       </Form.Item>
     </>
@@ -93,7 +93,8 @@ export default function ProvidersPage() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      setProviders(toProviderList(await invoke("list_providers")));
+      const providers = await listProviders()
+      setProviders(providers);
       setLoadError(null);
     } catch (err) {
       setLoadError(String(err));
@@ -129,12 +130,12 @@ export default function ProvidersPage() {
   // Base URL 输入框绑定当前所选协议槽位：切换协议时换到对应槽位的值
   function handleEditValuesChange(changed) {
     if (changed.protocol !== undefined) {
-      editForm.setFieldValue("baseUrl", editing.slots[changed.protocol] ?? "");
+      editForm.setFieldValue("base_url", editing.slots[changed.protocol] ?? "");
       setEditing((prev) => ({ ...prev, protocol: changed.protocol }));
-    } else if (changed.baseUrl !== undefined) {
+    } else if (changed.base_url !== undefined) {
       setEditing((prev) => ({
         ...prev,
-        slots: { ...prev.slots, [prev.protocol]: changed.baseUrl },
+        slots: { ...prev.slots, [prev.protocol]: changed.base_url },
       }));
     }
   }
@@ -143,14 +144,10 @@ export default function ProvidersPage() {
   async function handleSave(values) {
     setSaving(true);
     try {
-      await invoke("create_provider", {
-        slug: values.slug,
-        protocol: values.protocol,
-        baseUrl: values.baseUrl,
-      });
+      await createProvider(values);
       const created = {
         [values.slug]: {
-          base_url: { [values.protocol]: values.baseUrl },
+          base_url: { [values.protocol]: values.base_url },
           api_key: "",
           models: [],
         },
@@ -168,11 +165,7 @@ export default function ProvidersPage() {
   async function handleUpdate(values) {
     setSaving(true);
     try {
-      await invoke("update_provider", {
-        slug: editing.slug,
-        protocol: values.protocol,
-        baseUrl: values.baseUrl,
-      });
+      await updateProvider(values);
       setProviders((prev) =>
         prev.map((provider) =>
           provider.slug === editing.slug
@@ -180,7 +173,7 @@ export default function ProvidersPage() {
                 ...provider,
                 base_url: {
                   ...provider.base_url,
-                  [values.protocol]: values.baseUrl,
+                  [values.protocol]: values.base_url,
                 },
               }
             : provider,
@@ -198,7 +191,7 @@ export default function ProvidersPage() {
   async function handleDelete(slug) {
     setDeleting(true);
     try {
-      const warnings = await invoke("delete_provider", { slug });
+      const warnings = await deleteProvider(slug);
       setProviders((prev) => prev.filter((provider) => provider.slug !== slug));
       (warnings ?? []).forEach((warning) => message.warning(warning));
     } catch (err) {
@@ -295,7 +288,7 @@ export default function ProvidersPage() {
                 preserve={false}
                 initialValues={{
                   protocol: editing.protocol,
-                  baseUrl: editing.slots[editing.protocol] ?? "",
+                  base_url: editing.slots[editing.protocol] ?? "",
                 }}
                 onValuesChange={handleEditValuesChange}
                 onFinish={handleUpdate}

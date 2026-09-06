@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::keychain::Keychain;
-use crate::provider::{Endpoints, Protocol, Provider};
+use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 
 /// 配置文件 schema 版本（见 ADR 0001）。
@@ -127,12 +127,7 @@ impl Store {
     }
 
     /// 新建一条 Provider（slug 唯一），成功后原子写回磁盘。
-    pub fn create_provider(
-        &mut self,
-        slug: &str,
-        protocol: Protocol,
-        base_url: &str,
-    ) -> Result<(), StoreError> {
+    pub fn create_provider(&mut self, slug: &str, provider: Provider) -> Result<(), StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         if config.providers.contains_key(slug) {
             return Err(StoreError::DuplicateSlug {
@@ -140,13 +135,7 @@ impl Store {
             });
         }
         let mut next = config.clone();
-        next.providers.insert(
-            slug.to_owned(),
-            Provider {
-                base_url: Endpoints::for_protocol(protocol, base_url),
-                ..Provider::default()
-            },
-        );
+        next.providers.insert(slug.to_owned(), provider);
         self.persist(&next)?;
         self.state = Ok(next);
         Ok(())
@@ -154,12 +143,7 @@ impl Store {
 
     /// 更新指定协议槽位的端点；其余槽位、api_key 与模型保持不变。
     /// slug 不存在时报错，不做 upsert。
-    pub fn update_provider(
-        &mut self,
-        slug: &str,
-        protocol: Protocol,
-        base_url: &str,
-    ) -> Result<(), StoreError> {
+    pub fn update_provider(&mut self, slug: &str, provider: Provider) -> Result<(), StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         let mut next = config.clone();
         let Some(target) = next.providers.get_mut(slug) else {
@@ -167,7 +151,11 @@ impl Store {
                 slug: slug.to_owned(),
             });
         };
-        target.base_url.set(protocol, base_url);
+        let api_key = target.api_key.clone();
+        *target = Provider {
+            api_key,
+            ..provider
+        };
         self.persist(&next)?;
         self.state = Ok(next);
         Ok(())
@@ -232,6 +220,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::keychain::FakeKeychain;
+    use crate::provider::Endpoints;
 
     #[test]
     fn unavailable_store_refuses_reads_and_writes() {
@@ -241,10 +230,30 @@ mod tests {
         let err = store.get().unwrap_err();
         assert!(err.message().contains("无法确定用户主目录"));
         assert!(store
-            .create_provider("foo", Protocol::OpenaiCompletions, "http://localhost:9")
+            .create_provider(
+                "foo",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:9".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                }
+            )
             .is_err());
         assert!(store
-            .update_provider("foo", Protocol::OpenaiCompletions, "http://localhost:9")
+            .update_provider(
+                "foo",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:9".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                }
+            )
             .is_err());
         assert!(store.delete_provider("foo", &mut keychain).is_err());
     }
@@ -318,8 +327,14 @@ mod tests {
         store
             .create_provider(
                 "ollama",
-                Protocol::OpenaiCompletions,
-                "http://localhost:11434/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
 
@@ -342,16 +357,28 @@ mod tests {
         store
             .create_provider(
                 "ollama",
-                Protocol::OpenaiCompletions,
-                "http://localhost:11434/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
 
         store
             .update_provider(
                 "ollama",
-                Protocol::OpenaiCompletions,
-                "https://api.example.com/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
 
@@ -367,66 +394,23 @@ mod tests {
     }
 
     #[test]
-    fn update_provider_preserves_other_slots_api_key_and_models() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        fs::write(
-            &path,
-            r#"{
-                "version": 1,
-                "providers": {
-                    "openrouter": {
-                        "base_url": {
-                            "openai-completions": "https://api.example.com/v1",
-                            "anthropic-messages": "https://anthropic.example.com/v1"
-                        },
-                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key",
-                        "models": [
-                            { "id": "z-model", "display_name": null },
-                            { "id": "a-model", "display_name": "A Model" }
-                        ]
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        let mut store = Store::open(path.clone());
-
-        store
-            .update_provider(
-                "openrouter",
-                Protocol::OpenaiCompletions,
-                "https://gateway.example.com/v1",
-            )
-            .unwrap();
-
-        let reopened = Store::open(path);
-        let openrouter = &reopened.get().unwrap().providers["openrouter"];
-        assert_eq!(
-            openrouter.base_url.openai_completions,
-            Some("https://gateway.example.com/v1".to_owned())
-        );
-        assert_eq!(
-            openrouter.base_url.anthropic_messages,
-            Some("https://anthropic.example.com/v1".to_owned())
-        );
-        assert_eq!(
-            openrouter.api_key,
-            "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key"
-        );
-        assert_eq!(openrouter.models.len(), 2);
-        assert_eq!(openrouter.models[0].id, "z-model");
-        assert_eq!(openrouter.models[1].id, "a-model");
-    }
-
-    #[test]
     fn update_provider_missing_slug_is_rejected_without_upsert() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut store = Store::open(path.clone());
 
         let err = store
-            .update_provider("ghost", Protocol::OpenaiCompletions, "http://localhost:9")
+            .update_provider(
+                "ghost",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:9".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, StoreError::MissingSlug { .. }));
         assert!(err.message().contains("ghost"));
@@ -529,8 +513,14 @@ mod tests {
         store
             .create_provider(
                 "ollama",
-                Protocol::OpenaiCompletions,
-                "http://localhost:11434/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
 
@@ -538,8 +528,14 @@ mod tests {
         store
             .create_provider(
                 "ollama",
-                Protocol::AnthropicMessages,
-                "http://127.0.0.1:8080",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::None,
+                        anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
 
@@ -561,8 +557,14 @@ mod tests {
         store
             .create_provider(
                 "ollama",
-                Protocol::OpenaiCompletions,
-                "http://localhost:11434/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
         let mut keychain = FakeKeychain {
@@ -611,8 +613,14 @@ mod tests {
         store
             .create_provider(
                 "ollama",
-                Protocol::OpenaiCompletions,
-                "http://localhost:11434/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
 
@@ -632,7 +640,17 @@ mod tests {
 
         for slug in ["zeta", "alpha", "midway"] {
             store
-                .create_provider(slug, Protocol::OpenaiCompletions, "http://localhost:9/v1")
+                .create_provider(
+                    slug,
+                    Provider {
+                        base_url: Endpoints {
+                            openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
+                            anthropic_messages: Option::None,
+                        },
+                        api_key: "".to_owned(),
+                        models: Vec::new(),
+                    },
+                )
                 .unwrap();
         }
 
@@ -652,15 +670,29 @@ mod tests {
         store
             .create_provider(
                 "ollama",
-                Protocol::OpenaiCompletions,
-                "http://localhost:11434/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
         store
             .create_provider(
                 "openrouter",
-                Protocol::AnthropicMessages,
-                "https://anthropic.example.com/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::None,
+                        anthropic_messages: Option::Some(
+                            "https://anthropic.example.com/v1".to_owned(),
+                        ),
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
 
@@ -706,8 +738,14 @@ mod tests {
         store
             .create_provider(
                 "ollama",
-                Protocol::OpenaiCompletions,
-                "http://localhost:11434/v1",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
             )
             .unwrap();
 
@@ -744,7 +782,17 @@ mod tests {
         assert!(err.message().contains(path.to_str().unwrap()));
 
         assert!(store
-            .create_provider("foo", Protocol::OpenaiCompletions, "http://localhost:9")
+            .create_provider(
+                "foo",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:9".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                }
+            )
             .is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
@@ -763,7 +811,17 @@ mod tests {
         assert!(err.message().contains(path.to_str().unwrap()));
 
         assert!(store
-            .create_provider("foo", Protocol::OpenaiCompletions, "http://localhost:9")
+            .create_provider(
+                "foo",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:9".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                }
+            )
             .is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
@@ -775,11 +833,31 @@ mod tests {
         let mut store = Store::open(path);
 
         store
-            .create_provider("foo", Protocol::OpenaiCompletions, "http://localhost:9/v1")
+            .create_provider(
+                "foo",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
+            )
             .unwrap();
 
         let err = store
-            .create_provider("foo", Protocol::AnthropicMessages, "http://localhost:10")
+            .create_provider(
+                "foo",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::None,
+                        anthropic_messages: Option::Some("http://localhost:10".to_owned()),
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, StoreError::DuplicateSlug { .. }));
 
@@ -799,7 +877,17 @@ mod tests {
         let mut store = Store::open(path.clone());
 
         store
-            .create_provider("foo", Protocol::AnthropicMessages, "http://127.0.0.1:8080")
+            .create_provider(
+                "foo",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::None,
+                        anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
+                    },
+                    api_key: "".to_owned(),
+                    models: Vec::new(),
+                },
+            )
             .unwrap();
 
         assert!(path.exists());

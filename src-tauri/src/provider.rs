@@ -1,13 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// Provider 与 LLM API 对话所用的线协议（见 ADR 0003）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Protocol {
-    OpenaiCompletions,
-    AnthropicMessages,
-}
-
 /// 读取侧兼容：显式空串与键缺失同样视为未配置（ADR 0003）。
 fn empty_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
@@ -36,24 +28,6 @@ pub struct Endpoints {
     pub anthropic_messages: Option<String>,
 }
 
-impl Endpoints {
-    /// 设置指定协议槽位的端点（未选择的槽位不受影响）。
-    pub fn set(&mut self, protocol: Protocol, base_url: &str) {
-        let url = Some(base_url.to_owned());
-        match protocol {
-            Protocol::OpenaiCompletions => self.openai_completions = url,
-            Protocol::AnthropicMessages => self.anthropic_messages = url,
-        }
-    }
-
-    /// 构造仅配置单个协议端点的端点集。
-    pub fn for_protocol(protocol: Protocol, base_url: &str) -> Self {
-        let mut endpoints = Self::default();
-        endpoints.set(protocol, base_url);
-        endpoints
-    }
-}
-
 /// Provider 下跨协议共享的一个模型条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelEntry {
@@ -80,45 +54,6 @@ pub struct Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn protocol_serializes_as_kebab_case() {
-        assert_eq!(
-            serde_json::to_value(Protocol::OpenaiCompletions).unwrap(),
-            "openai-completions"
-        );
-        assert_eq!(
-            serde_json::to_value(Protocol::AnthropicMessages).unwrap(),
-            "anthropic-messages"
-        );
-        let parsed: Protocol = serde_json::from_value("openai-completions".into()).unwrap();
-        assert_eq!(parsed, Protocol::OpenaiCompletions);
-    }
-
-    #[test]
-    fn endpoints_for_protocol_fills_only_the_chosen_slot() {
-        let endpoints =
-            Endpoints::for_protocol(Protocol::AnthropicMessages, "http://127.0.0.1:8080");
-
-        assert_eq!(
-            endpoints.anthropic_messages,
-            Some("http://127.0.0.1:8080".to_owned())
-        );
-        assert_eq!(endpoints.openai_completions, None);
-    }
-
-    #[test]
-    fn endpoints_serialization_omits_unconfigured_slots() {
-        let endpoints =
-            Endpoints::for_protocol(Protocol::OpenaiCompletions, "http://localhost:11434/v1");
-
-        let value = serde_json::to_value(&endpoints).unwrap();
-
-        assert_eq!(
-            value,
-            serde_json::json!({ "openai-completions": "http://localhost:11434/v1" })
-        );
-    }
 
     #[test]
     fn endpoints_read_tolerates_explicit_empty_slots() {
