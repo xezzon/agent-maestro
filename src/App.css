@@ -52,3 +52,29 @@
   flex-direction: column;
   gap: 8px;
 }
+
+.model-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-field {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.provider-models {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.provider-models li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
