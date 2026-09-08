@@ -8,7 +8,7 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 
 ## 功能
 
-- **统一管理 Provider 和模型**：集中维护模型 Provider、模型和 API Key，并投影到各 Agent 工具。API Key 保存在系统密钥链（macOS Keychain / Windows Credential Manager / Linux Secret Service）中，**仅存储在本地，不会上传到任何服务器**。
+- **统一管理 Provider 和模型**：集中维护模型 Provider、模型和 API Key，并投影到各 Agent 工具。API Key 保存在本地配置文件 `~/.maestro/config.json` 中，**仅存储在本地，不会上传到任何服务器**。
 - **统一管理 MCP 和 Skills**：遵循 [MCP 规范](https://modelcontextprotocol.io/) 和 [Agent Skills 规范](https://agentskills.io/specification)。MCP Server 和 Skills 定义一次即可在各工具间使用；支持多个 Profile——每个 Profile 是一组启用的 MCP 和 Skills 的命名集合，可绑定到不同的 Agent 工具（如「工作」「个人」「实验」）。
 - **配置跨设备同步**：在多台电脑之间同步 Maestro 的配置（规划中，第一期未实现）。
 

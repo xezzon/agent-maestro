@@ -27,10 +27,10 @@ pub struct ModelEntry {
 pub struct Provider {
     #[serde(default)]
     pub base_url: Endpoints,
-    /// `None` 表示未设置凭证；`Some` 为系统密钥链的 `secret://` 引用（见 ADR 0002）。
-    /// 序列化时跳过 `None`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    /// 凭证以明文随配置文件落盘：空串即未设置（第一期不做密钥链，
+    /// ADR 0002 已修订为推迟采纳）。
+    #[serde(default)]
+    pub api_key: String,
     /// 保序数组：模型 ID 不做字符集限制，且同一 Provider 内不重复（大小写敏感）。
     #[serde(default)]
     pub models: Vec<ModelEntry>,
@@ -62,7 +62,7 @@ mod tests {
             Some("http://127.0.0.1:8080".to_owned())
         );
         assert_eq!(parsed.base_url.openai_completions, None);
-        assert_eq!(parsed.api_key, None);
+        assert_eq!(parsed.api_key, "");
         assert!(parsed.models.is_empty());
     }
 
@@ -104,15 +104,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_round_trips_dual_endpoints_secret_reference_and_models() {
+    fn provider_round_trips_dual_endpoints_plaintext_api_key_and_models() {
         let provider = Provider {
             base_url: Endpoints {
                 openai_completions: Some("https://api.example.com/v1".to_owned()),
                 anthropic_messages: Some("https://anthropic.example.com/v1".to_owned()),
             },
-            api_key: Some(
-                "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key".to_owned(),
-            ),
+            api_key: "sk-test".to_owned(),
             models: vec![ModelEntry {
                 id: "gpt-4o".to_owned(),
                 display_name: Some("GPT-4o".to_owned()),
@@ -126,11 +124,14 @@ mod tests {
     }
 
     #[test]
-    fn api_key_null_reads_as_unset_and_is_omitted() {
-        let parsed: Provider = serde_json::from_str(r#"{"api_key":null}"#).unwrap();
-        assert_eq!(parsed.api_key, None);
+    fn unset_api_key_is_always_written_as_empty_string() {
+        let text = serde_json::to_string(&Provider::default()).unwrap();
 
-        let text = serde_json::to_string(&parsed).unwrap();
-        assert!(!text.contains("api_key"), "未设置的 api_key 不得写入文件");
+        assert!(
+            text.contains(r#""api_key":""#),
+            "api_key 恒为明文字符串，空串即未设置（见 #24 数据模型）"
+        );
+        let parsed: Provider = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.api_key, "");
     }
 }

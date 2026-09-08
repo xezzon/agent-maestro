@@ -140,47 +140,44 @@ impl Store {
         Ok(())
     }
 
-    /// 整包替换指定 Provider 的端点与模型列表；api_key 一律保持原值不变
-    /// （凭证的三态更新契约见 ADR 0002，不经本方法实现）。
+    /// 整包替换指定 Provider 的端点、模型列表与 API Key（明文）。
     /// slug 不存在时报错，不做 upsert。
-    pub fn update_provider(&mut self, slug: &str, provider: Provider) -> Result<(), StoreError> {
+    pub fn update_provider(
+        &mut self,
+        slug: &str,
+        provider: Provider,
+    ) -> Result<Provider, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         let mut next = config.clone();
-        let Some(target) = next.providers.get_mut(slug) else {
-            return Err(StoreError::MissingSlug {
+
+        match next.providers.get(slug).cloned() {
+            Some(original) => {
+                next.providers.insert(slug.to_owned(), provider);
+                self.persist(&next)?;
+                self.state = Ok(next);
+                Ok(original)
+            }
+            None => Err(StoreError::MissingSlug {
                 slug: slug.to_owned(),
-            });
-        };
-        let api_key = target.api_key.clone();
-        *target = Provider {
-            api_key,
-            ..provider
-        };
-        self.persist(&next)?;
-        self.state = Ok(next);
-        Ok(())
+            }),
+        }
     }
 
-    /// 删除 Provider（其模型数据随记录一并移除），并返回删除前的密钥引用，交由上层清除。
-    ///
-    /// 本方法不触碰密钥链：返回值中 `Some` 为需要清除的密钥引用，`None` 表示未设置
-    /// 凭证、无需清除；密钥链清除失败不得阻塞删除，由上层降级为警告（见命令层）。
-    pub fn delete_provider(&mut self, slug: &str) -> Result<Vec<Option<String>>, StoreError> {
+    /// 删除 Provider，其端点、模型与 API Key 随记录一并移除，不留孤儿数据。
+    pub fn delete_provider(&mut self, slug: &str) -> Result<Provider, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         let mut next = config.clone();
-        let Some(provider) = next.providers.get(slug) else {
-            return Err(StoreError::MissingSlug {
+
+        match next.providers.remove(slug) {
+            Some(original) => {
+                self.persist(&next)?;
+                self.state = Ok(next);
+                Ok(original)
+            }
+            None => Err(StoreError::MissingSlug {
                 slug: slug.to_owned(),
-            });
-        };
-
-        let secret_references = vec![provider.api_key.clone()];
-
-        next.providers.remove(slug);
-        self.persist(&next)?;
-        self.state = Ok(next);
-
-        Ok(secret_references)
+            }),
+        }
     }
 
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
@@ -224,7 +221,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 }
             )
@@ -237,7 +234,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 }
             )
@@ -281,7 +278,7 @@ mod tests {
             Some("http://localhost:11434/v1".to_owned())
         );
         assert_eq!(provider.base_url.anthropic_messages, None);
-        assert_eq!(provider.api_key, None);
+        assert_eq!(provider.api_key, "");
         assert_eq!(provider.models.len(), 2);
         assert_eq!(provider.models[0].id, "deepseek-chat");
         assert_eq!(
@@ -317,7 +314,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -330,7 +327,7 @@ mod tests {
             Some("http://localhost:11434/v1".to_owned())
         );
         assert_eq!(provider.base_url.anthropic_messages, None);
-        assert_eq!(provider.api_key, None);
+        assert_eq!(provider.api_key, "");
         assert!(provider.models.is_empty());
     }
 
@@ -347,7 +344,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -361,7 +358,7 @@ mod tests {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: "sk-test".to_owned(),
                     models: Vec::new(),
                 },
             )
@@ -374,7 +371,7 @@ mod tests {
             Some("https://api.example.com/v1".to_owned())
         );
         assert_eq!(provider.base_url.anthropic_messages, None);
-        assert_eq!(provider.api_key, None);
+        assert_eq!(provider.api_key, "sk-test");
         assert!(provider.models.is_empty());
     }
 
@@ -392,7 +389,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -404,11 +401,10 @@ mod tests {
     }
 
     #[test]
-    fn update_provider_keeps_api_key_and_replaces_endpoints_and_models() {
+    fn update_provider_replaces_api_key_with_whole_record() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut store = Store::open(path.clone());
-        let reference = "secret://io.github.xezzon.agent-maestro/provider/ollama/api_key";
         store
             .create_provider(
                 "ollama",
@@ -417,7 +413,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: Option::Some(reference.to_owned()),
+                    api_key: "sk-old".to_owned(),
                     models: vec![ModelEntry {
                         id: "old-model".to_owned(),
                         display_name: Option::None,
@@ -426,17 +422,16 @@ mod tests {
             )
             .unwrap();
 
+        // 整包替换：api_key 携带新值即覆盖为明文。
         store
             .update_provider(
                 "ollama",
                 Provider {
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
-                        anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
+                        anthropic_messages: Option::None,
                     },
-                    api_key: Option::Some(
-                        "secret://io.github.xezzon.agent-maestro/provider/other/api_key".to_owned(),
-                    ),
+                    api_key: "sk-new".to_owned(),
                     models: vec![ModelEntry {
                         id: "new-model".to_owned(),
                         display_name: Option::None,
@@ -444,32 +439,37 @@ mod tests {
                 },
             )
             .unwrap();
-
         let provider = &store.get().unwrap().providers["ollama"];
-        assert_eq!(
-            provider.api_key.as_deref(),
-            Some(reference),
-            "api_key 不经 update_provider 变更，请求中携带的密钥负载被忽略"
-        );
+        assert_eq!(provider.api_key, "sk-new", "api_key 随整包替换覆盖为明文");
         assert_eq!(
             provider.base_url.openai_completions.as_deref(),
-            Some("https://api.example.com/v1")
+            Some("https://api.example.com/v1"),
+            "端点整包替换"
         );
-        assert_eq!(
-            provider.base_url.anthropic_messages.as_deref(),
-            Some("http://127.0.0.1:8080")
-        );
-        assert_eq!(provider.models.len(), 1);
         assert_eq!(provider.models[0].id, "new-model", "模型列表整包替换");
 
+        // api_key 为空串即清除凭证。
+        store
+            .update_provider(
+                "ollama",
+                Provider {
+                    api_key: String::new(),
+                    ..provider.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store.get().unwrap().providers["ollama"].api_key,
+            "",
+            "api_key 为空串即清除凭证"
+        );
+
         let reopened = Store::open(path);
-        let provider = &reopened.get().unwrap().providers["ollama"];
-        assert_eq!(provider.api_key.as_deref(), Some(reference));
-        assert_eq!(provider.models[0].id, "new-model");
+        assert_eq!(reopened.get().unwrap().providers["ollama"].api_key, "");
     }
 
     #[test]
-    fn delete_provider_returns_secret_reference_and_removes_record() {
+    fn delete_provider_removes_record_with_models_and_api_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         fs::write(
@@ -481,7 +481,7 @@ mod tests {
                         "base_url": {
                             "openai-completions": "https://api.example.com/v1"
                         },
-                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key",
+                        "api_key": "sk-live",
                         "models": [
                             { "id": "z-model", "display_name": null },
                             { "id": "a-model", "display_name": "A Model" }
@@ -493,47 +493,13 @@ mod tests {
         .unwrap();
         let mut store = Store::open(path.clone());
 
-        let secret_references = store.delete_provider("openrouter").unwrap();
+        store.delete_provider("openrouter").unwrap();
 
-        assert_eq!(
-            secret_references,
-            vec![Some(
-                "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key".to_owned()
-            )],
-            "删除后必须原样返回密钥引用，供上层清除密钥链条目"
-        );
         let reopened = Store::open(path);
-        assert!(reopened.get().unwrap().providers.is_empty());
-    }
-
-    #[test]
-    fn delete_provider_without_api_key_returns_no_reference() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut store = Store::open(path.clone());
-        store
-            .create_provider(
-                "ollama",
-                Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
-                    api_key: None,
-                    models: Vec::new(),
-                },
-            )
-            .unwrap();
-
-        let secret_references = store.delete_provider("ollama").unwrap();
-
-        assert_eq!(
-            secret_references,
-            vec![None],
-            "未设置凭证时返回 None，上层无需清除密钥链"
+        assert!(
+            reopened.get().unwrap().providers.is_empty(),
+            "删除后不留孤儿数据：端点、模型与 API Key 随记录一并移除"
         );
-        let reopened = Store::open(path);
-        assert!(reopened.get().unwrap().providers.is_empty());
     }
 
     #[test]
@@ -561,7 +527,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -576,7 +542,7 @@ mod tests {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -606,7 +572,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -635,7 +601,7 @@ mod tests {
                             openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                             anthropic_messages: Option::None,
                         },
-                        api_key: None,
+                        api_key: String::new(),
                         models: Vec::new(),
                     },
                 )
@@ -663,7 +629,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -678,7 +644,7 @@ mod tests {
                             "https://anthropic.example.com/v1".to_owned(),
                         ),
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -711,7 +677,7 @@ mod tests {
                             "openai-completions": "https://api.example.com/v1",
                             "anthropic-messages": "https://anthropic.example.com/v1"
                         },
-                        "api_key": "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key",
+                        "api_key": "sk-live",
                         "models": [
                             { "id": "z-model", "display_name": null },
                             { "id": "a-model", "display_name": "A Model" }
@@ -731,7 +697,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -739,10 +705,7 @@ mod tests {
 
         let reopened = Store::open(path);
         let openrouter = &reopened.get().unwrap().providers["openrouter"];
-        assert_eq!(
-            openrouter.api_key,
-            Some("secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key".to_owned())
-        );
+        assert_eq!(openrouter.api_key, "sk-live");
         assert_eq!(openrouter.models.len(), 2);
         assert_eq!(openrouter.models[0].id, "z-model");
         assert_eq!(openrouter.models[1].id, "a-model");
@@ -777,7 +740,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 }
             )
@@ -806,7 +769,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 }
             )
@@ -828,7 +791,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -842,7 +805,7 @@ mod tests {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://localhost:10".to_owned()),
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -872,7 +835,7 @@ mod tests {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: Vec::new(),
                 },
             )
@@ -909,7 +872,7 @@ mod tests {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: models.clone(),
                 },
             )
@@ -941,7 +904,7 @@ mod tests {
                         openai_completions: Option::Some("https://api.openai.com/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: vec![gpt_4o()],
                 },
             )
@@ -954,7 +917,7 @@ mod tests {
                         openai_completions: Option::Some("http://127.0.0.1:8080/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: vec![
                         gpt_4o(),
                         ModelEntry {
@@ -996,7 +959,7 @@ mod tests {
                         openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: None,
+                    api_key: String::new(),
                     models: vec![
                         ModelEntry {
                             id: "gpt-4o".to_owned(),

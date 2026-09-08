@@ -21,8 +21,8 @@ const OPENAI_COMPLTIONS = "openai-completions";
 const ANTHROPIC_MESSAGES = "anthropic-messages";
 
 /**
- * @param {Object} param0 
- * @param {import("./api/provider").ProviderFormData} param0.provider
+ * @param {Object} param0
+ * @param {import("./api/provider").Provider} param0.provider
  * @param {() => void} param0.onReload
  */
 function ProviderCard({ provider, onReload }) {
@@ -50,21 +50,19 @@ function ProviderCard({ provider, onReload }) {
 }
 
 /**
- * @param {Object} param0 
- * @param {import("./api/provider").ProviderFormData} param0.provider
+ * @param {Object} param0
+ * @param {import("./api/provider").Provider} param0.provider
  * @param {() => void} param0.afterDelete
  * @param {() => void} param0.onEdit
  */
 function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
   const [deleting, setDeleting] = useState(false);
 
-  // 返回的 warnings 为「删除成功但密钥链清除失败」的降级提示。
   async function handleDelete() {
     setDeleting(true);
     try {
-      const warnings = await deleteProvider(provider.slug);
+      await deleteProvider(provider.slug);
       afterDelete();
-      (warnings ?? []).forEach((warning) => message.warning(warning));
     } catch (err) {
       message.error(String(err));
     } finally {
@@ -80,7 +78,7 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
     </Form>
     <div className="provider-meta">
       <span>
-        API Key <Tag>{provider.api_key ? "已设置" : "未设置"}</Tag>
+        API Key <Tag>{provider.api_key_set ? "已设置" : "未设置"}</Tag>
       </span>
       <span>模型数：{provider.models?.length ?? 0}</span>
     </div>
@@ -102,7 +100,7 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
       </Button>
       <Popconfirm
         title="删除 Provider"
-        description={`将同时清除「${provider.slug}」的模型与密钥链条目，确定删除？`}
+        description={`将同时删除「${provider.slug}」的模型与 API Key，确定删除？`}
         okText="删除"
         cancelText="取消"
         okButtonProps={{ danger: true }}
@@ -117,9 +115,9 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
 }
 
 /**
- * @param {Object} param0 
- * @param {import("./api/provider").ProviderFormData} param0.provider
- * @param {import("./api/provider").ProviderFormData[]} param0.providers 当前存在的 providers，用于检查 slug 冲突
+ * @param {Object} param0
+ * @param {import("./api/provider").Provider} param0.provider
+ * @param {import("./api/provider").Provider[]} param0.providers 当前存在的 providers，用于检查 slug 冲突
  * @param {(refresh: boolean) => void} param0.onFinish
  */
 function ProviderForm({ provider, providers, onFinish }) {
@@ -235,6 +233,18 @@ function ProviderForm({ provider, providers, onFinish }) {
 
     <Form.Item name="base_url" label="Base URL" rules={BASE_URL_RULES}>
       <Input placeholder="例如 http://localhost:11434/v1" />
+    </Form.Item>
+
+    <Form.Item
+      name="api_key"
+      label="API Key"
+      extra="可选；本地网关可留空。以明文保存在本地配置文件中"
+    >
+      <Input.Password
+        placeholder="留空则不设置"
+        autoComplete="new-password"
+        visibilityToggle={false}
+      />
     </Form.Item>
 
     <Form.Item label="模型">

@@ -23,9 +23,5 @@ _避免_：model id（当指条目本身、而非 ID 字符串时）
 ## 凭证
 
 **API Key（API 密钥）**：
-调用 Provider 的凭证，可有可无——本地网关（如 Ollama）无需凭证。设置后只写入系统密钥链，永不回读给界面；Provider 记录里保存的是密钥引用，而非密钥本身。
+调用 Provider 的凭证，可有可无——本地网关（如 Ollama）无需凭证。以明文随配置一起保存在本地配置文件中，界面可查看与编辑。
 _避免_：token、credential（当作 Provider 的专有概念时）
-
-**密钥引用（secret reference）**：
-标识系统密钥链中某条密钥的 URI，形如 `secret://io.github.xezzon.agent-maestro/provider/<slug>/api_key`。它代替密钥本身出现在配置中，使配置文件不包含任何秘密；配置里 `api_key` 为 null（键缺省）即表示该 Provider 未设置凭证。
-_避免_：密钥占位符、secret url

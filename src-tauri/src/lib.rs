@@ -1,30 +1,21 @@
 mod command;
-mod keychain;
 mod provider;
 mod store;
 
 use command::{create_provider, delete_provider, list_providers, update_provider};
-use keychain::FakeKeychain;
 use std::sync::Mutex;
 use store::Store;
 use tauri::{Manager, State};
 
-/// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）与密钥链（本票为内存 fake，真实实现见后续票）。
+/// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
 struct AppStore {
     store: Mutex<Store>,
-    keychain: Mutex<FakeKeychain>,
 }
 
 fn lock_store<'a>(
     app: &'a State<'a, AppStore>,
 ) -> Result<std::sync::MutexGuard<'a, Store>, String> {
     app.store.lock().map_err(|_| "配置存储不可用".to_owned())
-}
-
-fn lock_keychain<'a>(
-    app: &'a State<'a, AppStore>,
-) -> Result<std::sync::MutexGuard<'a, FakeKeychain>, String> {
-    app.keychain.lock().map_err(|_| "密钥链不可用".to_owned())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,7 +40,6 @@ pub fn run() {
             };
             app.manage(AppStore {
                 store: Mutex::new(store),
-                keychain: Mutex::new(FakeKeychain::default()),
             });
             Ok(())
         })
