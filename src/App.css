@@ -1,5 +1,13 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .brand {
@@ -13,6 +21,7 @@
 
 .app-content {
   padding: 24px;
+  overflow-y: auto;
 }
 
 .page-header {
@@ -88,6 +97,8 @@
 
 .nav-main {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .app-sider .ant-menu {
