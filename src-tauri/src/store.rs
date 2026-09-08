@@ -213,32 +213,36 @@ mod tests {
 
         let err = store.get().unwrap_err();
         assert!(err.message().contains("无法确定用户主目录"));
-        assert!(store
-            .create_provider(
-                "foo",
-                Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:9".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
-                    api_key: String::new(),
-                    models: Vec::new(),
-                }
-            )
-            .is_err());
-        assert!(store
-            .update_provider(
-                "foo",
-                Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:9".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
-                    api_key: String::new(),
-                    models: Vec::new(),
-                }
-            )
-            .is_err());
+        assert!(
+            store
+                .create_provider(
+                    "foo",
+                    Provider {
+                        base_url: Endpoints {
+                            openai_completions: Option::Some("http://localhost:9".to_owned()),
+                            anthropic_messages: Option::None,
+                        },
+                        api_key: String::new(),
+                        models: Vec::new(),
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .update_provider(
+                    "foo",
+                    Provider {
+                        base_url: Endpoints {
+                            openai_completions: Option::Some("http://localhost:9".to_owned()),
+                            anthropic_messages: Option::None,
+                        },
+                        api_key: String::new(),
+                        models: Vec::new(),
+                    }
+                )
+                .is_err()
+        );
         assert!(store.delete_provider("foo").is_err());
     }
 
@@ -732,19 +736,21 @@ mod tests {
         assert!(matches!(err, StoreError::Corrupt { .. }));
         assert!(err.message().contains(path.to_str().unwrap()));
 
-        assert!(store
-            .create_provider(
-                "foo",
-                Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:9".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
-                    api_key: String::new(),
-                    models: Vec::new(),
-                }
-            )
-            .is_err());
+        assert!(
+            store
+                .create_provider(
+                    "foo",
+                    Provider {
+                        base_url: Endpoints {
+                            openai_completions: Option::Some("http://localhost:9".to_owned()),
+                            anthropic_messages: Option::None,
+                        },
+                        api_key: String::new(),
+                        models: Vec::new(),
+                    }
+                )
+                .is_err()
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
@@ -761,19 +767,21 @@ mod tests {
         assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
         assert!(err.message().contains(path.to_str().unwrap()));
 
-        assert!(store
-            .create_provider(
-                "foo",
-                Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:9".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
-                    api_key: String::new(),
-                    models: Vec::new(),
-                }
-            )
-            .is_err());
+        assert!(
+            store
+                .create_provider(
+                    "foo",
+                    Provider {
+                        base_url: Endpoints {
+                            openai_completions: Option::Some("http://localhost:9".to_owned()),
+                            anthropic_messages: Option::None,
+                        },
+                        api_key: String::new(),
+                        models: Vec::new(),
+                    }
+                )
+                .is_err()
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 

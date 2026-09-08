@@ -3,6 +3,7 @@
   "skills": {
     "antd": {
       "source": "ant-design/ant-design-cli",
+      "ref": "v6.6.3",
       "sourceType": "github",
       "skillPath": "skills/antd/SKILL.md",
       "computedHash": "b5ba1145c24be0fd8f03714d3cfdaf8b9f93d8e8ef441c756709561d072ced27"

@@ -4,10 +4,9 @@ use serde::Deserialize;
 use tauri::State;
 
 use crate::{
-    lock_store,
+    AppStore, lock_store,
     provider::{Endpoints, ModelEntry, Provider},
     store::StoreError,
-    AppStore,
 };
 
 /// 创建/更新 Provider 命令的 `provider` 负载；slug 亦随负载传入。
@@ -69,20 +68,20 @@ pub fn update_provider(
 
     let slug = provider.slug.clone();
 
-    let _ = guard
+    guard
         .update_provider(&slug, provider.into())
-        .map_err(|e| e.message());
-
-    Ok(())
+        .map(|_| ())
+        .map_err(|e| e.message())
 }
 
 #[tauri::command]
 pub fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
     let mut guard = lock_store(&store)?;
 
-    let _ = guard.delete_provider(&slug).map_err(|e| e.message());
-
-    Ok(())
+    guard
+        .delete_provider(&slug)
+        .map(|_| ())
+        .map_err(|e| e.message())
 }
 
 #[cfg(test)]
