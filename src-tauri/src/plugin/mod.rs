@@ -186,16 +186,18 @@ fn instantiate_component(
     Ok(InstantiatedPlugin { store, world })
 }
 
-impl PluginService {
-    pub fn new(home: Option<PathBuf>) -> Self {
+impl Default for PluginService {
+    fn default() -> Self {
         Self {
-            engine: Engine::default(),
-            home,
-            entries: Mutex::new(Vec::new()),
-            last_errors: Mutex::new(HashMap::new()),
+            engine: Default::default(),
+            home: dirs::home_dir(),
+            entries: Default::default(),
+            last_errors: Default::default(),
         }
     }
+}
 
+impl PluginService {
     fn home(&self) -> Result<&Path, String> {
         self.home
             .as_deref()
@@ -635,10 +637,27 @@ fn expand_home(config_dir: &str, home: &Path) -> Result<PathBuf, String> {
 /// 测试共享助手：临时主目录 + 独立引擎的插件服务与配置存储。
 #[cfg(test)]
 pub(crate) mod testutil {
+    use crate::Mutex;
     use crate::store::Store;
-    use std::path::Path;
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
+    use wasmtime::Engine;
 
     use super::PluginService;
+
+    impl PluginService {
+        /// 测试专用构造器：注入任意主目录；生产代码使用 `Default`（读取真实 `~`）。
+        pub fn new(home: Option<PathBuf>) -> Self {
+            Self {
+                engine: Engine::default(),
+                home,
+                entries: Mutex::new(Vec::new()),
+                last_errors: Mutex::new(HashMap::new()),
+            }
+        }
+    }
 
     pub(crate) fn temp_home() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()

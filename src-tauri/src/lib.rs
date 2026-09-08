@@ -48,7 +48,7 @@ pub fn run() {
             });
             // 插件服务：`~` 无法确定时服务退化为不可用（命令层报错），
             // 与配置存储的保护状态语义一致。
-            app.manage(PluginService::new(dirs::home_dir()));
+            app.manage(PluginService::default());
             // 启动时 upsert 内置插件条目并从磁盘重建注册表（不联网，离线可用）。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
