@@ -1,0 +1,7 @@
+{
+  "id": "pi",
+  "name": "Pi",
+  "tool": "pi",
+  "config_dir": "~/.pi",
+  "entry": "plugin.wasm"
+}

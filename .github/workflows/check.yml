@@ -76,3 +76,34 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  plugin:
+    name: Plugin (pi)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: plugins/pi
+    steps:
+      - uses: actions/checkout@v7
+
+      # GitHub 托管的运行器包含最新版本的 Rust 工具链，这里补充 wasm32-wasip2 target。
+      - name: Install wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            plugins/pi/target/
+          key: ${{ runner.os }}-cargo-plugin-${{ hashFiles('plugins/pi/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --locked --target wasm32-wasip2
+
+      # 构建产物必须与已提交的 plugin.wasm 一致，防止 wasm 产物与源码漂移。
+      - name: Check committed plugin.wasm is up to date
+        run: cmp target/wasm32-wasip2/release/maestro_plugin_pi.wasm plugin.wasm

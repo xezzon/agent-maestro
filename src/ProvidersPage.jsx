@@ -8,6 +8,7 @@ import {
   Form,
   Input,
   message,
+  Modal,
   Popconfirm,
   Radio,
   Spin,
@@ -15,6 +16,7 @@ import {
   Typography,
 } from "antd";
 import { createProvider, deleteProvider, listProviders, updateProvider } from "./api/provider";
+import { applyProviders, listPlugins } from "./api/plugins";
 
 
 const OPENAI_COMPLTIONS = "openai-completions";
@@ -294,11 +296,55 @@ function ProviderForm({ provider, providers, onFinish }) {
   </Form>
 }
 
+/**
+ * 逐插件投影结果（见 issue #34 用户故事 2/3/4）。
+ * @param {Object} param0
+ * @param {import("./api/plugins").PluginApplyReport[]} param0.reports
+ */
+function ApplyResultList({ reports }) {
+  return (
+    <Flex vertical gap={12}>
+      {reports.map((report) => (
+        <div key={report.source}>
+          <Flex align="center" gap={8}>
+            <Typography.Text strong>
+              {report.name || report.source}
+            </Typography.Text>
+            {report.status === "applied" && (
+              <Tag color="success">已写入</Tag>
+            )}
+            {report.status === "failed" && <Tag color="error">失败</Tag>}
+            {report.status === "skipped" && <Tag>已跳过</Tag>}
+          </Flex>
+          {report.files.length > 0 && (
+            <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
+              写入文件：{report.files.join("、")}
+            </Typography.Paragraph>
+          )}
+          {report.skipped.map((skip) => (
+            <Typography.Paragraph type="secondary" style={{ margin: 0 }} key={skip.slug}>
+              跳过 Provider「{skip.slug}」：{skip.reason}
+            </Typography.Paragraph>
+          ))}
+          {report.reason && (
+            <Typography.Paragraph type="danger" style={{ margin: 0 }}>
+              {report.reason}
+            </Typography.Paragraph>
+          )}
+        </div>
+      ))}
+    </Flex>
+  );
+}
+
 export default function ProvidersPage() {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [creating, setCreating] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [canApply, setCanApply] = useState(false);
+  const [reports, setReports] = useState(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -315,7 +361,24 @@ export default function ProvidersPage() {
 
   useEffect(() => {
     reload();
+    // 没有可用插件（已启用且加载成功）时投影按钮禁用（用户故事 24）。
+    listPlugins()
+      .then((plugins) =>
+        setCanApply(plugins.some((p) => p.enabled && p.status === "loaded")),
+      )
+      .catch(() => setCanApply(false));
   }, [reload]);
+
+  async function handleApply() {
+    setApplying(true);
+    try {
+      setReports(await applyProviders());
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setApplying(false);
+    }
+  }
 
   function openCreate() {
     setCreating(true);
@@ -338,10 +401,32 @@ export default function ProvidersPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           Provider
         </Typography.Title>
-        <Button type="primary" disabled={creating || loading} onClick={openCreate}>
-          新建
-        </Button>
+        <Flex gap={8}>
+          <Button
+            disabled={!canApply || creating}
+            loading={applying}
+            onClick={handleApply}
+          >
+            应用到工具
+          </Button>
+          <Button type="primary" disabled={creating || loading} onClick={openCreate}>
+            新建
+          </Button>
+        </Flex>
       </div>
+
+      <Modal
+        title="应用到工具"
+        open={reports !== null}
+        footer={
+          <Button type="primary" onClick={() => setReports(null)}>
+            关闭
+          </Button>
+        }
+        onCancel={() => setReports(null)}
+      >
+        <ApplyResultList reports={reports ?? []} />
+      </Modal>
 
       {loading && providers.length === 0 ? (
         <div className="page-loading">

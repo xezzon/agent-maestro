@@ -1,8 +1,13 @@
 mod command;
+mod plugin;
 mod provider;
 mod store;
 
-use command::{create_provider, delete_provider, list_providers, update_provider};
+use command::{
+    add_plugin, apply_providers, create_provider, delete_provider, list_plugins, list_providers,
+    reload_plugins, remove_plugin, set_plugin_enabled, update_plugin, update_provider,
+};
+use plugin::PluginService;
 use std::sync::Mutex;
 use store::Store;
 use tauri::{Manager, State};
@@ -41,13 +46,29 @@ pub fn run() {
             app.manage(AppStore {
                 store: Mutex::new(store),
             });
+            // 插件服务：`~` 无法确定时服务退化为不可用（命令层报错），
+            // 与配置存储的保护状态语义一致。
+            app.manage(PluginService::new(dirs::home_dir()));
+            // 启动时 upsert 内置插件条目并从磁盘重建注册表（不联网，离线可用）。
+            let service = app.state::<PluginService>();
+            let app_store = app.state::<AppStore>();
+            if let Ok(mut guard) = app_store.store.lock() {
+                service.startup(&mut guard);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_providers,
             create_provider,
             update_provider,
-            delete_provider
+            delete_provider,
+            list_plugins,
+            add_plugin,
+            update_plugin,
+            remove_plugin,
+            set_plugin_enabled,
+            reload_plugins,
+            apply_providers
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

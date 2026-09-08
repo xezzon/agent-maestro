@@ -78,3 +78,33 @@
   align-items: baseline;
   gap: 8px;
 }
+
+/* 侧边栏结构：品牌置顶，普通菜单居中（flex:1），功能性入口置底。 */
+.app-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.nav-main {
+  flex: 1;
+}
+
+.app-sider .ant-menu {
+  border-inline-end: none;
+}
+
+/* 插件页 */
+.plugin-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 24px;
+}
+
+.plugin-error {
+  margin-top: 12px;
+}
+
+.plugin-status {
+  margin-top: 8px;
+}
