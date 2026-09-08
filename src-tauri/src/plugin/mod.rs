@@ -15,17 +15,14 @@ use std::{
     sync::Mutex,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasmtime::{
     Engine,
     component::{Component, Linker},
 };
 use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
 
-use crate::{
-    provider::Provider,
-    store::{PluginEntry, Store},
-};
+use crate::{provider::Provider, store::Store};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -39,6 +36,24 @@ use manifest::{Manifest, parse_manifest};
 use bindings::exports::maestro::plugin::plugin::Protocol as WitProtocol;
 /// WIT 合同 v1 的类型化绑定（宿主侧）。
 use bindings::exports::maestro::plugin::plugin::{Model as WitModel, Provider as WitProvider};
+
+/// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
+///
+/// `source` 是条目唯一身份（`builtin:<id>` 或 Git 仓库地址），重复添加在 store 层拒绝。
+/// `id` 为解析出的插件 id（同时是安装目录名 `~/.maestro/plugins/<id>`）：
+/// 下载/安装成功后回填，失败时为 `None`（条目保留可重试）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginEntry {
+    pub source: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
 
 /// 插件列表视图（命令返回给前端的形态）。
 #[derive(Debug, Serialize)]

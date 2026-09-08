@@ -5,29 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::plugin::PluginEntry;
 use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 
 /// 配置文件 schema 版本（见 ADR 0001）。
 pub const CONFIG_VERSION: u32 = 1;
-
-/// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
-///
-/// `source` 是条目唯一身份（`builtin:<id>` 或 Git 仓库地址），重复添加在 store 层拒绝。
-/// `id` 为解析出的插件 id（同时是安装目录名 `~/.maestro/plugins/<id>`）：
-/// 下载/安装成功后回填，失败时为 `None`（条目保留可重试）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginEntry {
-    pub source: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
 
 /// `~/.maestro/config.json` 的顶层文档（version 1 schema）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
