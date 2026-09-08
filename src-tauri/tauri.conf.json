@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "agent-maestro",
+        "title": "Agent Maestro",
         "width": 800,
         "height": 600
       }

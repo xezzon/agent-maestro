@@ -1,14 +1,54 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+mod command;
+mod provider;
+mod store;
+
+use command::{create_provider, delete_provider, list_providers, update_provider};
+use std::sync::Mutex;
+use store::Store;
+use tauri::{Manager, State};
+
+/// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
+struct AppStore {
+    store: Mutex<Store>,
+}
+
+fn lock_store<'a>(
+    app: &'a State<'a, AppStore>,
+) -> Result<std::sync::MutexGuard<'a, Store>, String> {
+    app.store.lock().map_err(|_| "配置存储不可用".to_owned())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // 单实例运行：配置文件由唯一进程独占，避免多进程读-改-写相互覆盖 Provider。
+    // 该插件必须先于其他插件注册。
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }));
+    builder
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .setup(|app| {
+            let store = match store::default_path() {
+                Ok(path) => Store::open(path),
+                Err(detail) => Store::unavailable(detail),
+            };
+            app.manage(AppStore {
+                store: Mutex::new(store),
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            list_providers,
+            create_provider,
+            update_provider,
+            delete_provider
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
