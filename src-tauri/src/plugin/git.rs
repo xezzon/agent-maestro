@@ -39,22 +39,12 @@ pub fn install_staging(staging: TempDir, target_root: &Path, id: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::super::{PluginService, builtin};
-    use crate::store::Store;
+    use super::super::{
+        builtin,
+        testutil::{store_at, temp_home, test_service},
+    };
     use git2::Repository;
     use std::{fs, path::Path};
-
-    fn temp_home() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
-    }
-
-    fn store_at(home: &Path) -> Store {
-        Store::open(home.join(".maestro").join("config.json"))
-    }
-
-    fn test_service(home: &Path) -> PluginService {
-        PluginService::new(Some(home.to_owned()))
-    }
 
     /// 以本地临时目录作 remote（git2 支持本地路径，离线可跑）。
     fn init_repo(dir: &Path) {
@@ -234,6 +224,34 @@ mod tests {
         assert!(service.update(&mut store, source).is_err());
         assert_eq!(service.list()[0].status, "loaded");
         assert_eq!(service.list()[0].name.as_deref(), Some("Sample"));
+    }
+
+    #[test]
+    fn update_with_incompatible_wasm_keeps_old_version() {
+        let home = temp_home();
+        let repo_dir = tempfile::tempdir().unwrap();
+        write_plugin_files(repo_dir.path(), "sample", "Sample");
+        init_repo(repo_dir.path());
+
+        let mut store = store_at(home.path());
+        let service = test_service(home.path());
+        let source = repo_dir.path().to_str().unwrap();
+        service.add(&mut store, source).unwrap();
+
+        // 上游发布接口不兼容的新版本（core module 连组件都不是）：
+        // 落位前校验失败，旧目录保持原样，旧版本继续可用。
+        fs::write(repo_dir.path().join("plugin.wasm"), br#"(module)"#).unwrap();
+        commit_all(&Repository::open(repo_dir.path()).unwrap());
+        let err = service.update(&mut store, source).unwrap_err();
+        assert!(err.contains("不是有效的 WASM 组件"), "{err}");
+        assert_eq!(service.list()[0].status, "loaded");
+        assert_eq!(service.list()[0].name.as_deref(), Some("Sample"));
+        assert!(
+            home.path()
+                .join(".maestro/plugins/sample/plugin.wasm")
+                .exists(),
+            "旧插件目录未被损坏的新版本替换"
+        );
     }
 
     #[test]

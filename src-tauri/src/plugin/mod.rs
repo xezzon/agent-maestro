@@ -105,6 +105,7 @@ enum PluginState {
 #[derive(Debug, Clone)]
 struct RegistryEntry {
     source: String,
+    builtin: bool,
     enabled: bool,
     state: PluginState,
 }
@@ -147,16 +148,27 @@ impl HostState {
     }
 }
 
-/// 实例化组件以验证兼容性（编译通过 + 导出接口匹配 + config_dir 可开放）。
-fn instantiate_component(engine: &Engine, bytes: &[u8], config_dir: &Path) -> Result<(), String> {
+/// 已实例化的插件：实例化验证与实际调用共用同一管线。
+struct InstantiatedPlugin {
+    store: wasmtime::Store<HostState>,
+    world: bindings::PluginWorld,
+}
+
+/// 实例化组件（编译通过 + 导出接口匹配 + config_dir 可开放）；
+/// 装载时用于兼容性校验，投影时用于实际调用。
+fn instantiate_component(
+    engine: &Engine,
+    bytes: &[u8],
+    config_dir: &Path,
+) -> Result<InstantiatedPlugin, String> {
     let component =
         Component::new(engine, bytes).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
     let mut store = wasmtime::Store::new(engine, HostState::new(config_dir)?);
     let mut linker = Linker::new(engine);
     p2::add_to_linker_sync(&mut linker).map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
-    bindings::PluginWorld::instantiate(&mut store, &component, &linker)
+    let world = bindings::PluginWorld::instantiate(&mut store, &component, &linker)
         .map_err(|e| format!("插件接口不兼容：{e}"))?;
-    Ok(())
+    Ok(InstantiatedPlugin { store, world })
 }
 
 impl PluginService {
@@ -206,7 +218,8 @@ impl PluginService {
 
     /// 按配置条目顺序装载；不同来源解析出相同插件 id 时后者进错误态。
     fn build_entry(&self, entry: PluginEntry, seen_ids: &mut HashSet<String>) -> RegistryEntry {
-        let state = match self.load_entry(&entry) {
+        let builtin = entry.source.starts_with("builtin:");
+        let state = match self.load_entry(&entry, builtin) {
             Ok(loaded) => {
                 if !seen_ids.insert(loaded.id.clone()) {
                     PluginState::Error(format!("插件 id「{}」与其他来源冲突", loaded.id))
@@ -218,13 +231,14 @@ impl PluginService {
         };
         RegistryEntry {
             source: entry.source,
+            builtin,
             enabled: entry.enabled,
             state,
         }
     }
 
-    fn load_entry(&self, entry: &PluginEntry) -> Result<LoadedPlugin, String> {
-        if entry.source.starts_with("builtin:") {
+    fn load_entry(&self, entry: &PluginEntry, builtin: bool) -> Result<LoadedPlugin, String> {
+        if builtin {
             return self.load_builtin();
         }
         match &entry.id {
@@ -300,30 +314,30 @@ impl PluginService {
             .unwrap()
             .iter()
             .map(|entry| {
-                let builtin = entry.source.starts_with("builtin:");
-                let (id, name, tool, config_dir, status, error) = match &entry.state {
-                    PluginState::Loaded(p) => (
-                        Some(p.id.clone()),
-                        Some(p.name.clone()),
-                        Some(p.tool.clone()),
-                        Some(p.config_dir.display().to_string()),
-                        "loaded",
-                        None,
-                    ),
-                    PluginState::Error(reason) => {
-                        (None, None, None, None, "error", Some(reason.clone()))
-                    }
-                };
-                PluginView {
+                let base = PluginView {
                     source: entry.source.clone(),
-                    builtin,
+                    builtin: entry.builtin,
                     enabled: entry.enabled,
-                    id,
-                    name,
-                    tool,
-                    config_dir,
-                    status,
-                    error,
+                    id: None,
+                    name: None,
+                    tool: None,
+                    config_dir: None,
+                    status: "error",
+                    error: None,
+                };
+                match &entry.state {
+                    PluginState::Loaded(p) => PluginView {
+                        id: Some(p.id.clone()),
+                        name: Some(p.name.clone()),
+                        tool: Some(p.tool.clone()),
+                        config_dir: Some(p.config_dir.display().to_string()),
+                        status: "loaded",
+                        ..base
+                    },
+                    PluginState::Error(reason) => PluginView {
+                        error: Some(reason.clone()),
+                        ..base
+                    },
                 }
             })
             .collect()
@@ -388,11 +402,24 @@ impl PluginService {
             ));
         }
         self.check_id_conflict(store, source, &manifest.id)?;
+        self.validate_staging_wasm(staging.path(), &manifest)?;
         git::install_staging(staging, &plugins_root, &manifest.id)?;
         store
             .set_plugin_id(source, &manifest.id)
             .map_err(|e| e.message())?;
         self.reload(store);
+        Ok(())
+    }
+
+    /// 落位前先实例化校验暂存目录的入口 wasm：
+    /// 更新失败（含新版接口不兼容）时旧目录保持原样，旧版本继续可用。
+    fn validate_staging_wasm(&self, staging: &Path, manifest: &Manifest) -> Result<(), String> {
+        let config_dir = expand_home(&manifest.config_dir, self.home()?)?;
+        fs::create_dir_all(&config_dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
+        let entry = staging.join(&manifest.entry);
+        let bytes =
+            fs::read(&entry).map_err(|_| format!("插件入口文件缺失：{}", entry.display()))?;
+        instantiate_component(&self.engine, &bytes, &config_dir)?;
         Ok(())
     }
 
@@ -518,17 +545,10 @@ impl PluginService {
                 fs::read(entry).map_err(|e| format!("读取插件入口文件失败：{e}"))?
             }
         };
-        let component = Component::new(&self.engine, bytes)
-            .map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
-        let mut store = wasmtime::Store::new(&self.engine, HostState::new(&loaded.config_dir)?);
-        let mut linker = Linker::new(&self.engine);
-        p2::add_to_linker_sync(&mut linker)
-            .map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
-        let world = bindings::PluginWorld::instantiate(&mut store, &component, &linker)
-            .map_err(|e| format!("插件接口不兼容：{e}"))?;
-        let plugin = world.maestro_plugin_plugin();
-        let result = plugin
-            .call_write_providers(&mut store, &providers)
+        let mut plugin = instantiate_component(&self.engine, &bytes, &loaded.config_dir)?;
+        let handle = plugin.world.maestro_plugin_plugin();
+        let result = handle
+            .call_write_providers(&mut plugin.store, &providers)
             .map_err(|e| format!("调用插件失败：{e}"))?;
         result.map_err(|msg| format!("插件返回错误：{msg}"))
     }
@@ -597,23 +617,32 @@ fn expand_home(config_dir: &str, home: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(config_dir))
 }
 
+/// 测试共享助手：临时主目录 + 独立引擎的插件服务与配置存储。
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider::{Endpoints, ModelEntry};
+pub(crate) mod testutil {
+    use crate::store::Store;
+    use std::path::Path;
 
-    /// 临时主目录 + 独立引擎的测试服务。
-    fn test_service(home: &Path) -> PluginService {
-        PluginService::new(Some(home.to_owned()))
-    }
+    use super::PluginService;
 
-    fn temp_home() -> tempfile::TempDir {
+    pub(crate) fn temp_home() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
 
-    fn store_at(home: &Path) -> Store {
+    pub(crate) fn test_service(home: &Path) -> PluginService {
+        PluginService::new(Some(home.to_owned()))
+    }
+
+    pub(crate) fn store_at(home: &Path) -> Store {
         Store::open(home.join(".maestro").join("config.json"))
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::{store_at, temp_home, test_service};
+    use super::*;
+    use crate::provider::{Endpoints, ModelEntry};
 
     fn provider_openai(url: &str, api_key: &str, models: Vec<ModelEntry>) -> Provider {
         Provider {

@@ -52,8 +52,11 @@ pub fn run() {
             // 启动时 upsert 内置插件条目并从磁盘重建注册表（不联网，离线可用）。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
-            if let Ok(mut guard) = app_store.store.lock() {
-                service.startup(&mut guard);
+            match app_store.store.lock() {
+                Ok(mut guard) => service.startup(&mut guard),
+                Err(poisoned) => {
+                    eprintln!("failed to lock store during plugin startup: {poisoned}");
+                }
             }
             Ok(())
         })
