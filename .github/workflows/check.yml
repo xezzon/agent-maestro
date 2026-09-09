@@ -87,7 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # GitHub 托管的运行器包含最新版本的 Rust 工具链，这里补充 wasm32-wasip2 target。
+      # GitHub 托管的运行器包含最新版本的 Rust 工具链，仓库根 rust-toolchain.toml 锁定实际版本。
       - name: Install wasm32-wasip2 target
         run: rustup target add wasm32-wasip2
 
@@ -101,9 +101,10 @@ jobs:
             plugins/pi/target/
           key: ${{ runner.os }}-cargo-plugin-${{ hashFiles('plugins/pi/Cargo.lock') }}
 
+      # build.sh 内含路径重映射，保证构建字节级可复现，产物覆盖 plugin.wasm。
       - name: Build
-        run: cargo build --release --locked --target wasm32-wasip2
+        run: bash build.sh
 
       # 构建产物必须与已提交的 plugin.wasm 一致，防止 wasm 产物与源码漂移。
       - name: Check committed plugin.wasm is up to date
-        run: cmp target/wasm32-wasip2/release/maestro_plugin_pi.wasm plugin.wasm
+        run: git diff --exit-code -- plugin.wasm

@@ -1,0 +1,6 @@
+# 锁定工具链版本，保证 WASM 插件产物（plugins/pi/plugin.wasm）在本地与 CI 间字节级可复现。
+# 升级时需同步执行 plugins/pi/build.sh 重建并提交 plugin.wasm。
+[toolchain]
+channel = "1.98.1"
+profile = "default"
+targets = ["wasm32-wasip2"]
