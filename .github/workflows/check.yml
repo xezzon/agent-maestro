@@ -45,7 +45,11 @@ jobs:
       run:
         working-directory: src-tauri
     steps:
+      # 插件 wasm 在宿主构建（build.rs）时编译，会运行插件的 Cargo build scripts，
+      # 不得保留 GITHUB_TOKEN 凭据。
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Tauri Linux dependencies
         run: |
@@ -65,7 +69,9 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
+            src-tauri/target/
+            # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
+            plugins/pi/target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Format

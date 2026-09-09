@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::plugin::PluginEntry;
 use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +18,9 @@ pub struct Config {
     pub version: u32,
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
+    /// 无插件时省略该段，保持与旧配置文件一致。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<PluginEntry>,
 }
 
 impl Default for Config {
@@ -24,6 +28,7 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             providers: BTreeMap::new(),
+            plugins: Vec::new(),
         }
     }
 }
@@ -47,6 +52,8 @@ pub enum StoreError {
     DuplicateSlug { slug: String },
     /// Provider 不存在（update/delete 不做 upsert，绝不静默覆盖）。
     MissingSlug { slug: String },
+    /// 插件条目不存在。
+    MissingSource { source: String },
 }
 
 impl StoreError {
@@ -68,6 +75,7 @@ impl StoreError {
             }
             StoreError::DuplicateSlug { slug } => format!("已存在同名 Provider：{slug}"),
             StoreError::MissingSlug { slug } => format!("Provider 不存在：{slug}"),
+            StoreError::MissingSource { source } => format!("插件条目不存在：{source}"),
         }
     }
 }
@@ -178,6 +186,59 @@ impl Store {
                 slug: slug.to_owned(),
             }),
         }
+    }
+
+    /// 启用/禁用插件条目。
+    pub fn set_plugin_enabled(&mut self, source: &str, enabled: bool) -> Result<(), StoreError> {
+        self.update_plugins(source, |plugins| {
+            for plugin in plugins.iter_mut() {
+                if plugin.source == source {
+                    plugin.enabled = enabled;
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
+    /// 内置插件条目：每次启动时 upsert（缺省插入 enabled=true）。
+    /// 已有条目原样保留——用户的禁用意图不被启动 upsert 覆盖。
+    pub fn upsert_builtin_plugin(&mut self, source: &str, id: &str) -> Result<(), StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        if config.plugins.iter().any(|p| p.source == source) {
+            return Ok(());
+        }
+        let mut next = config.clone();
+        // 内置条目置于最前，装载顺序上优先。
+        next.plugins.insert(
+            0,
+            PluginEntry {
+                source: source.to_owned(),
+                enabled: true,
+                id: Some(id.to_owned()),
+            },
+        );
+        self.persist(&next)?;
+        self.state = Ok(next);
+        Ok(())
+    }
+
+    /// 以 `source` 定位并原位修改 plugins 段；找不到即报错，绝不静默写入。
+    fn update_plugins(
+        &mut self,
+        source: &str,
+        f: impl FnOnce(&mut Vec<PluginEntry>) -> bool,
+    ) -> Result<(), StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        let mut next = config.clone();
+        if !f(&mut next.plugins) {
+            return Err(StoreError::MissingSource {
+                source: source.to_owned(),
+            });
+        }
+        self.persist(&next)?;
+        self.state = Ok(next);
+        Ok(())
     }
 
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
@@ -992,5 +1053,93 @@ mod tests {
         assert_eq!(models[0].id, "gpt-4o");
         assert_eq!(models[1].id, "GPT-4O", "大小写敏感：大小写变体可并存");
         assert_eq!(models[2].id, "", "空 ID 同样不被存储层拦截");
+    }
+
+    #[test]
+    fn plugins_section_defaults_to_empty_for_legacy_config_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"version":1,"providers":{}}"#).unwrap();
+
+        let store = Store::open(path);
+
+        assert!(
+            store.get().unwrap().plugins.is_empty(),
+            "缺 plugins 段的旧配置文件直接可用（纯增量字段，见 issue #34）"
+        );
+    }
+
+    #[test]
+    fn plugin_entries_round_trip_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+
+        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
+        store.set_plugin_enabled("builtin:pi", false).unwrap();
+
+        let reopened = Store::open(path);
+        let plugins = &reopened.get().unwrap().plugins;
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].source, "builtin:pi");
+        assert_eq!(plugins[0].id.as_deref(), Some("pi"));
+        assert!(!plugins[0].enabled, "enabled 状态持久化");
+    }
+
+    #[test]
+    fn set_plugin_enabled_on_missing_source_is_rejected_without_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+
+        let err = store.set_plugin_enabled("builtin:pi", false).unwrap_err();
+
+        assert!(matches!(err, StoreError::MissingSource { .. }));
+        assert!(!path.exists(), "报错路径不得静默写入文件");
+    }
+
+    #[test]
+    fn upsert_builtin_plugin_inserts_enabled_and_keeps_user_disabled_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+
+        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
+        assert!(store.get().unwrap().plugins[0].enabled);
+
+        store.set_plugin_enabled("builtin:pi", false).unwrap();
+        // 再次 upsert（每次启动）不得把用户禁用重置回启用。
+        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
+
+        let reopened = Store::open(path);
+        let plugins = &reopened.get().unwrap().plugins;
+        assert_eq!(plugins.len(), 1, "内置条目幂等 upsert，不产生重复");
+        assert!(!plugins[0].enabled, "用户的禁用意图不被启动 upsert 覆盖");
+        assert_eq!(plugins[0].id.as_deref(), Some("pi"));
+    }
+
+    #[test]
+    fn corrupt_store_refuses_plugin_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "不是 JSON {{{").unwrap();
+        let mut store = Store::open(path);
+
+        assert!(store.set_plugin_enabled("builtin:pi", true).is_err());
+        assert!(store.upsert_builtin_plugin("builtin:pi", "pi").is_err());
+    }
+
+    #[test]
+    fn plugins_only_config_serializes_with_expected_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path);
+
+        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
+
+        assert_eq!(
+            serde_json::to_string(store.get().unwrap()).unwrap(),
+            r#"{"version":1,"providers":{},"plugins":[{"source":"builtin:pi","enabled":true,"id":"pi"}]}"#
+        );
     }
 }
