@@ -31,11 +31,10 @@ mod bindings {
     });
 }
 
-use manifest::{Manifest, parse_manifest};
-
 use bindings::exports::maestro::plugin::plugin::Protocol as WitProtocol;
 /// WIT 合同 v1 的类型化绑定（宿主侧）。
 use bindings::exports::maestro::plugin::plugin::{Model as WitModel, Provider as WitProvider};
+use manifest::{Manifest, parse_manifest};
 
 /// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
 ///
