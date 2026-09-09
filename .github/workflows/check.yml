@@ -45,7 +45,11 @@ jobs:
       run:
         working-directory: src-tauri
     steps:
+      # 插件 wasm 在宿主构建（build.rs）时编译，会运行插件的 Cargo build scripts，
+      # 不得保留 GITHUB_TOKEN 凭据。
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Tauri Linux dependencies
         run: |
@@ -66,6 +70,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             src-tauri/target/
+            # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
+            plugins/pi/target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Format
@@ -76,38 +82,3 @@ jobs:
 
       - name: Test
         run: cargo test --locked
-
-  plugin:
-    name: Plugin (pi)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: plugins/pi
-    steps:
-      # 插件构建会运行 Cargo build scripts，不得保留 GITHUB_TOKEN 凭据。
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      # GitHub 托管的运行器包含最新版本的 Rust 工具链，仓库根 rust-toolchain.toml 锁定实际版本。
-      - name: Install wasm32-wasip2 target
-        run: rustup target add wasm32-wasip2
-
-      - uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            plugins/pi/target/
-          key: ${{ runner.os }}-cargo-plugin-${{ hashFiles('plugins/pi/Cargo.lock') }}
-
-      # build.sh 内含路径重映射，保证构建字节级可复现，产物覆盖 plugin.wasm。
-      - name: Build
-        run: bash build.sh
-
-      # 构建产物必须与已提交的 plugin.wasm 一致，防止 wasm 产物与源码漂移。
-      - name: Check committed plugin.wasm is up to date
-        run: git diff --exit-code -- plugin.wasm
