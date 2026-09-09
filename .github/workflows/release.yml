@@ -19,13 +19,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS 出 universal 产物（Apple Silicon + Intel 各一份 fat binary）。
-          - platform: macos-latest
-            args: --target universal-apple-darwin
-          # 选 22.04 而非 latest：AppImage/deb 产物兼容较旧 glibc 的发行版。
-          - platform: ubuntu-22.04
+          - platform: 'macos-latest' # for Arm based macs (M1 and above).
+            args: '--target aarch64-apple-darwin'
+          - platform: 'macos-latest' # for Intel based macs.
+            args: '--target x86_64-apple-darwin'
+          - platform: 'ubuntu-22.04'
             args: ''
-          - platform: windows-latest
+          - platform: 'ubuntu-22.04-arm' # Only available in public repos.
+            args: ''
+          - platform: 'windows-latest'
             args: ''
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 90
@@ -45,17 +47,19 @@ jobs:
         with:
           node-version: lts/*
 
-      - name: Install Rust targets (macOS universal)
-        if: matrix.platform == 'macos-latest'
+      # 仅 Intel mac 产物需要跨编译 target；macos-latest 宿主默认已含 aarch64-apple-darwin。
+      - name: Install Rust target (Intel mac)
+        if: matrix.platform == 'macos-latest' && contains(matrix.args, 'x86_64')
         run: rustup target add x86_64-apple-darwin
 
       - name: Install Tauri Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      # key 带 platform 前缀，避免与 Check 工作流按 runner.os 写入的同构缓存互踩。
+      # key 带 os/arch 前缀：与 Check 工作流按 runner.os 写入的缓存区分开，
+      # 并区分 matrix 中两个共用 macos-latest 的条目（ARM64 / X64）。
       - uses: actions/cache@v6
         with:
           path: |
@@ -66,7 +70,7 @@ jobs:
             src-tauri/target/
             # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
             plugins/pi/target/
-          key: ${{ matrix.platform }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
