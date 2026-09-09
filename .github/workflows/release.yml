@@ -76,12 +76,22 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # 版本号取自 tauri.conf.json，产物附加到同名的 Draft Release，人工确认后发布。
+      # static json（latest.json，updater 的静态端点）由此 step 生成：自动合并
+      # matrix 各平台条目后上传到 Release。当前应用尚未启用 updater，此功能暂不生效；
+      # 待 tauri.conf.json 配置 createUpdaterArtifacts 与 updater 插件后自动激活，
+      # 签名密钥取自 secrets（未启用 updater 时以下 env 会被忽略）。
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: 'Agent Maestro v__VERSION__'
           releaseDraft: true
           prerelease: false
+          # 生成 latest.json（默认已开，显式声明以示用途）。
+          uploadUpdaterJson: true
+          # Windows 更新包优先 NSIS 安装器（默认选 MSI 只是历史兼容行为）。
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
