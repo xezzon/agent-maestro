@@ -80,7 +80,7 @@ jobs:
       # matrix 各平台条目后上传到 Release。当前应用尚未启用 updater，此功能暂不生效；
       # 待 tauri.conf.json 配置 createUpdaterArtifacts 与 updater 插件后自动激活，
       # 签名密钥取自 secrets（未启用 updater 时以下 env 会被忽略）。
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
