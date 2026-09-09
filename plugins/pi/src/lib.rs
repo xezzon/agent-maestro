@@ -87,10 +87,10 @@ fn models_json(models: &[exports::maestro::plugin::plugin::Model]) -> serde_json
         .map(|model| -> serde_json::Value {
             let mut entry = serde_json::Map::new();
             entry.insert(KEY_MODEL_ID.to_owned(), model.id.as_str().into());
-            if let Some(name) = &model.display_name {
-                if !name.is_empty() {
-                    entry.insert(KEY_MODEL_NAME.to_owned(), name.as_str().into());
-                }
+            if let Some(name) = &model.display_name
+                && !name.is_empty()
+            {
+                entry.insert(KEY_MODEL_NAME.to_owned(), name.as_str().into());
             }
             entry.into()
         })
