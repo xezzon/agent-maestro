@@ -12,7 +12,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
 };
 
 use serde::{Deserialize, Serialize};
@@ -133,6 +133,9 @@ pub struct PluginService {
     entries: Mutex<Vec<RegistryEntry>>,
     /// 安装/更新失败的最近原因（内存态）：条目尚未解析出 id 时用于错误态展示。
     last_errors: Mutex<HashMap<String, String>>,
+    /// 插件操作互斥：串行化 add/update/remove/apply，避免克隆、WASM 执行等
+    /// 长任务与并发插件变更交错。store 锁只在各阶段短暂获取，长任务期间释放。
+    op_lock: Mutex<()>,
 }
 
 /// WASI 宿主状态：唯一被授权的写入面是预开放的插件配置目录。
@@ -169,7 +172,7 @@ struct InstantiatedPlugin {
     world: bindings::PluginWorld,
 }
 
-/// 实例化组件（编译通过 + 导出接口匹配 + config_dir 可开放）；
+/// 实例化组件（编译通过 + 导出接口匹配 + config_dir 可开放 + fuel 预算就位）；
 /// 装载时用于兼容性校验，投影时用于实际调用。
 fn instantiate_component(
     engine: &Engine,
@@ -179,6 +182,9 @@ fn instantiate_component(
     let component =
         Component::new(engine, bytes).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
     let mut store = wasmtime::Store::new(engine, HostState::new(config_dir)?);
+    store
+        .set_fuel(FUEL_BUDGET)
+        .map_err(|e| format!("设置插件执行预算失败：{e}"))?;
     let mut linker = Linker::new(engine);
     p2::add_to_linker_sync(&mut linker).map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
     let world = bindings::PluginWorld::instantiate(&mut store, &component, &linker)
@@ -186,13 +192,25 @@ fn instantiate_component(
     Ok(InstantiatedPlugin { store, world })
 }
 
+/// 单次插件调用的执行预算（fuel）：投影任务的量级远小于该值，
+/// 死循环或超量计算的插件会被中断并走失败路径，不会卡死投影。
+const FUEL_BUDGET: u64 = 1 << 30;
+
+/// 引擎配置：启用 fuel 计量（配合 `FUEL_BUDGET` 限制插件执行时长）。
+fn build_engine() -> Engine {
+    let mut config = wasmtime::Config::new();
+    config.consume_fuel(true);
+    Engine::new(&config).expect("failed to create wasm engine")
+}
+
 impl Default for PluginService {
     fn default() -> Self {
         Self {
-            engine: Default::default(),
+            engine: build_engine(),
             home: dirs::home_dir(),
             entries: Default::default(),
             last_errors: Default::default(),
+            op_lock: Default::default(),
         }
     }
 }
@@ -209,14 +227,26 @@ impl PluginService {
         Ok(self.home()?.join(".maestro").join("plugins"))
     }
 
+    /// 短暂加锁获取 store；加锁失败即配置存储不可用。
+    fn lock_store<'s>(&self, store: &'s Mutex<Store>) -> Result<MutexGuard<'s, Store>, String> {
+        store.lock().map_err(|_| "配置存储不可用".to_owned())
+    }
+
     /// 应用启动：upsert 内置条目（离线、只读磁盘）并重建注册表。
-    pub fn startup(&self, store: &mut Store) {
+    pub fn startup(&self, store: &Mutex<Store>) {
+        let mut guard = match store.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                eprintln!("failed to lock store during plugin startup");
+                return;
+            }
+        };
         if let Err(e) =
-            store.upsert_builtin_plugin(builtin::BUILTIN_PI_SOURCE, builtin::BUILTIN_PI_ID)
+            guard.upsert_builtin_plugin(builtin::BUILTIN_PI_SOURCE, builtin::BUILTIN_PI_ID)
         {
             eprintln!("failed to upsert builtin plugin entry: {}", e.message());
         }
-        self.reload(store);
+        self.reload(&guard);
     }
 
     /// 只读磁盘重建注册表，不联网（手动修复插件文件后无需重启应用）。
@@ -277,8 +307,7 @@ impl PluginService {
     fn load_builtin(&self) -> Result<LoadedPlugin, String> {
         let manifest =
             parse_manifest(builtin::PI_MANIFEST_JSON).map_err(|e| format!("内置插件损坏：{e}"))?;
-        let loaded =
-            self.load_from_manifest(&manifest, WasmSource::Builtin(builtin::PI_WASM), None)?;
+        let loaded = self.load_from_manifest(&manifest, WasmSource::Builtin(builtin::PI_WASM))?;
         Ok(loaded)
     }
 
@@ -294,7 +323,8 @@ impl PluginService {
                 manifest.id
             ));
         }
-        self.load_from_manifest(&manifest, WasmSource::Disk(root.clone()), Some(&root))
+        let entry = manifest::resolve_entry(&root, &manifest.entry)?;
+        self.load_from_manifest(&manifest, WasmSource::Disk(entry))
     }
 
     /// 装载管线：解析 config_dir（`~` 展开、目录不存在则先创建）→ 读入口字节 → 实例化校验。
@@ -302,17 +332,13 @@ impl PluginService {
         &self,
         manifest: &Manifest,
         wasm: WasmSource,
-        plugin_root: Option<&Path>,
     ) -> Result<LoadedPlugin, String> {
-        let config_dir = expand_home(&manifest.config_dir, self.home()?)?;
-        fs::create_dir_all(&config_dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
-        let bytes: Vec<u8> = match (&wasm, plugin_root) {
-            (WasmSource::Builtin(bytes), _) => bytes.to_vec(),
-            (WasmSource::Disk(_), Some(root)) => {
-                let entry = root.join(&manifest.entry);
-                fs::read(&entry).map_err(|_| format!("插件入口文件缺失：{}", entry.display()))?
+        let config_dir = resolve_config_dir(&manifest.config_dir, self.home()?)?;
+        let bytes: Vec<u8> = match &wasm {
+            WasmSource::Builtin(bytes) => bytes.to_vec(),
+            WasmSource::Disk(entry) => {
+                fs::read(entry).map_err(|e| format!("读取插件入口文件失败：{e}"))?
             }
-            (WasmSource::Disk(_), None) => unreachable!("磁盘插件必须携带插件根目录"),
         };
         instantiate_component(&self.engine, &bytes, &config_dir)?;
         Ok(LoadedPlugin {
@@ -362,11 +388,26 @@ impl PluginService {
 
     /// 添加 Git 来源插件：先落配置条目（store 层拒绝重复来源），
     /// 随后克隆/校验/落位/加载；失败保留条目、插件进错误态。
-    pub fn add(&self, store: &mut Store, source: &str) -> Result<(), String> {
-        store.add_plugin(source).map_err(|e| e.message())?;
-        match self.install(store, source, None) {
-            Ok(()) => {
+    ///
+    /// store 锁只在各阶段短暂获取：克隆与 WASM 校验期间不阻塞其他命令。
+    pub fn add(&self, store: &Mutex<Store>, source: &str) -> Result<(), String> {
+        git::validate_source(source)?;
+        let _ops = self.op_lock.lock().unwrap();
+        {
+            let mut guard = self.lock_store(store)?;
+            guard.add_plugin(source).map_err(|e| e.message())?;
+        }
+        // 插件操作已被 op 锁串行化，快照期间的 id 冲突检查结果不会被并发安装推翻。
+        let snapshot = {
+            let guard = self.lock_store(store)?;
+            guard.get().map_err(|e| e.message())?.plugins.clone()
+        };
+        match self.install(source, None, &snapshot) {
+            Ok(id) => {
+                let mut guard = self.lock_store(store)?;
+                guard.set_plugin_id(source, &id).map_err(|e| e.message())?;
                 self.last_errors.lock().unwrap().remove(source);
+                self.reload(&guard);
                 Ok(())
             }
             Err(reason) => {
@@ -374,7 +415,8 @@ impl PluginService {
                     .lock()
                     .unwrap()
                     .insert(source.to_owned(), reason.clone());
-                self.reload(store);
+                let guard = self.lock_store(store)?;
+                self.reload(&guard);
                 Err(reason)
             }
         }
@@ -382,31 +424,39 @@ impl PluginService {
 
     /// 更新 Git 来源插件：重新克隆最新默认分支，校验通过才替换旧目录；
     /// 上游 manifest 的 id 变更则报错并保持旧状态。
-    pub fn update(&self, store: &mut Store, source: &str) -> Result<(), String> {
+    pub fn update(&self, store: &Mutex<Store>, source: &str) -> Result<(), String> {
         if source.starts_with("builtin:") {
             return Err("内置插件随应用分发，无需更新".to_owned());
         }
-        let entry_id = store
-            .get()
-            .map_err(|e| e.message())?
-            .plugins
-            .iter()
-            .find(|p| p.source == source)
-            .and_then(|p| p.id.clone())
-            .ok_or_else(|| format!("插件条目不存在：{source}"))?;
-        self.install(store, source, Some(&entry_id))?;
+        let _ops = self.op_lock.lock().unwrap();
+        let (entry_id, snapshot) = {
+            let guard = self.lock_store(store)?;
+            let config = guard.get().map_err(|e| e.message())?;
+            let entry_id = config
+                .plugins
+                .iter()
+                .find(|p| p.source == source)
+                .and_then(|p| p.id.clone())
+                .ok_or_else(|| format!("插件条目不存在：{source}"))?;
+            (entry_id, config.plugins.clone())
+        };
+        let id = self.install(source, Some(&entry_id), &snapshot)?;
+        let mut guard = self.lock_store(store)?;
+        guard.set_plugin_id(source, &id).map_err(|e| e.message())?;
         self.last_errors.lock().unwrap().remove(source);
+        self.reload(&guard);
         Ok(())
     }
 
-    /// 克隆 → 读 manifest 校验 → id 冲突检查 → 落位 → 加载。
+    /// 克隆 → 读 manifest 校验 → id 冲突检查 → 落位。
     /// `expected_id` 为 `Some` 时即更新语义：上游 id 变更则报错并保持旧状态。
+    /// 不触达 store；`plugins` 为调用方抓取的插件条目快照（用于冲突检查）。
     fn install(
         &self,
-        store: &mut Store,
         source: &str,
         expected_id: Option<&str>,
-    ) -> Result<(), String> {
+        plugins: &[PluginEntry],
+    ) -> Result<String, String> {
         let plugins_root = self.plugins_root()?;
         let staging = git::clone_to_staging(source, &plugins_root)?;
         let manifest = git::read_staging_manifest(staging.path())?;
@@ -418,22 +468,17 @@ impl PluginService {
                 manifest.id
             ));
         }
-        self.check_id_conflict(store, source, &manifest.id)?;
+        self.check_id_conflict(plugins, source, &manifest.id)?;
         self.validate_staging_wasm(staging.path(), &manifest)?;
         git::install_staging(staging, &plugins_root, &manifest.id)?;
-        store
-            .set_plugin_id(source, &manifest.id)
-            .map_err(|e| e.message())?;
-        self.reload(store);
-        Ok(())
+        Ok(manifest.id)
     }
 
     /// 落位前先实例化校验暂存目录的入口 wasm：
     /// 更新失败（含新版接口不兼容）时旧目录保持原样，旧版本继续可用。
     fn validate_staging_wasm(&self, staging: &Path, manifest: &Manifest) -> Result<(), String> {
-        let config_dir = expand_home(&manifest.config_dir, self.home()?)?;
-        fs::create_dir_all(&config_dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
-        let entry = staging.join(&manifest.entry);
+        let config_dir = resolve_config_dir(&manifest.config_dir, self.home()?)?;
+        let entry = manifest::resolve_entry(staging, &manifest.entry)?;
         let bytes =
             fs::read(&entry).map_err(|_| format!("插件入口文件缺失：{}", entry.display()))?;
         instantiate_component(&self.engine, &bytes, &config_dir)?;
@@ -441,14 +486,16 @@ impl PluginService {
     }
 
     /// 插件 id 是全局身份：与其他来源（含内置）的已解析 id 冲突即拒绝落位。
-    fn check_id_conflict(&self, store: &Store, source: &str, id: &str) -> Result<(), String> {
-        let conflict = store
-            .get()
-            .map_err(|e| e.message())?
-            .plugins
+    fn check_id_conflict(
+        &self,
+        plugins: &[PluginEntry],
+        source: &str,
+        id: &str,
+    ) -> Result<(), String> {
+        if plugins
             .iter()
-            .any(|p| p.source != source && p.id.as_deref() == Some(id));
-        if conflict {
+            .any(|p| p.source != source && p.id.as_deref() == Some(id))
+        {
             return Err(format!("插件 id「{id}」已被其他来源占用"));
         }
         Ok(())
@@ -456,6 +503,7 @@ impl PluginService {
 
     /// 移除 Git 插件：删配置条目 + 删插件目录（幂等）。内置插件不可移除。
     pub fn remove(&self, store: &mut Store, source: &str) -> Result<(), String> {
+        let _ops = self.op_lock.lock().unwrap();
         if source.starts_with("builtin:") {
             return Err("内置插件可禁用但不可移除".to_owned());
         }
@@ -492,6 +540,7 @@ impl PluginService {
 
     /// 投影：调用所有已启用且加载成功的插件；单个插件失败不影响其他插件。
     pub fn apply(&self, providers: &BTreeMap<String, Provider>) -> Vec<PluginApplyReport> {
+        let _ops = self.op_lock.lock().unwrap();
         let entries = self.entries.lock().unwrap().clone();
         entries
             .iter()
@@ -623,15 +672,43 @@ fn to_wit_provider(
     }
 }
 
-/// 展开 manifest config_dir 的 `~` 前缀为主目录。
-fn expand_home(config_dir: &str, home: &Path) -> Result<PathBuf, String> {
-    if config_dir == "~" {
-        return Ok(home.to_owned());
+/// 解析 manifest 声明的配置目录为宿主可控范围内的绝对路径。
+///
+/// 仅接受 `~/…` 形式（展开为主目录下的相对路径），拒绝绝对路径、`..` 上跳
+/// 与空的 `~`；目录创建后规范化验证仍在主目录内，防止外置 manifest 声明
+/// 任意主机目录并借 WASI 预开放获得读写权限。
+fn resolve_config_dir(config_dir: &str, home: &Path) -> Result<PathBuf, String> {
+    let rest = config_dir
+        .strip_prefix("~/")
+        .filter(|rest| !rest.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "manifest.json 不合法：config_dir「{config_dir}」必须是主目录内的相对路径（~/…）"
+            )
+        })?;
+    let relative = Path::new(rest);
+    if relative
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(format!(
+            "manifest.json 不合法：config_dir「{config_dir}」不得包含「..」"
+        ));
     }
-    if let Some(rest) = config_dir.strip_prefix("~/") {
-        return Ok(home.join(rest));
+    let dir = home.join(relative);
+    fs::create_dir_all(&dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
+    let canonical_home = home
+        .canonicalize()
+        .map_err(|e| format!("解析主目录失败：{e}"))?;
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("解析插件配置目录失败：{e}"))?;
+    if !canonical.starts_with(&canonical_home) {
+        return Err(format!(
+            "manifest.json 不合法：config_dir「{config_dir}」逃逸了主目录"
+        ));
     }
-    Ok(PathBuf::from(config_dir))
+    Ok(canonical)
 }
 
 /// 测试共享助手：临时主目录 + 独立引擎的插件服务与配置存储。
@@ -643,7 +720,6 @@ pub(crate) mod testutil {
         collections::HashMap,
         path::{Path, PathBuf},
     };
-    use wasmtime::Engine;
 
     use super::PluginService;
 
@@ -651,10 +727,11 @@ pub(crate) mod testutil {
         /// 测试专用构造器：注入任意主目录；生产代码使用 `Default`（读取真实 `~`）。
         pub fn new(home: Option<PathBuf>) -> Self {
             Self {
-                engine: Engine::default(),
+                engine: super::build_engine(),
                 home,
                 entries: Mutex::new(Vec::new()),
                 last_errors: Mutex::new(HashMap::new()),
+                op_lock: Mutex::new(()),
             }
         }
     }
@@ -690,9 +767,9 @@ mod tests {
     }
 
     fn startup_service(home: &Path) -> PluginService {
-        let mut store = store_at(home);
+        let store = Mutex::new(store_at(home));
         let service = test_service(home);
-        service.startup(&mut store);
+        service.startup(&store);
         service
     }
 
@@ -737,9 +814,9 @@ mod tests {
     #[test]
     fn startup_writes_builtin_config_entry_to_disk() {
         let home = temp_home();
-        let mut store = store_at(home.path());
+        let store = Mutex::new(store_at(home.path()));
         let service = test_service(home.path());
-        service.startup(&mut store);
+        service.startup(&store);
 
         // 启动 upsert 落盘；重启（重新 open）后条目仍在。
         let reopened = Store::open(home.path().join(".maestro").join("config.json"));
@@ -878,17 +955,21 @@ mod tests {
             "entry": "plugin.wasm"
         }"#;
         write_installed_plugin(home.path(), "pi", pi_clone_manifest, builtin::PI_WASM);
-        let mut store = store_at(home.path());
+        let store = Mutex::new(store_at(home.path()));
         store
+            .lock()
+            .unwrap()
             .add_plugin("https://example.com/pi-clone.git")
             .unwrap();
         store
+            .lock()
+            .unwrap()
             .set_plugin_id("https://example.com/pi-clone.git", "pi")
             .unwrap();
 
         let service = test_service(home.path());
         // startup 会先 upsert 内置条目（先加载），克隆来源后加载 → 后者进错误态。
-        service.startup(&mut store);
+        service.startup(&store);
 
         let views = service.list();
         assert_eq!(views.len(), 2);
@@ -1047,11 +1128,15 @@ mod tests {
     #[test]
     fn disabled_plugin_is_skipped_in_apply() {
         let home = temp_home();
-        let mut store = store_at(home.path());
+        let store = Mutex::new(store_at(home.path()));
         let service = test_service(home.path());
-        service.startup(&mut store);
+        service.startup(&store);
         service
-            .set_enabled(&mut store, builtin::BUILTIN_PI_SOURCE, false)
+            .set_enabled(
+                &mut store.lock().unwrap(),
+                builtin::BUILTIN_PI_SOURCE,
+                false,
+            )
             .unwrap();
 
         let reports = service.apply(&BTreeMap::new());
@@ -1064,14 +1149,20 @@ mod tests {
         let home = temp_home();
         // 损坏插件（非组件）+ 可用内置 pi：前者失败不影响后者。
         write_installed_plugin(home.path(), "broken", GOOD_MANIFEST, br#"(module)"#);
-        let mut store = store_at(home.path());
-        store.add_plugin("https://example.com/broken.git").unwrap();
+        let store = Mutex::new(store_at(home.path()));
         store
+            .lock()
+            .unwrap()
+            .add_plugin("https://example.com/broken.git")
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
             .set_plugin_id("https://example.com/broken.git", "broken")
             .unwrap();
 
         let service = test_service(home.path());
-        service.startup(&mut store);
+        service.startup(&store);
 
         let mut providers = BTreeMap::new();
         providers.insert(
@@ -1096,5 +1187,23 @@ mod tests {
         let pi = reports.iter().find(|r| r.status == "applied").unwrap();
         assert_eq!(pi.files, vec!["agent/models.json"]);
         assert_eq!(pi.id.as_deref(), Some("pi"));
+    }
+
+    #[test]
+    fn wasm_call_is_interrupted_when_fuel_exhausted() {
+        let home = temp_home();
+        let service = test_service(home.path());
+        let config_dir = home.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let mut plugin = instantiate_component(&service.engine, builtin::PI_WASM, &config_dir)
+            .expect("内置 pi 组件应可实例化");
+        // 预算归零：第一条 guest 指令即触发 fuel 耗尽中断，调用转错误路径。
+        plugin.store.set_fuel(0).unwrap();
+        let handle = plugin.world.maestro_plugin_plugin();
+        let err = handle
+            .call_write_providers(&mut plugin.store, &Vec::new())
+            .expect_err("fuel 耗尽应中断 wasm 调用");
+        assert!(format!("{err:#}").contains("fuel"), "实际错误：{err:#}");
     }
 }

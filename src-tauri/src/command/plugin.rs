@@ -7,22 +7,28 @@ use crate::{
 };
 
 /// 列出插件注册表（metadata 与加载状态）。
+/// store 处于保护状态时报错，而非静默返回空列表误导用户。
 #[tauri::command]
-pub fn list_plugins(service: State<'_, PluginService>) -> Vec<PluginView> {
-    service.list()
+pub fn list_plugins(
+    store: State<'_, AppStore>,
+    service: State<'_, PluginService>,
+) -> Result<Vec<PluginView>, String> {
+    let guard = lock_store(&store)?;
+    guard.get().map_err(StoreError::message)?;
+    Ok(service.list())
 }
 
 /// 添加 Git 来源插件：先落配置条目，随后下载/加载；
 /// 失败保留条目、插件进错误态，可用「更新」重试。
+///
+/// 服务内部只短暂持有 store 锁，克隆与 WASM 校验期间不阻塞其他命令。
 #[tauri::command]
 pub fn add_plugin(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<(), String> {
-    validate_git_source(&source)?;
-    let mut guard = lock_store(&store)?;
-    service.add(&mut guard, &source)
+    service.add(&store.store, &source)
 }
 
 /// 对 Git 来源插件执行「更新」：拉取最新版本，失败时旧版本继续可用。
@@ -32,8 +38,7 @@ pub fn update_plugin(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
-    service.update(&mut guard, &source)
+    service.update(&store.store, &source)
 }
 
 /// 移除 Git 插件：配置条目与插件目录一并清理。内置插件不可移除。
@@ -72,40 +77,16 @@ pub fn reload_plugins(
 
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，
 /// 返回逐插件结果（写入的文件、跳过的 Provider、失败原因）。
+///
+/// 投影前先释放 store 锁：插件执行时长不受应用控制，不得阻塞 Provider 命令。
 #[tauri::command]
 pub fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
-    let guard = lock_store(&store)?;
-    let providers = &guard.get().map_err(StoreError::message)?.providers;
-    Ok(service.apply(providers))
-}
-
-/// Git 来源 v1 仅匿名 HTTPS（本地路径仅供测试代码使用）。
-fn validate_git_source(source: &str) -> Result<(), String> {
-    let rest = source
-        .strip_prefix("https://")
-        .filter(|rest| !rest.is_empty())
-        .ok_or_else(|| "Git 来源仅支持匿名 HTTPS 地址".to_owned())?;
-    if rest.chars().any(char::is_whitespace) {
-        return Err("Git 来源地址不合法".to_owned());
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_git_source;
-
-    #[test]
-    fn git_source_must_be_https() {
-        assert!(validate_git_source("https://example.com/some-plugin.git").is_ok());
-        assert!(validate_git_source("http://example.com/some-plugin.git").is_err());
-        assert!(validate_git_source("git@github.com:user/repo.git").is_err());
-        assert!(validate_git_source("file:///tmp/repo").is_err());
-        assert!(validate_git_source("https://").is_err());
-        assert!(validate_git_source("不是地址").is_err());
-        assert!(validate_git_source("https://exa mple.com/repo.git").is_err());
-    }
+    let providers = {
+        let guard = lock_store(&store)?;
+        guard.get().map_err(StoreError::message)?.providers.clone()
+    };
+    Ok(service.apply(&providers))
 }

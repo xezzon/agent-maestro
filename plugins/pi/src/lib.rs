@@ -53,8 +53,11 @@ fn write_models_json(providers: &[Provider]) -> Result<(), String> {
         .map_err(|e| format!("序列化 models.json 失败\n原因：{e}"))?;
     json.push('\n');
 
-    fs::write(Path::new("agent/models.json"), json)
-        .map_err(|e| format!("写入 agent/models.json 失败\n原因：{e}"))?;
+    // 原子写入：先写临时文件成功后再 rename，I/O 错误不会留下半截的 models.json。
+    let tmp = Path::new("agent/models.json.tmp");
+    fs::write(tmp, &json).map_err(|e| format!("写入 agent/models.json 临时文件失败\n原因：{e}"))?;
+    fs::rename(tmp, Path::new("agent/models.json"))
+        .map_err(|e| format!("替换 agent/models.json 失败\n原因：{e}"))?;
 
     Ok(())
 }

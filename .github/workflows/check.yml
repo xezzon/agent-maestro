@@ -85,7 +85,10 @@ jobs:
       run:
         working-directory: plugins/pi
     steps:
+      # 插件构建会运行 Cargo build scripts，不得保留 GITHUB_TOKEN 凭据。
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # GitHub 托管的运行器包含最新版本的 Rust 工具链，仓库根 rust-toolchain.toml 锁定实际版本。
       - name: Install wasm32-wasip2 target
