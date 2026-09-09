@@ -4,8 +4,8 @@ mod provider;
 mod store;
 
 use command::{
-    add_plugin, apply_providers, create_provider, delete_provider, list_plugins, list_providers,
-    reload_plugins, remove_plugin, set_plugin_enabled, update_plugin, update_provider,
+    apply_providers, create_provider, delete_provider, list_plugins, list_providers,
+    reload_plugins, set_plugin_enabled, update_provider,
 };
 use plugin::PluginService;
 use std::sync::Mutex;
@@ -61,9 +61,6 @@ pub fn run() {
             update_provider,
             delete_provider,
             list_plugins,
-            add_plugin,
-            update_plugin,
-            remove_plugin,
             set_plugin_enabled,
             reload_plugins,
             apply_providers

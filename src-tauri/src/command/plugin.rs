@@ -18,40 +18,6 @@ pub fn list_plugins(
     Ok(service.list())
 }
 
-/// 添加 Git 来源插件：先落配置条目，随后下载/加载；
-/// 失败保留条目、插件进错误态，可用「更新」重试。
-///
-/// 服务内部只短暂持有 store 锁，克隆与 WASM 校验期间不阻塞其他命令。
-#[tauri::command]
-pub fn add_plugin(
-    store: State<'_, AppStore>,
-    service: State<'_, PluginService>,
-    source: String,
-) -> Result<(), String> {
-    service.add(&store.store, &source)
-}
-
-/// 对 Git 来源插件执行「更新」：拉取最新版本，失败时旧版本继续可用。
-#[tauri::command]
-pub fn update_plugin(
-    store: State<'_, AppStore>,
-    service: State<'_, PluginService>,
-    source: String,
-) -> Result<(), String> {
-    service.update(&store.store, &source)
-}
-
-/// 移除 Git 插件：配置条目与插件目录一并清理。内置插件不可移除。
-#[tauri::command]
-pub fn remove_plugin(
-    store: State<'_, AppStore>,
-    service: State<'_, PluginService>,
-    source: String,
-) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
-    service.remove(&mut guard, &source)
-}
-
 /// 启用/禁用插件。
 #[tauri::command]
 pub fn set_plugin_enabled(

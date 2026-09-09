@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use serde::Deserialize;
 
@@ -8,7 +8,7 @@ use serde::Deserialize;
 /// 必填字段缺失或插件 id 不合法即加载失败（见 issue #34）。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Manifest {
-    /// 插件 id：`[a-z][a-z0-9-_]*`，同时是插件安装目录名。
+    /// 插件 id：`[a-z][a-z0-9-_]*`。
     pub id: String,
     pub name: String,
     /// 适配的工具（如 `pi`），仅用于展示。
@@ -40,8 +40,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
         }
     }
     // entry 必须是插件目录内的相对路径：绝对路径或含 `..` 上跳即拒绝，
-    // 防止外置 manifest 借 entry 读取插件根目录之外的文件（读取前的最终
-    // 规范化校验见 `resolve_entry`）。
+    // 防止外置 manifest 借 entry 读取插件根目录之外的文件。
     let entry_path = Path::new(&manifest.entry);
     if entry_path.is_absolute() || entry_path.components().any(|c| c == Component::ParentDir) {
         return Err(format!(
@@ -50,26 +49,6 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
         ));
     }
     Ok(manifest)
-}
-
-/// 把 manifest.entry 解析为插件根目录内的安全绝对路径。
-///
-/// 先规范化插件根目录与拼接结果，再验证解析路径仍在根目录内：
-/// 指向根目录之外的符号链接同样被拒绝。
-pub fn resolve_entry(root: &Path, entry: &str) -> Result<PathBuf, String> {
-    let root = root
-        .canonicalize()
-        .map_err(|e| format!("插件目录不可访问：{e}"))?;
-    let target = root.join(Path::new(entry));
-    let resolved = target
-        .canonicalize()
-        .map_err(|_| format!("插件入口文件缺失：{}", target.display()))?;
-    if !resolved.starts_with(&root) {
-        return Err(format!(
-            "manifest.json 不合法：entry「{entry}」逃逸了插件目录"
-        ));
-    }
-    Ok(resolved)
 }
 
 /// 插件 id 规则与 Provider slug 一致（见 CONTEXT.md）。
@@ -85,7 +64,6 @@ pub fn is_valid_plugin_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn manifest_parses_required_fields_and_tolerates_unknown_fields() {
@@ -149,22 +127,5 @@ mod tests {
             let err = parse_manifest(&text).unwrap_err();
             assert!(err.contains("entry"), "entry {entry:?} 应被拒绝：{err}");
         }
-    }
-
-    #[test]
-    fn resolve_entry_rejects_symlink_escape_and_missing_file() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let outside_file = outside.path().join("secret.wasm");
-        fs::write(&outside_file, b"x").unwrap();
-        std::os::unix::fs::symlink(&outside_file, root.path().join("escape.wasm")).unwrap();
-
-        let err = resolve_entry(root.path(), "escape.wasm").unwrap_err();
-        assert!(err.contains("逃逸"), "{err}");
-        assert!(resolve_entry(root.path(), "missing.wasm").is_err());
-
-        let real = root.path().join("plugin.wasm");
-        fs::write(&real, b"x").unwrap();
-        assert_eq!(resolve_entry(root.path(), "plugin.wasm").unwrap(), real);
     }
 }

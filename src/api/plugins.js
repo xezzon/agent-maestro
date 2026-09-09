@@ -1,14 +1,14 @@
 /**
  * @typedef {Object} PluginView
- * @property {string} source 插件条目唯一身份（`builtin:<id>` 或 Git 仓库地址）。
+ * @property {string} source 插件条目唯一身份（第一期仅 `builtin:<id>`；Git / 本地来源见 issue #36）。
  * @property {boolean} builtin 内置插件可禁用、不可移除、不出现在添加流程。
  * @property {boolean} enabled
- * @property {string=} id 安装目录名；尚未成功安装时缺省。
+ * @property {string=} id 插件 id。
  * @property {string=} name
  * @property {string=} tool 适配的工具。
  * @property {string=} config_dir 插件被授权写入的目录（`~` 已展开）。
  * @property {'loaded' | 'error'} status
- * @property {string=} error 错误态的原因（网络 / manifest 不合法 / 接口不兼容 / id 冲突）。
+ * @property {string=} error 错误态的原因（如来源暂不支持 / manifest 不合法 / 接口不兼容）。
  */
 /**
  * @typedef {Object} SkippedProvider
@@ -34,30 +34,6 @@ import { invoke } from "@tauri-apps/api/core";
  */
 export async function listPlugins() {
   return invoke("list_plugins");
-}
-
-/**
- * 添加 Git 来源插件：命令返回前会先落配置条目，下载失败保留条目可重试。
- * @param {string} source 仅支持匿名 HTTPS 地址。
- */
-export async function addPlugin(source) {
-  await invoke("add_plugin", { source });
-}
-
-/**
- * 拉取最新版本；失败时旧版本继续可用。
- * @param {string} source
- */
-export async function updatePlugin(source) {
-  await invoke("update_plugin", { source });
-}
-
-/**
- * 配置条目与插件目录一并清理；内置插件会被后端拒绝。
- * @param {string} source
- */
-export async function removePlugin(source) {
-  await invoke("remove_plugin", { source });
 }
 
 /**

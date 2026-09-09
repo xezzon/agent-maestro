@@ -5,81 +5,13 @@ import {
   Card,
   Empty,
   Flex,
-  Form,
-  Input,
   message,
-  Popconfirm,
   Spin,
   Switch,
   Tag,
   Typography,
 } from "antd";
-import {
-  addPlugin,
-  listPlugins,
-  reloadPlugins,
-  removePlugin,
-  setPluginEnabled,
-  updatePlugin,
-} from "./api/plugins";
-
-const GIT_SOURCE_RULES = [
-  { required: true, message: "请输入 Git 仓库地址" },
-  {
-    validator: (_, value) =>
-      value?.startsWith("https://") && value.length > "https://".length
-        ? Promise.resolve()
-        : Promise.reject(new Error("插件来源仅支持匿名 HTTPS 地址")),
-  },
-];
-
-/**
- * 添加 Git 来源插件：先落配置条目，下载失败条目保留可重试。
- * @param {Object} param0
- * @param {(refresh: boolean) => void} param0.onFinish
- */
-function AddPluginForm({ onFinish }) {
-  const [form] = Form.useForm();
-  const [saving, setSaving] = useState(false);
-
-  async function handleSave() {
-    setSaving(true);
-    try {
-      const { source } = await form.validateFields();
-      await addPlugin(source);
-      message.success("插件已添加");
-      onFinish(true);
-    } catch (err) {
-      // 校验失败已内联展示，无需重复报错；其余为命令调用失败。
-      if (!err?.errorFields) {
-        message.error(String(err));
-      }
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <Form form={form} layout="vertical">
-      <Form.Item
-        name="source"
-        label="Git 仓库地址"
-        extra="匿名 HTTPS、默认分支，仓库根目录即插件根目录"
-        rules={GIT_SOURCE_RULES}
-      >
-        <Input placeholder="例如 https://github.com/user/maestro-plugin.git" />
-      </Form.Item>
-      <div className="card-actions">
-        <Button disabled={saving} onClick={() => onFinish(false)}>
-          取消
-        </Button>
-        <Button type="primary" loading={saving} onClick={handleSave}>
-          添加
-        </Button>
-      </div>
-    </Form>
-  );
-}
+import { listPlugins, reloadPlugins, setPluginEnabled } from "./api/plugins";
 
 /**
  * @param {Object} param0
@@ -144,30 +76,6 @@ function PluginCard({ plugin, onReload }) {
           <Tag color="success">已加载</Tag>
         </div>
       )}
-      {!plugin.builtin && (
-        <div className="card-actions">
-          <Button
-            disabled={busy}
-            onClick={() => run(() => updatePlugin(plugin.source), "已更新")}
-          >
-            更新
-          </Button>
-          <Popconfirm
-            title="移除插件"
-            description="将同时删除配置条目与插件目录，确定移除？"
-            okText="移除"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-            onConfirm={() =>
-              run(() => removePlugin(plugin.source), "已移除")
-            }
-          >
-            <Button danger disabled={busy}>
-              移除
-            </Button>
-          </Popconfirm>
-        </div>
-      )}
     </Card>
   );
 }
@@ -176,7 +84,6 @@ export default function PluginsPage() {
   const [plugins, setPlugins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [adding, setAdding] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -235,13 +142,6 @@ export default function PluginsPage() {
           <Button disabled={loading} onClick={handleReloadRegistry}>
             重新加载
           </Button>
-          <Button
-            type="primary"
-            disabled={adding || loading}
-            onClick={() => setAdding(true)}
-          >
-            添加插件
-          </Button>
         </Flex>
       </div>
 
@@ -249,26 +149,10 @@ export default function PluginsPage() {
         <div className="page-loading">
           <Spin />
         </div>
-      ) : plugins.length === 0 && !adding ? (
-        <Empty description="尚未安装任何插件">
-          <Button type="primary" onClick={() => setAdding(true)}>
-            添加插件
-          </Button>
-        </Empty>
+      ) : plugins.length === 0 ? (
+        <Empty description="尚未安装任何插件" />
       ) : (
         <Flex vertical gap={16}>
-          {adding && (
-            <Card title="添加插件">
-              <AddPluginForm
-                onFinish={(refresh) => {
-                  setAdding(false);
-                  if (refresh) {
-                    reload();
-                  }
-                }}
-              />
-            </Card>
-          )}
           {plugins.map((plugin) => (
             <PluginCard
               key={plugin.source}
