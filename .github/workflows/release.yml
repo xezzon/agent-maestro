@@ -19,16 +19,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux 只构建 AppImage，Windows 只构建 NSIS 安装器，精简 Release 产物。
           - platform: 'macos-latest' # for Arm based macs (M1 and above).
             args: '--target aarch64-apple-darwin'
           - platform: 'macos-latest' # for Intel based macs.
             args: '--target x86_64-apple-darwin'
           - platform: 'ubuntu-22.04'
-            args: ''
+            args: '--bundles appimage'
           - platform: 'ubuntu-22.04-arm' # Only available in public repos.
-            args: ''
+            args: '--bundles appimage'
           - platform: 'windows-latest'
-            args: ''
+            args: '--bundles nsis'
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 90
     steps:
@@ -56,7 +57,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+          # xdg-utils（xdg-open）是 AppImage 打包的必需项；ubuntu-22.04-arm 镜像未预装。
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
 
       # key 带 os/arch 前缀：与 Check 工作流按 runner.os 写入的缓存区分开，
       # 并区分 matrix 中两个共用 macos-latest 的条目（ARM64 / X64）。
