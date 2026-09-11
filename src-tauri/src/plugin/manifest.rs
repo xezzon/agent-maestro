@@ -86,23 +86,6 @@ pub fn is_https_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
 }
 
-/// 落位用的 manifest 文本：上游字段（含未知字段）原样保留，仅把 `entry` 重写为落位文件名。
-///
-/// 磁盘 manifest 与上游 manifest 仅此一处不同（见 ADR 0006）。
-pub fn rewrite_entry(upstream_manifest: &str, entry: &str) -> Result<String, String> {
-    let value: serde_json::Value = serde_json::from_str(upstream_manifest)
-        .map_err(|e| format!("manifest.json 不合法：{e}"))?;
-    let serde_json::Value::Object(mut fields) = value else {
-        return Err("manifest.json 不合法：顶层必须是 JSON 对象".to_owned());
-    };
-    fields.insert(
-        "entry".to_owned(),
-        serde_json::Value::String(entry.to_owned()),
-    );
-    serde_json::to_string_pretty(&serde_json::Value::Object(fields))
-        .map_err(|e| format!("manifest.json 序列化失败：{e}"))
-}
-
 /// 插件 id 规则与 Provider slug 一致（见 CONTEXT.md）。
 pub fn is_valid_plugin_id(id: &str) -> bool {
     let mut chars = id.chars();
@@ -224,32 +207,5 @@ mod tests {
         assert!(!is_https_url("/tmp/manifest.json"));
         assert!(!is_https_url("https://"));
         assert!(!is_https_url(""));
-    }
-
-    #[test]
-    fn rewrite_entry_keeps_unknown_fields_and_replaces_entry() {
-        let text = r#"{
-            "id": "pi",
-            "name": "Pi",
-            "tool": "pi",
-            "config_dir": "~/.pi",
-            "entry": "https://example.com/plugin.wasm",
-            "author": "someone"
-        }"#;
-
-        let rewritten = rewrite_entry(text, "plugin.wasm").unwrap();
-
-        assert_eq!(
-            parse_manifest(SourceKind::File, &rewritten).unwrap().entry,
-            "plugin.wasm"
-        );
-        let value: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
-        assert_eq!(value["author"], "someone", "上游未知字段原样保留");
-        assert_eq!(value["name"], "Pi");
-    }
-
-    #[test]
-    fn rewrite_entry_rejects_non_object_manifest() {
-        assert!(rewrite_entry("[1, 2]", "plugin.wasm").is_err());
     }
 }

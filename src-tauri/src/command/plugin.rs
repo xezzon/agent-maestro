@@ -32,7 +32,7 @@ pub fn set_plugin_enabled(
 
 /// 添加插件（https 来源）：写条目后下载、校验、落位并装载。
 ///
-/// 条目一旦写入即保留：安装失败进错误态，用「更新」重试。
+/// 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
 #[tauri::command]
 pub async fn add_plugin(app: AppHandle, url: String) -> Result<(), String> {
     on_install_pool(app, move |store, service| {
@@ -42,12 +42,13 @@ pub async fn add_plugin(app: AppHandle, url: String) -> Result<(), String> {
     .await
 }
 
-/// 更新插件：无条件重新下载，成功才替换落位目录（失败时旧版本保持可用）。
+/// 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，成功才替换落位目录
+/// （失败时旧版本保持可用）。
 #[tauri::command]
-pub async fn update_plugin(app: AppHandle, source: String) -> Result<(), String> {
+pub async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String> {
     on_install_pool(app, move |store, service| {
         let mut guard = store.lock()?;
-        service.update_plugin(&mut guard, &source)
+        service.reload_plugin(&mut guard, &source)
     })
     .await
 }
@@ -61,17 +62,6 @@ pub fn remove_plugin(
 ) -> Result<(), String> {
     let mut guard = lock_store(&store)?;
     service.remove_plugin(&mut guard, &source)
-}
-
-/// 重新加载：从磁盘重建插件注册表，不联网。
-#[tauri::command]
-pub fn reload_plugins(
-    store: State<'_, AppStore>,
-    service: State<'_, PluginService>,
-) -> Result<(), String> {
-    let guard = lock_store(&store)?;
-    service.reload(&guard);
-    Ok(())
 }
 
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，

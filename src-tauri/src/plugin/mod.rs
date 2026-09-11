@@ -128,7 +128,7 @@ struct RegistryEntry {
     state: PluginState,
 }
 
-/// 插件服务：内存注册表随配置/磁盘变更整体重建（`reload`）。
+/// 插件服务：内存注册表随配置/磁盘变更整体重建（`rebuild`）。
 pub struct PluginService {
     engine: Engine,
     /// 用于展开 manifest 的 `~`；测试可替换为临时主目录。
@@ -245,13 +245,14 @@ impl PluginService {
         {
             eprintln!("failed to upsert builtin plugin entry: {}", e.message());
         }
-        self.reload(&guard);
+        self.rebuild(&guard);
     }
 
-    /// 只读磁盘重建注册表，不联网（手动修复插件文件后无需重启应用）。
+    /// 只读磁盘重建注册表，不联网；启动与来源变更后调用。
     ///
-    /// 同一插件 id 只能由一个来源持有：后加载者进错误态并指明冲突来源。
-    pub fn reload(&self, store: &Store) {
+    /// 按来源回源获取由 [`PluginService::reload_plugin`] 负责。同一插件 id 只能由一个
+    /// 来源持有：后加载者进错误态并指明冲突来源。
+    fn rebuild(&self, store: &Store) {
         let entries = store
             .get()
             .map(|config| config.plugins.clone())
@@ -300,10 +301,9 @@ impl PluginService {
         if !is_https_url(&entry.source) {
             return Err(format!("暂不支持的插件来源：{}", entry.source));
         }
-        let id = entry
-            .id
-            .as_deref()
-            .ok_or_else(|| "尚未安装成功（下载、校验或落位失败），请点「更新」重试".to_owned())?;
+        let id = entry.id.as_deref().ok_or_else(|| {
+            "尚未安装成功（下载、校验或落位失败），请点「重新加载」重试".to_owned()
+        })?;
         self.load_placed(id)
     }
 
@@ -383,7 +383,7 @@ impl PluginService {
         store
             .set_plugin_enabled(source, enabled)
             .map_err(|e| e.message())?;
-        self.reload(store);
+        self.rebuild(store);
         Ok(())
     }
 
@@ -391,7 +391,7 @@ impl PluginService {
     /// 校验、id 冲突检查、下载 wasm、落位并装载。
     ///
     /// 条目一旦写入即保留：安装失败进错误态并记下原因，用户无需重新填 URL，
-    /// 修复后用「更新」重试（见 ADR 0006）。
+    /// 修复后用「重新加载」重试（见 ADR 0006）。
     pub fn add_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
         if !is_https_url(source) {
             return Err(format!(
@@ -400,15 +400,16 @@ impl PluginService {
         }
         store.add_plugin(source).map_err(|e| e.message())?;
         let outcome = self.install(store, source);
-        self.reload(store);
+        self.rebuild(store);
         if let Err(reason) = outcome {
             self.record_failure(source, reason);
         }
         Ok(())
     }
 
-    /// 更新 https 插件：无条件重新下载，成功才替换落位目录——失败时旧版本保持可用。
-    pub fn update_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
+    /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
+    /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
+    pub fn reload_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
         let entry = store
             .get()
             .map_err(|e| e.message())?
@@ -422,13 +423,13 @@ impl PluginService {
                 .message()
             })?;
         if entry.source.starts_with(builtin::SOURCE_PREFIX) {
-            return Err("内置插件不可更新".to_owned());
+            return Err("内置插件不可重新加载".to_owned());
         }
         if !is_https_url(&entry.source) {
-            return Err(format!("来源 {source} 不是 https 地址，无法更新"));
+            return Err(format!("来源 {source} 不是 https 地址，无法重新加载"));
         }
         self.install(store, source)?;
-        self.reload(store);
+        self.rebuild(store);
         Ok(())
     }
 
@@ -453,11 +454,11 @@ impl PluginService {
             install::remove(&self.plugin_dir(id)?)?;
         }
         store.delete_plugin(source).map_err(|e| e.message())?;
-        self.reload(store);
+        self.rebuild(store);
         Ok(())
     }
 
-    /// 安装/更新共用管线：下载 manifest → 校验 → 上游 id 变更检查 → id 冲突检查 →
+    /// 安装与重新加载共用管线：下载 manifest → 校验 → 上游 id 变更检查 → id 冲突检查 →
     /// 下载 wasm → 实例化校验 → 落位 → 持久化 id。
     ///
     /// 实例化校验先于落位：任何失败都不会碰到已落位的旧版本。
@@ -902,19 +903,19 @@ mod tests {
     }
 
     #[test]
-    fn https_entry_without_installed_dir_points_at_update() {
+    fn https_entry_without_installed_dir_points_at_reload() {
         let home = temp_home();
         let mut store = store_at(home.path());
         store.add_plugin(MANIFEST_URL).unwrap();
         let service = test_service(home.path());
 
-        service.reload(&store);
+        service.rebuild(&store);
 
         let view = &service.list()[0];
         assert_eq!(view.status, "error");
         assert_eq!(view.id, None, "从未安装成功：没有落位 id");
         assert!(
-            view.error.as_deref().unwrap().contains("「更新」重试"),
+            view.error.as_deref().unwrap().contains("「重新加载」重试"),
             "错误态需给出恢复路径：{:?}",
             view.error
         );
@@ -948,7 +949,7 @@ mod tests {
         assert!(error.contains("builtin:pi"), "需指明冲突来源：{error}");
     }
 
-    // ---- 安装与更新 ----
+    // ---- 安装与重新加载 ----
 
     #[test]
     fn add_https_plugin_installs_places_and_projects() {
@@ -964,17 +965,17 @@ mod tests {
         assert_eq!(plugins[0].source, MANIFEST_URL);
         assert_eq!(plugins[0].id.as_deref(), Some("pi2"));
 
-        // 落位目录：manifest.json + plugin.wasm；磁盘 manifest ≠ 上游 manifest 仅 entry 一处。
+        // 落位目录：manifest.json + plugin.wasm；manifest 原样保留（entry 仍是上游 URL）。
         let dir = placed_dir(home.path(), "pi2");
         let disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
-        assert_eq!(disk["entry"], "plugin.wasm");
+        assert_eq!(disk["entry"], WASM_URL, "entry 保留回源地址");
         assert_eq!(disk["name"], "Pi2");
         assert!(!fs::read(dir.join("plugin.wasm")).unwrap().is_empty());
 
         let views = service.list();
         assert_eq!(views[0].status, "loaded", "{:?}", views[0].error);
-        assert!(!views[0].builtin, "https 来源可更新、可移除");
+        assert!(!views[0].builtin, "https 来源可重新加载、可移除");
         assert_eq!(views[0].id.as_deref(), Some("pi2"));
         assert!(views[0].config_dir.as_deref().unwrap().ends_with(".pi2"));
 
@@ -1060,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_install_can_be_retried_with_update() {
+    fn failed_install_can_be_retried_with_reload() {
         let home = temp_home();
         let mut store = store_at(home.path());
         let fetcher = Arc::new(StubFetcher::new());
@@ -1069,10 +1070,10 @@ mod tests {
         service.add_plugin(&mut store, MANIFEST_URL).unwrap();
         assert_eq!(service.list()[0].status, "error");
 
-        // 网络恢复后用「更新」重试同一来源，不必重新填 URL。
+        // 网络恢复后用「重新加载」重试同一来源，不必重新填 URL。
         fetcher.serve(MANIFEST_URL, third_party_manifest("pi2", "Pi2"));
         fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
-        service.update_plugin(&mut store, MANIFEST_URL).unwrap();
+        service.reload_plugin(&mut store, MANIFEST_URL).unwrap();
 
         assert_eq!(service.list()[0].status, "loaded");
         assert_eq!(store.get().unwrap().plugins[0].id.as_deref(), Some("pi2"));
@@ -1165,7 +1166,7 @@ mod tests {
 
         // 模拟重启：全新服务 + 空替身（任何拉取都会失败），只读磁盘重建注册表。
         let offline = test_service(home.path());
-        offline.reload(&store);
+        offline.rebuild(&store);
 
         let views = offline.list();
         assert_eq!(views[0].status, "loaded", "{:?}", views[0].error);
@@ -1174,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn update_keeps_old_version_usable_when_download_or_validation_fails() {
+    fn reload_keeps_old_version_usable_when_download_or_validation_fails() {
         let home = temp_home();
         let mut store = store_at(home.path());
         let fetcher = Arc::new(StubFetcher::new());
@@ -1187,7 +1188,7 @@ mod tests {
 
         // 上游 manifest 的 id 变更：报错并保持旧状态。
         fetcher.serve(MANIFEST_URL, third_party_manifest("other", "Other"));
-        let err = service.update_plugin(&mut store, MANIFEST_URL).unwrap_err();
+        let err = service.reload_plugin(&mut store, MANIFEST_URL).unwrap_err();
         assert!(err.contains("id 已从"), "{err}");
         assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v1"));
         assert_eq!(fs::read(dir.join("plugin.wasm")).unwrap(), installed);
@@ -1199,19 +1200,19 @@ mod tests {
         // wasm 不是有效的组件：装载校验失败，旧目录不被替换。
         fetcher.serve(MANIFEST_URL, third_party_manifest("pi2", "Pi2 v2"));
         fetcher.serve(WASM_URL, b"not a wasm component".to_vec());
-        let err = service.update_plugin(&mut store, MANIFEST_URL).unwrap_err();
+        let err = service.reload_plugin(&mut store, MANIFEST_URL).unwrap_err();
         assert!(err.contains("WASM"), "{err}");
         assert_eq!(
             fs::read(dir.join("plugin.wasm")).unwrap(),
             installed,
-            "更新失败旧版本保持可用"
+            "重新加载失败旧版本保持可用"
         );
         assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v1"));
         assert_eq!(store.get().unwrap().plugins[0].id.as_deref(), Some("pi2"));
 
-        // 更新成功：替换落位目录为新版本，不留备份。
+        // 重新加载成功：替换落位目录为新版本，不留备份。
         fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
-        service.update_plugin(&mut store, MANIFEST_URL).unwrap();
+        service.reload_plugin(&mut store, MANIFEST_URL).unwrap();
         assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v2"));
         assert!(
             !dir.with_extension("old").exists(),
@@ -1220,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn update_rejects_builtin_and_missing_source() {
+    fn reload_rejects_builtin_and_missing_source() {
         let home = temp_home();
         let mut store = store_at(home.path());
         store
@@ -1229,15 +1230,15 @@ mod tests {
         let service = test_service(home.path());
 
         let err = service
-            .update_plugin(&mut store, builtin::BUILTIN_PI_SOURCE)
+            .reload_plugin(&mut store, builtin::BUILTIN_PI_SOURCE)
             .unwrap_err();
-        assert!(err.contains("内置插件不可更新"), "{err}");
+        assert!(err.contains("内置插件不可重新加载"), "{err}");
         let err = service
             .remove_plugin(&mut store, builtin::BUILTIN_PI_SOURCE)
             .unwrap_err();
         assert!(err.contains("内置插件不可移除"), "{err}");
         let err = service
-            .update_plugin(&mut store, "https://nope.example.com/manifest.json")
+            .reload_plugin(&mut store, "https://nope.example.com/manifest.json")
             .unwrap_err();
         assert!(err.contains("插件条目不存在"), "{err}");
     }
@@ -1258,7 +1259,7 @@ mod tests {
         // 配置目录不可写：落位成功，但条目 id 落盘失败。
         fs::set_permissions(&maestro_dir, fs::Permissions::from_mode(0o555)).unwrap();
 
-        let outcome = service.update_plugin(&mut store, MANIFEST_URL);
+        let outcome = service.reload_plugin(&mut store, MANIFEST_URL);
 
         fs::set_permissions(&maestro_dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(outcome.is_err(), "id 落盘失败应报错：{outcome:?}");

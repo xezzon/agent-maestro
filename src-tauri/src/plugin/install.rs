@@ -1,7 +1,8 @@
 //! 第三方插件的落位目录布局：`<home>/.maestro/plugins/<id>/{manifest.json, plugin.wasm}`。
 //!
-//! 落位 manifest 与上游 manifest 仅 `entry` 一处不同（重写为 [`PLACED_WASM`]）。
-//! 应用启动只读该目录重建注册表，因此 https 插件离线可用（见 ADR 0006）。
+//! 落位 manifest 为上游 manifest 原样（`entry` 保留回源地址，「重新加载」据此重新获取
+//! 资源）；wasm 内容固定存为 [`PLACED_WASM`]。应用启动只读该目录重建注册表，因此离线
+//! 可用（见 ADR 0006）。
 
 use std::{
     fs,
@@ -13,7 +14,7 @@ use super::manifest::{self, Manifest, SourceKind};
 
 /// 落位目录中的 manifest 文件名。
 pub const PLACED_MANIFEST: &str = "manifest.json";
-/// 落位目录中的 wasm 文件名；上游 manifest 的 `entry` 落位时重写为该名。
+/// 落位目录中的 wasm 文件名；上游资源内容固定落到该名，装载时只读此名、不解析 `entry`。
 pub const PLACED_WASM: &str = "plugin.wasm";
 
 /// 宿主插件根目录（`~/.maestro/plugins`）。
@@ -33,13 +34,11 @@ pub struct Placed {
     pub wasm: Vec<u8>,
 }
 
-/// 落位：上游 manifest（`entry` 重写为本地文件名）与 wasm 先写进同目录的临时目录，
-/// 再整体替换目标目录。
+/// 落位：上游 manifest 原样与 wasm 先写进同目录的临时目录，再整体替换目标目录。
 ///
-/// 目标已存在时先备份旧目录，替换成功才删除备份、失败则恢复备份——因此更新失败时
-/// 旧版本保持可用。临时目录与目标同父目录，保证替换是一次改名而非跨设备拷贝。
+/// 目标已存在时先备份旧目录，替换成功才删除备份、失败则恢复备份——因此「重新加载」
+/// 失败时旧版本保持可用。临时目录与目标同父目录，保证替换是一次改名而非跨设备拷贝。
 pub fn place(target: &Path, upstream_manifest: &str, wasm: &[u8]) -> Result<(), String> {
-    let placed_manifest = manifest::rewrite_entry(upstream_manifest, PLACED_WASM)?;
     let parent = target
         .parent()
         .ok_or_else(|| format!("落位目录不合法：{}", target.display()))?;
@@ -54,7 +53,7 @@ pub fn place(target: &Path, upstream_manifest: &str, wasm: &[u8]) -> Result<(), 
         let what = what.to_owned();
         move |e: std::io::Error| format!("写入{what}失败：{e}")
     };
-    fs::write(staging_path.join(PLACED_MANIFEST), placed_manifest)
+    fs::write(staging_path.join(PLACED_MANIFEST), upstream_manifest)
         .map_err(io_error(PLACED_MANIFEST))?;
     fs::write(staging_path.join(PLACED_WASM), wasm).map_err(io_error(PLACED_WASM))?;
 
@@ -136,20 +135,23 @@ mod tests {
     }
 
     #[test]
-    fn place_writes_layout_with_rewritten_entry() {
+    fn place_keeps_upstream_manifest_verbatim() {
         let root = temp_root();
         let target = plugin_dir(root.path(), "zed");
 
         place(&target, MANIFEST, b"wasm-bytes").unwrap();
 
-        let manifest: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(target.join(PLACED_MANIFEST)).unwrap())
-                .unwrap();
+        let placed_text = fs::read_to_string(target.join(PLACED_MANIFEST)).unwrap();
         assert_eq!(
-            manifest["entry"], PLACED_WASM,
-            "落位时 entry 重写为本地相对名"
+            placed_text, MANIFEST,
+            "落位 manifest 为上游 manifest 原样（entry 保留回源地址）"
         );
-        assert_eq!(manifest["author"], "someone", "上游字段原样保留");
+        let manifest: serde_json::Value = serde_json::from_str(&placed_text).unwrap();
+        assert_eq!(
+            manifest["entry"], "https://example.com/releases/download/v1/plugin.wasm",
+            "entry 保留上游 URL，供「重新加载」回源"
+        );
+        assert_eq!(manifest["author"], "someone", "上游未知字段原样保留");
         assert_eq!(fs::read(target.join(PLACED_WASM)).unwrap(), b"wasm-bytes");
 
         let placed = read(&target).unwrap();
@@ -179,17 +181,6 @@ mod tests {
                 .starts_with(".staging-")),
             "替换成功后不得留下临时落位目录"
         );
-    }
-
-    #[test]
-    fn place_rejects_manifest_that_is_not_an_object() {
-        let root = temp_root();
-        let target = plugin_dir(root.path(), "zed");
-
-        let err = place(&target, "[1, 2]", b"wasm").unwrap_err();
-
-        assert!(err.contains("manifest.json"), "{err}");
-        assert!(!target.exists(), "校验失败不得落位");
     }
 
     #[test]

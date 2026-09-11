@@ -18,10 +18,9 @@ import {
 import {
   addPlugin,
   listPlugins,
-  reloadPlugins,
+  reloadPlugin,
   removePlugin,
   setPluginEnabled,
-  updatePlugin,
 } from "./api/plugins";
 
 /**
@@ -92,10 +91,10 @@ function PluginCard({ plugin, onReload }) {
           <Button
             disabled={busy}
             onClick={() =>
-              run(() => updatePlugin(plugin.source), "已更新插件")
+              run(() => reloadPlugin(plugin.source), "已重新加载插件")
             }
           >
-            更新
+            重新加载
           </Button>
           <Popconfirm
             title="移除插件"
@@ -223,22 +222,9 @@ export default function PluginsPage() {
     const list = await reload();
     const added = list.find((plugin) => plugin.source === url);
     if (added?.status === "error") {
-      message.warning("插件条目已添加，但安装未完成：见卡片上的原因，可点「更新」重试");
+      message.warning("插件条目已添加，但安装未完成：见卡片上的原因，可点「重新加载」重试");
     } else {
       message.success("已添加插件");
-    }
-  }
-
-  async function handleReloadRegistry() {
-    setLoading(true);
-    try {
-      await reloadPlugins();
-      message.success("已从磁盘重新加载插件");
-      await reload();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setLoading(false);
     }
   }
 
@@ -267,9 +253,6 @@ export default function PluginsPage() {
           Plugins
         </Typography.Title>
         <Flex gap={8}>
-          <Button disabled={loading} onClick={handleReloadRegistry}>
-            重新加载
-          </Button>
           <Button
             type="primary"
             disabled={loading || adding}

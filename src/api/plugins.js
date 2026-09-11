@@ -46,7 +46,7 @@ export async function setPluginEnabled(source, enabled) {
 
 /**
  * 添加插件：https 来源指向 manifest.json，下载、校验、落位并装载。
- * 条目一旦写入即保留：安装失败进错误态，用「更新」重试。
+ * 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
  * @param {string} url 指向 manifest.json 的 https 地址
  */
 export async function addPlugin(url) {
@@ -54,11 +54,12 @@ export async function addPlugin(url) {
 }
 
 /**
- * 更新插件：无条件重新下载，成功才替换旧版本（失败时旧版本保持可用）。
+ * 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，成功才替换旧版本
+ * （失败时旧版本保持可用）。
  * @param {string} source
  */
-export async function updatePlugin(source) {
-  await invoke("update_plugin", { source });
+export async function reloadPlugin(source) {
+  await invoke("reload_plugin", { source });
 }
 
 /**
@@ -67,11 +68,6 @@ export async function updatePlugin(source) {
  */
 export async function removePlugin(source) {
   await invoke("remove_plugin", { source });
-}
-
-/** 从磁盘重建插件注册表，不联网。 */
-export async function reloadPlugins() {
-  await invoke("reload_plugins");
 }
 
 /**
