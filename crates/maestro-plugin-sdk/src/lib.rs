@@ -24,8 +24,8 @@
 //! 合同 breaking 变更时同步升 major；minor/patch 在 major 内各自独立。
 //! `maestro:plugin` v1 内只加不改（只新增字段、协议与函数）；宿主承诺 WIT 包
 //! 版本升级时可同时注册新旧接口版本，给插件作者渐进迁移窗口。
-//! WIT 合同的单一来源是仓库根的 `wit/maestro-plugin.wit`，本 crate 构建时
-//! 内嵌该文件生成绑定（见 build.rs）。
+//! WIT 合同随本 crate 分发（`wit/maestro-plugin.wit`），构建时内嵌该文件
+//! 生成绑定（见 build.rs）。
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 

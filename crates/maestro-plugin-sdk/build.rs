@@ -17,24 +17,14 @@ fn main() {
     println!("cargo::rerun-if-changed=build.rs");
 }
 
-/// 定位 WIT 合同：优先仓库根的 `wit/`（单一来源，始终生效——即使 crate 目录下
-/// 残留了旧的发布副本也不会用它）；crates.io 包与 `cargo publish` 的校验构建
-/// （包根之外没有仓库 wit/）回退到包内自带的 `wit/maestro-plugin.wit`，
-/// 由 release 工作流在打包前拷入。
+/// 定位 WIT 合同：随本 crate 分发的 `wit/maestro-plugin.wit`（单一来源，
+/// 宿主 bindgen! 与插件绑定共用；随包发布即自包含）。
 fn locate_wit() -> PathBuf {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 未设置"));
-    let repo = manifest_dir.join("../../wit/maestro-plugin.wit");
-    let packaged = manifest_dir.join("wit/maestro-plugin.wit");
-    if repo.is_file() {
-        repo
-    } else if packaged.is_file() {
-        packaged
-    } else {
-        panic!(
-            "找不到 WIT 合同：既无 {} 也无 {}（发布到 crates.io 前须由 release 流程把合同拷入包内）",
-            repo.display(),
-            packaged.display()
-        );
+    let wit_path = manifest_dir.join("wit/maestro-plugin.wit");
+    if !wit_path.is_file() {
+        panic!("找不到 WIT 合同：{}", wit_path.display());
     }
+    wit_path
 }

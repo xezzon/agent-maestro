@@ -112,7 +112,7 @@ jobs:
       - name: Verify SDK / WIT version alignment
         id: version
         run: |
-          wit_version=$(sed -n 's/^package maestro:plugin@\([0-9][0-9.]*\);/\1/p' wit/maestro-plugin.wit)
+          wit_version=$(sed -n 's/^package maestro:plugin@\([0-9][0-9.]*\);/\1/p' crates/maestro-plugin-sdk/wit/maestro-plugin.wit)
           sdk_version=$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' crates/maestro-plugin-sdk/Cargo.toml | head -1)
           wit_major=${wit_version%%.*}
           sdk_major=${sdk_version%%.*}
@@ -122,13 +122,6 @@ jobs:
           fi
           echo "Aligned: maestro:plugin@$wit_version <-> maestro-plugin-sdk@$sdk_version"
           echo "sdk_version=$sdk_version" >> "$GITHUB_OUTPUT"
-
-      # crates.io 包必须自包含：包根之外的 wit/ 无法打进包，发布前把合同拷入
-      # crate 目录（未 gitignore 以便打包；SDK build.rs 仅在包外无仓库 wit/ 时回退用它）。
-      - name: Copy WIT contract into the SDK crate
-        run: |
-          mkdir -p crates/maestro-plugin-sdk/wit
-          cp wit/maestro-plugin.wit crates/maestro-plugin-sdk/wit/
 
       - name: Skip if version already published
         id: published
