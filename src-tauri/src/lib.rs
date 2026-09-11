@@ -40,6 +40,8 @@ pub fn run() {
     }));
     builder
         .plugin(tauri_plugin_opener::init())
+        // 添加插件对话框用它选择本机 manifest.json（file 来源）。
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let store = match store::default_path() {
                 Ok(path) => Store::open(path),

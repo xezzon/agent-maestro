@@ -3,7 +3,7 @@
 //!
 //! 架构决策见 ADR 0004：宿主不代写文件，而是把 manifest 声明的 `config_dir`
 //! 预开放给组件（guest 路径 `/`），插件在沙箱内经 WASI 直接落盘。
-//! https 来源的下载、落位与生命周期见 ADR 0006。
+//! 第三方来源（https 与 file）的获取、落位与生命周期见 ADR 0006。
 
 pub mod builtin;
 pub mod fetch;
@@ -29,7 +29,7 @@ use crate::{
     store::{Store, StoreError},
 };
 use fetch::{Fetcher, HttpFetcher};
-use manifest::{SourceKind, is_https_url, parse_manifest};
+use manifest::{Manifest, SourceKind, is_https_url, parse_manifest};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -44,9 +44,9 @@ use bindings::exports::maestro::plugin::plugin::{Model as WitModel, Provider as 
 
 /// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
 ///
-/// `source` 是条目唯一身份（内置 `builtin:<id>` 或指向 manifest.json 的 https URL），
-/// 重复添加在 store 层拒绝；`id` 为插件 id，内置条目在 upsert 时写入，
-/// https 条目在安装成功后写入——它是来源到落位目录的唯一映射（见 ADR 0006）。
+/// `source` 是条目唯一身份（内置 `builtin:<id>`、指向 manifest.json 的 https URL
+/// 或本机绝对路径），重复添加在 store 层拒绝；`id` 为插件 id，内置条目在 upsert
+/// 时写入，第三方条目在安装成功后写入——它是来源到落位目录的唯一映射（见 ADR 0006）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginEntry {
     pub source: String,
@@ -280,7 +280,7 @@ impl PluginService {
 
     /// 按配置条目顺序装载；不认识的来源形态进错误态（如旧配置残留的 Git 来源）。
     fn build_entry(&self, entry: &PluginEntry) -> RegistryEntry {
-        let builtin = SourceKind::from_source(&entry.source) == SourceKind::Builtin;
+        let builtin = SourceKind::from_source(&entry.source) == Some(SourceKind::Builtin);
         let state = match self.load_entry(entry) {
             Ok(loaded) => PluginState::Loaded(loaded),
             Err(reason) => PluginState::Error(reason),
@@ -294,17 +294,21 @@ impl PluginService {
         }
     }
 
+    /// 装载一个条目：内置插件走内嵌字节；第三方来源（https 与 file 同构）按条目的
+    /// `id` 读落位目录，只读磁盘、不联网——file 来源因此离线可装载。
+    ///
+    /// 尚未安装成功的条目（`id` 为空）没有落位目录：报错并指明恢复路径。
     fn load_entry(&self, entry: &PluginEntry) -> Result<LoadedPlugin, String> {
-        if entry.source.starts_with(builtin::SOURCE_PREFIX) {
-            return self.load_builtin();
+        match SourceKind::from_source(&entry.source) {
+            Some(SourceKind::Builtin) => self.load_builtin(),
+            Some(SourceKind::Https | SourceKind::File) => {
+                let id = entry.id.as_deref().ok_or_else(|| {
+                    "尚未安装成功（读取、校验或落位失败），请点「重新加载」重试".to_owned()
+                })?;
+                self.load_placed(id)
+            }
+            None => Err(format!("暂不支持的插件来源：{}", entry.source)),
         }
-        if !is_https_url(&entry.source) {
-            return Err(format!("暂不支持的插件来源：{}", entry.source));
-        }
-        let id = entry.id.as_deref().ok_or_else(|| {
-            "尚未安装成功（下载、校验或落位失败），请点「重新加载」重试".to_owned()
-        })?;
-        self.load_placed(id)
     }
 
     /// 落位插件的装载管线：解析 manifest → 解析 config_dir（`~` 展开、目录不存在则先创建）
@@ -387,19 +391,22 @@ impl PluginService {
         Ok(())
     }
 
-    /// 添加 https 插件：先写配置条目（来源重复在 store 层拒绝），随后下载 manifest、
-    /// 校验、id 冲突检查、下载 wasm、落位并装载。
+    /// 添加第三方插件：先写配置条目（来源重复在 store 层拒绝），随后获取 manifest、
+    /// 校验、id 冲突检查、获取 wasm、落位并装载。
     ///
-    /// 条目一旦写入即保留：安装失败进错误态并记下原因，用户无需重新填 URL，
+    /// 条目一旦写入即保留：安装失败进错误态并记下原因，用户无需重新填来源，
     /// 修复后用「重新加载」重试（见 ADR 0006）。
     pub fn add_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
-        if !is_https_url(source) {
-            return Err(format!(
-                "插件来源仅支持指向 manifest.json 的 https 地址：{source}"
-            ));
-        }
+        let kind = match SourceKind::from_source(source) {
+            Some(kind @ (SourceKind::Https | SourceKind::File)) => kind,
+            _ => {
+                return Err(format!(
+                    "插件来源仅支持指向 manifest.json 的 https 地址或本机绝对路径：{source}"
+                ));
+            }
+        };
         store.add_plugin(source).map_err(|e| e.message())?;
-        let outcome = self.install(store, source);
+        let outcome = self.install(store, source, kind);
         self.rebuild(store);
         if let Err(reason) = outcome {
             self.record_failure(source, reason);
@@ -409,16 +416,16 @@ impl PluginService {
 
     /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
     /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
+    ///
+    /// file 来源没有单独的「更新」动作：重新加载即开发者回路的「编译 → 重新加载」。
     pub fn reload_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
         let entry = store.plugin_by_source(source).map_err(|e| e.message())?;
-        match SourceKind::from_source(&entry.source) {
-            SourceKind::Builtin => return Err("内置插件不可重新加载".to_owned()),
-            SourceKind::File => {
-                return Err(format!("来源 {source} 不是 https 地址，无法重新加载"));
-            }
-            SourceKind::Https => {}
-        }
-        let outcome = self.install(store, source);
+        let kind = match SourceKind::from_source(&entry.source) {
+            Some(SourceKind::Builtin) => return Err("内置插件不可重新加载".to_owned()),
+            Some(kind) => kind,
+            None => return Err(format!("来源 {source} 暂不支持重新加载")),
+        };
+        let outcome = self.install(store, source, kind);
         self.rebuild(store);
         if let Err(reason) = outcome {
             self.record_failure(source, reason.clone());
@@ -429,7 +436,7 @@ impl PluginService {
 
     /// 移除插件：删落位目录与配置条目；两者都已不存在同样成功（幂等）。
     ///
-    /// 只删宿主落位的目录，不动用户自己的文件；内置插件不可移除。
+    /// 只删宿主落位的副本，不动用户的插件项目目录；内置插件不可移除。
     pub fn remove_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
         let entry = match store.plugin_by_source(source) {
             Ok(entry) => entry,
@@ -437,7 +444,7 @@ impl PluginService {
             Err(StoreError::MissingSource { .. }) => return Ok(()),
             Err(e) => return Err(e.message()),
         };
-        if SourceKind::from_source(&entry.source) == SourceKind::Builtin {
+        if SourceKind::from_source(&entry.source) == Some(SourceKind::Builtin) {
             return Err("内置插件不可移除".to_owned());
         }
         if let Some(id) = &entry.id {
@@ -448,30 +455,21 @@ impl PluginService {
         Ok(())
     }
 
-    /// 安装与重新加载共用管线：下载 manifest → 校验 → 上游 id 变更检查 → id 冲突检查 →
-    /// 下载 wasm → 实例化校验 → 落位 → 持久化 id。
+    /// 安装与重新加载共用管线：获取 manifest → 校验 → 上游 id 变更检查 → id 冲突检查 →
+    /// 获取 wasm → 实例化校验 → 落位 → 持久化 id。
     ///
     /// 实例化校验先于落位：任何失败都不会碰到已落位的旧版本。
-    fn install(&self, store: &mut Store, source: &str) -> Result<(), String> {
-        let manifest_bytes = self
-            .fetcher
-            .fetch(source)
-            .map_err(|e| format!("下载 manifest 失败：{e}"))?;
-        let text = std::str::from_utf8(&manifest_bytes)
-            .map_err(|e| format!("manifest.json 不是合法 UTF-8：{e}"))?;
-        let manifest = parse_manifest(SourceKind::Https, text)?;
+    fn install(&self, store: &mut Store, source: &str, kind: SourceKind) -> Result<(), String> {
+        let (text, manifest) = self.source_manifest(source, kind)?;
         let installed = self.installed_id(store, source)?;
         check_upstream_id(installed.as_deref(), &manifest.id)?;
         self.check_id_conflict(store, source, &manifest.id)?;
 
-        let wasm = self
-            .fetcher
-            .fetch(&manifest.entry)
-            .map_err(|e| format!("下载插件 wasm 失败：{e}"))?;
+        let wasm = self.source_wasm(source, &manifest)?;
         let dir = self.plugin_dir(&manifest.id)?;
         let config_dir = resolve_config_dir(&manifest.config_dir, self.home()?)?;
         instantiate_component(&self.engine, &wasm, &config_dir)?;
-        install::place(&dir, text, &wasm)?;
+        install::place(&dir, &text, &wasm)?;
 
         if installed.as_deref() != Some(manifest.id.as_str())
             && let Err(e) = store.set_plugin_id(source, &manifest.id)
@@ -482,6 +480,44 @@ impl PluginService {
             return Err(e.message());
         }
         Ok(())
+    }
+
+    /// 读取来源的 manifest 文本：https 来源联网下载，file 来源读来源目录中的 manifest.json。
+    /// 文本原样落位（`entry` 保留回源地址），装载时不解析 `entry`（见 ADR 0006）。
+    fn source_manifest(
+        &self,
+        source: &str,
+        kind: SourceKind,
+    ) -> Result<(String, Manifest), String> {
+        let text = match kind {
+            SourceKind::Https => {
+                let bytes = self
+                    .fetcher
+                    .fetch(source)
+                    .map_err(|e| format!("下载 manifest 失败：{e}"))?;
+                String::from_utf8(bytes)
+                    .map_err(|e| format!("manifest.json 不是合法 UTF-8：{e}"))?
+            }
+            SourceKind::File => {
+                fs::read_to_string(source).map_err(|e| format!("读取 {source} 失败：{e}"))?
+            }
+            SourceKind::Builtin => return Err("内置插件不经安装".to_owned()),
+        };
+        let manifest = parse_manifest(kind, &text)?;
+        Ok((text, manifest))
+    }
+
+    /// 按 manifest 的 `entry` 获取 wasm：`entry` 是回源地址——https 则联网获取
+    /// （https 来源固定如此，file 来源也可指向 Release 产物），否则相对 manifest.json
+    /// 所在目录取本地文件。
+    fn source_wasm(&self, source: &str, manifest: &Manifest) -> Result<Vec<u8>, String> {
+        if is_https_url(&manifest.entry) {
+            return self
+                .fetcher
+                .fetch(&manifest.entry)
+                .map_err(|e| format!("下载插件 wasm 失败：{e}"));
+        }
+        read_source_entry(source, &manifest.entry)
     }
 
     /// 条目当前记录的插件 id：`None` 表示该来源尚未安装成功。
@@ -690,6 +726,29 @@ fn resolve_config_dir(config_dir: &str, home: &Path) -> Result<PathBuf, String> 
         ));
     }
     Ok(canonical)
+}
+
+/// 读取 file 来源 manifest 的相对 entry（相对 manifest.json 所在目录）。
+///
+/// 解析 manifest 时已拒绝绝对路径与 `..`；这里再按规范化后的真实路径确认它仍落在
+/// 来源目录内——符号链接不得把读取带到插件目录之外（与 `config_dir` 同一套规则）。
+fn read_source_entry(source: &str, entry: &str) -> Result<Vec<u8>, String> {
+    let dir = Path::new(source)
+        .parent()
+        .ok_or_else(|| format!("插件来源路径不合法：{source}"))?;
+    let target = dir.join(entry);
+    let canonical_dir = dir
+        .canonicalize()
+        .map_err(|e| format!("解析插件来源目录 {} 失败：{e}", dir.display()))?;
+    let canonical = target
+        .canonicalize()
+        .map_err(|e| format!("读取 {} 失败：{e}", target.display()))?;
+    if !canonical.starts_with(&canonical_dir) {
+        return Err(format!(
+            "manifest.json 不合法：entry「{entry}」逃逸了插件来源目录"
+        ));
+    }
+    fs::read(&canonical).map_err(|e| format!("读取 {} 失败：{e}", canonical.display()))
 }
 
 /// 测试共享助手：临时主目录 + 替身 fetcher 的插件服务与配置存储。
@@ -998,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn add_plugin_rejects_non_https_source() {
+    fn add_plugin_rejects_unrecognized_sources_before_any_io() {
         let home = temp_home();
         let mut store = store_at(home.path());
         let service = test_service(home.path());
@@ -1007,13 +1066,13 @@ mod tests {
             "http://example.com/manifest.json",
             "file:///tmp/manifest.json",
             "git://example.com/x.git",
-            "/tmp/manifest.json",
+            "plugins/pi/manifest.json",
         ] {
             let err = service.add_plugin(&mut store, source).unwrap_err();
             assert!(err.contains("插件来源仅支持"), "{source} 应被拒绝：{err}");
             assert!(
                 !err.contains("未预置的 URL"),
-                "仅 https 的判定必须在发起下载之前：{err}"
+                "来源形态的判定必须在发起下载或读盘之前：{err}"
             );
         }
         assert!(
@@ -1318,6 +1377,321 @@ mod tests {
         service.remove_plugin(&mut store, MANIFEST_URL).unwrap();
 
         assert!(service.list().is_empty());
+    }
+
+    // ---- file 来源（本地调试回路） ----
+
+    /// 仓库内 manifest 的 entry 形态：指向 cargo 原生产物路径（见 ADR 0006）。
+    const ARTIFACT_ENTRY: &str = "target/wasm32-wasip2/release/maestro_plugin_pi.wasm";
+
+    /// 本机插件项目目录的测试替身：`manifest.json` + `entry` 指向的产物。
+    struct SourceDir {
+        dir: tempfile::TempDir,
+    }
+
+    impl SourceDir {
+        fn new() -> Self {
+            Self {
+                dir: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        /// 写 manifest.json；`config_dir` 取 `~/.<id>`，落在测试的临时主目录内。
+        fn write_manifest(&self, id: &str, name: &str, entry: &str) -> PathBuf {
+            let path = self.manifest_path();
+            let text = manifest_json(id, name, "pi", &format!("~/.{id}"), entry);
+            fs::write(&path, text).unwrap();
+            path
+        }
+
+        /// 写 entry 指向的产物（自动建中间的 `target/...` 目录）。
+        fn write_artifact(&self, entry: &str, bytes: &[u8]) {
+            let path = self.dir.path().join(entry);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+
+        fn manifest_path(&self) -> PathBuf {
+            self.dir.path().join("manifest.json")
+        }
+
+        /// 来源身份：指向 manifest.json 的本机绝对路径。
+        fn source(&self) -> String {
+            self.manifest_path().display().to_string()
+        }
+    }
+
+    /// 选中本机 manifest.json 即添加：相对 entry 从来源目录取 wasm，一并落位后
+    /// 与 https 来源完全同构（装载、投影、重新加载、移除）。
+    #[test]
+    fn add_file_plugin_reads_source_dir_places_and_projects() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = test_service(home.path());
+        let source = SourceDir::new();
+        let manifest = source.write_manifest("pi2", "Pi2", ARTIFACT_ENTRY);
+        source.write_artifact(ARTIFACT_ENTRY, builtin::PI_WASM);
+
+        service.add_plugin(&mut store, &source.source()).unwrap();
+
+        let plugins = &store.get().unwrap().plugins;
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].source, source.source());
+        assert_eq!(
+            plugins[0].id.as_deref(),
+            Some("pi2"),
+            "安装成功后写入来源 → 落位目录的映射"
+        );
+
+        let dir = placed_dir(home.path(), "pi2");
+        assert_eq!(
+            fs::read_to_string(dir.join("manifest.json")).unwrap(),
+            fs::read_to_string(&manifest).unwrap(),
+            "落位 manifest 为来源原文（entry 仍是来源目录内的相对路径）"
+        );
+        assert_eq!(
+            fs::read(dir.join("plugin.wasm")).unwrap(),
+            builtin::PI_WASM.to_vec()
+        );
+
+        let views = service.list();
+        assert_eq!(views[0].status, "loaded", "{:?}", views[0].error);
+        assert!(!views[0].builtin, "file 来源可重新加载、可移除");
+        assert_eq!(views[0].id.as_deref(), Some("pi2"));
+        assert!(views[0].config_dir.as_deref().unwrap().ends_with(".pi2"));
+
+        store
+            .create_provider(
+                "gateway",
+                provider_openai("https://api.example.com/v1", "sk-plain", vec![]),
+            )
+            .unwrap();
+        let reports = service.apply(&store.get().unwrap().providers);
+        assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+        assert_eq!(reports[0].files, vec!["agent/models.json"]);
+        assert!(
+            home.path()
+                .join(".pi2")
+                .join("agent")
+                .join("models.json")
+                .exists(),
+            "file 来源与 https 来源共用同一装载与投影管线"
+        );
+    }
+
+    #[test]
+    fn add_file_plugin_with_https_entry_fetches_wasm_over_network() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let fetcher = StubFetcher::new();
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        let service = stub_service(home.path(), fetcher);
+        let source = SourceDir::new();
+        source.write_manifest("pi2", "Pi2", WASM_URL);
+
+        service.add_plugin(&mut store, &source.source()).unwrap();
+
+        let views = service.list();
+        assert_eq!(views[0].status, "loaded", "{:?}", views[0].error);
+        let placed = placed_dir(home.path(), "pi2");
+        assert_eq!(
+            fs::read(placed.join("plugin.wasm")).unwrap(),
+            builtin::PI_WASM.to_vec()
+        );
+        let disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(placed.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(disk["entry"], WASM_URL, "entry 保留回源地址");
+    }
+
+    #[test]
+    fn file_source_with_https_entry_recovers_when_the_network_returns() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let fetcher = Arc::new(StubFetcher::new());
+        fetcher.fail(WASM_URL, "网络不可达");
+        let service = PluginService::with_fetcher(Some(home.path().to_owned()), fetcher.clone());
+        let source = SourceDir::new();
+        source.write_manifest("pi2", "Pi2", WASM_URL);
+
+        service.add_plugin(&mut store, &source.source()).unwrap();
+
+        let view = &service.list()[0];
+        assert_eq!(view.status, "error");
+        assert!(
+            view.error.as_deref().unwrap().contains("网络不可达"),
+            "{:?}",
+            view.error
+        );
+        assert_eq!(view.id, None, "没有取到 wasm 即无落位");
+        assert!(!placed_dir(home.path(), "pi2").exists());
+
+        // 上游恢复后「重新加载」即成功：file 来源没有单独的「更新」动作。
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        service.reload_plugin(&mut store, &source.source()).unwrap();
+        assert_eq!(service.list()[0].status, "loaded");
+        assert_eq!(store.get().unwrap().plugins[0].id.as_deref(), Some("pi2"));
+
+        // 已安装后上游再次离线：重新加载失败，旧版本保持可用。
+        fetcher.fail(WASM_URL, "上游离线");
+        let err = service
+            .reload_plugin(&mut store, &source.source())
+            .unwrap_err();
+        assert!(err.contains("上游离线"), "{err}");
+        let view = &service.list()[0];
+        assert_eq!(view.status, "loaded", "{:?}", view.error);
+        assert_eq!(view.name.as_deref(), Some("Pi2"), "旧版本保持可用");
+    }
+
+    /// 开发回路：编译 → 重新加载。重新加载按来源重新读取，落位目录变为最新产物。
+    #[test]
+    fn reload_file_plugin_picks_up_the_rebuilt_artifact() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = test_service(home.path());
+        let source = SourceDir::new();
+        source.write_manifest("pi2", "Pi2 v1", ARTIFACT_ENTRY);
+        source.write_artifact(ARTIFACT_ENTRY, builtin::PI_WASM);
+        let manifest = source.source();
+        service.add_plugin(&mut store, &manifest).unwrap();
+        assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v1"));
+
+        source.write_manifest("pi2", "Pi2 v2", ARTIFACT_ENTRY);
+        service.reload_plugin(&mut store, &manifest).unwrap();
+
+        assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v2"));
+        let placed = placed_dir(home.path(), "pi2");
+        let disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(placed.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(disk["name"], "Pi2 v2", "落位目录为本次重新读取的最新产物");
+        assert_eq!(
+            fs::read(placed.join("plugin.wasm")).unwrap(),
+            builtin::PI_WASM.to_vec()
+        );
+        assert!(source.manifest_path().exists(), "不动用户的插件项目目录");
+    }
+
+    #[test]
+    fn reload_file_plugin_keeps_the_old_version_when_the_artifact_is_missing() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = test_service(home.path());
+        let source = SourceDir::new();
+        source.write_manifest("pi2", "Pi2 v1", ARTIFACT_ENTRY);
+        source.write_artifact(ARTIFACT_ENTRY, builtin::PI_WASM);
+        let manifest = source.source();
+        service.add_plugin(&mut store, &manifest).unwrap();
+
+        // 产物被删（编译失败或误删）：重新加载失败，旧版本保持可用。
+        source.write_manifest("pi2", "Pi2 v2", ARTIFACT_ENTRY);
+        fs::remove_file(source.dir.path().join(ARTIFACT_ENTRY)).unwrap();
+        let err = service.reload_plugin(&mut store, &manifest).unwrap_err();
+        assert!(err.contains("读取"), "{err}");
+        let view = &service.list()[0];
+        assert_eq!(view.status, "loaded");
+        assert_eq!(view.name.as_deref(), Some("Pi2 v1"), "旧版本保持可用");
+
+        // 重新编译出产物后重试成功。
+        source.write_artifact(ARTIFACT_ENTRY, builtin::PI_WASM);
+        service.reload_plugin(&mut store, &manifest).unwrap();
+        assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v2"));
+    }
+
+    #[test]
+    fn file_source_plugin_loads_from_placed_copy_without_the_source_dir() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = test_service(home.path());
+        let source = SourceDir::new();
+        source.write_manifest("pi2", "Pi2", ARTIFACT_ENTRY);
+        source.write_artifact(ARTIFACT_ENTRY, builtin::PI_WASM);
+        service.add_plugin(&mut store, &source.source()).unwrap();
+
+        // 来源项目目录整棵删掉：启动只读落位目录，file 来源离线可装载。
+        fs::remove_dir_all(source.dir.path()).unwrap();
+        let offline = test_service(home.path());
+        offline.rebuild(&store);
+
+        let view = &offline.list()[0];
+        assert_eq!(view.status, "loaded", "{:?}", view.error);
+        assert_eq!(view.name.as_deref(), Some("Pi2"));
+    }
+
+    #[test]
+    fn remove_file_plugin_deletes_entry_and_placed_copy_but_keeps_source_dir() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = test_service(home.path());
+        let source = SourceDir::new();
+        source.write_manifest("pi2", "Pi2", ARTIFACT_ENTRY);
+        source.write_artifact(ARTIFACT_ENTRY, builtin::PI_WASM);
+        let manifest = source.source();
+        service.add_plugin(&mut store, &manifest).unwrap();
+
+        service.remove_plugin(&mut store, &manifest).unwrap();
+        // 条目已不存在：视为已移除，不报错（幂等）。
+        service.remove_plugin(&mut store, &manifest).unwrap();
+
+        assert!(store.get().unwrap().plugins.is_empty());
+        assert!(!placed_dir(home.path(), "pi2").exists());
+        assert!(source.manifest_path().exists(), "不动用户的插件项目目录");
+        assert!(
+            source.dir.path().join(ARTIFACT_ENTRY).exists(),
+            "不动用户构建出的产物"
+        );
+    }
+
+    #[test]
+    fn file_source_manifest_may_not_reference_paths_outside_its_dir() {
+        for entry in [
+            "../outside.wasm",
+            "/etc/passwd",
+            "http://example.com/plugin.wasm",
+        ] {
+            let home = temp_home();
+            let mut store = store_at(home.path());
+            let service = test_service(home.path());
+            let source = SourceDir::new();
+            source.write_manifest("pi2", "Pi2", entry);
+
+            service.add_plugin(&mut store, &source.source()).unwrap();
+
+            let view = &service.list()[0];
+            assert_eq!(view.status, "error", "entry {entry:?}");
+            assert!(
+                view.error.as_deref().unwrap().contains("entry"),
+                "entry {entry:?}: {:?}",
+                view.error
+            );
+            assert!(!placed_dir(home.path(), "pi2").exists());
+        }
+    }
+
+    /// 符号链接不是 `entry` 语法能拦下的逃逸：读取前按真实路径确认仍在来源目录内。
+    #[cfg(unix)]
+    #[test]
+    fn file_source_entry_cannot_escape_the_source_dir_via_symlink() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = test_service(home.path());
+        let source = SourceDir::new();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_wasm = outside.path().join("plugin.wasm");
+        fs::write(&outside_wasm, builtin::PI_WASM).unwrap();
+        std::os::unix::fs::symlink(&outside_wasm, source.dir.path().join("escape.wasm")).unwrap();
+        source.write_manifest("pi2", "Pi2", "escape.wasm");
+
+        service.add_plugin(&mut store, &source.source()).unwrap();
+
+        let view = &service.list()[0];
+        assert_eq!(view.status, "error");
+        assert!(
+            view.error.as_deref().unwrap().contains("逃逸"),
+            "{:?}",
+            view.error
+        );
+        assert!(!placed_dir(home.path(), "pi2").exists());
     }
 
     // ---- 投影 ----

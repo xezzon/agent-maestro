@@ -12,22 +12,26 @@ pub enum SourceKind {
     Builtin,
     /// https 来源：指向正式发布的 manifest，`entry` 必须是 https URL。
     Https,
-    /// 本机目录中的 manifest（第三方来源的落位目录），`entry` 是目录内的相对路径。
+    /// 本机指向 manifest.json 的绝对路径（本地调试回路）：`entry` 是 manifest
+    /// 所在目录内的相对路径或 https URL。
     File,
 }
 
 impl SourceKind {
     /// 来源字符串的种类：装载与生命周期操作按此分派。
     ///
-    /// `builtin:<id>` 内置于应用；https URL 为正式发布来源；其余（本机绝对路径）
-    /// 为 file 来源——本地调试回路尚未实现（见 issue #43）。
-    pub fn from_source(source: &str) -> Self {
+    /// `builtin:<id>` 内置于应用；https URL 为正式发布来源；本机绝对路径为 file 来源。
+    /// 其余形态（如旧配置残留的 Git 地址、相对路径）无法识别，返回 `None` 由调用方
+    /// 报「暂不支持的插件来源」。
+    pub fn from_source(source: &str) -> Option<Self> {
         if source.starts_with(builtin::SOURCE_PREFIX) {
-            SourceKind::Builtin
+            Some(SourceKind::Builtin)
         } else if is_https_url(source) {
-            SourceKind::Https
+            Some(SourceKind::Https)
+        } else if Path::new(source).is_absolute() {
+            Some(SourceKind::File)
         } else {
-            SourceKind::File
+            None
         }
     }
 }
@@ -45,7 +49,8 @@ pub struct Manifest {
     pub tool: String,
     /// 插件被授权写入的配置目录；`~` 前缀在装载时展开。
     pub config_dir: String,
-    /// 入口 wasm 文件，相对插件根目录。
+    /// 入口 wasm 的回源地址：https URL，或相对 `manifest.json` 所在目录的相对路径
+    /// （约束按来源种类分列，见 ADR 0006；内置插件的 wasm 内嵌，本字段不参与解析）。
     pub entry: String,
 }
 
@@ -63,17 +68,23 @@ pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> 
                 ));
             }
         }
-        // entry 必须是 manifest 所在目录内的相对路径：绝对路径或含 `..` 上跳即拒绝，
-        // 防止外置 manifest 借 entry 读取插件根目录之外的文件。
+        // file 来源的 entry 是插件目录内的相对路径或 https URL（回源到网络）：绝对路径、
+        // `..` 上跳与其他 scheme（http://、file://…）一律拒绝，防止外置 manifest 借 entry
+        // 读取插件根目录之外的文件。
         SourceKind::File => {
-            let entry_path = Path::new(&manifest.entry);
-            if entry_path.is_absolute()
-                || entry_path.components().any(|c| c == Component::ParentDir)
-            {
-                return Err(format!(
-                    "manifest.json 不合法：entry「{}」必须是插件目录内的相对路径",
-                    manifest.entry
-                ));
+            if !is_https_url(&manifest.entry) {
+                let entry_path = Path::new(&manifest.entry);
+                if entry_path.is_absolute()
+                    || entry_path.components().any(|c| c == Component::ParentDir)
+                    // 带 scheme 的形态到不了联网获取分支，会在来源目录里读一个不可能
+                    // 存在的文件：在校验期拒掉，而不是报误导性的读取错误。
+                    || url::Url::parse(&manifest.entry).is_ok()
+                {
+                    return Err(format!(
+                        "manifest.json 不合法：entry「{}」必须是插件目录内的相对路径或 https URL",
+                        manifest.entry
+                    ));
+                }
             }
         }
     }
@@ -196,6 +207,31 @@ mod tests {
     }
 
     #[test]
+    fn file_entry_rejects_non_https_schemes() {
+        // 带 scheme 的 entry 只接受 https；http:// 等既不是相对路径也不会联网获取，
+        // 必须在解析期拒绝，而不是当成相对路径去读一个不可能存在的文件。
+        for entry in [
+            "http://example.com/plugin.wasm",
+            "file:///tmp/plugin.wasm",
+            "ftp://example.com/plugin.wasm",
+        ] {
+            let err = parse_manifest(SourceKind::File, &manifest_text("pi", entry)).unwrap_err();
+            assert!(
+                err.contains("entry") && err.contains("https URL"),
+                "entry {entry:?} 应被拒绝：{err}"
+            );
+        }
+        assert!(
+            parse_manifest(
+                SourceKind::File,
+                &manifest_text("pi", "https://example.com/plugin.wasm")
+            )
+            .is_ok(),
+            "file 来源的 https entry 合法（回源到网络）"
+        );
+    }
+
+    #[test]
     fn https_entry_must_be_an_https_url() {
         let ok = manifest_text("pi", "https://example.com/releases/download/v1/plugin.wasm");
         assert_eq!(
@@ -235,5 +271,28 @@ mod tests {
         assert!(!is_https_url("/tmp/manifest.json"));
         assert!(!is_https_url("https://"));
         assert!(!is_https_url(""));
+    }
+
+    #[test]
+    fn source_kind_is_derived_from_the_source_string() {
+        assert_eq!(
+            SourceKind::from_source("builtin:pi"),
+            Some(SourceKind::Builtin)
+        );
+        assert_eq!(
+            SourceKind::from_source("https://example.com/manifest.json"),
+            Some(SourceKind::Https)
+        );
+        assert_eq!(
+            SourceKind::from_source("/tmp/plugin/manifest.json"),
+            Some(SourceKind::File)
+        );
+        assert_eq!(
+            SourceKind::from_source("plugins/pi/manifest.json"),
+            None,
+            "相对路径不是合法的来源身份（file 来源要求本机绝对路径）"
+        );
+        assert_eq!(SourceKind::from_source("file:///tmp/manifest.json"), None);
+        assert_eq!(SourceKind::from_source("git://example.com/x.git"), None);
     }
 }

@@ -30,7 +30,8 @@ pub fn set_plugin_enabled(
     service.set_enabled(&mut guard, &source, enabled)
 }
 
-/// 添加插件（https 来源）：写条目后下载、校验、落位并装载。
+/// 添加插件（来源为指向 manifest.json 的 https 地址或本机绝对路径）：写条目后获取、
+/// 校验、落位并装载。
 ///
 /// 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
 #[tauri::command]
