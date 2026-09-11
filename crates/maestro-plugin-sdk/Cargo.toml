@@ -7,6 +7,9 @@ rust-version = "1.85.0"
 license = "MIT"
 description = "Maestro 插件 SDK：maestro:plugin WIT 合同的类型化 Rust 绑定与导出入口"
 repository = "https://github.com/xezzon/agent-maestro"
+readme = "README.md"
+# 不发布 crates.io：插件作者以 git 依赖引用本仓库（见 src/lib.rs 的「依赖方式」）。
+publish = false
 
 [dependencies]
 wit-bindgen = "0.61.1"

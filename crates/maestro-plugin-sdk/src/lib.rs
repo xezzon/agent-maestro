@@ -18,6 +18,18 @@
 //! export!(MyPlugin);
 //! ```
 //!
+//! # 依赖方式
+//!
+//! 本 crate 不发布到 crates.io，插件作者以 git 依赖引用本仓库中的 `crates/maestro-plugin-sdk`，
+//! 并锁定 Maestro 的发布 tag——tag 与宿主版本一致，随 tag 固化插件与宿主的兼容组合：
+//!
+//! ```toml
+//! [dependencies]
+//! maestro-plugin-sdk = { git = "https://github.com/xezzon/agent-maestro", tag = "vX.Y.Z" }
+//! ```
+//!
+//! 取含本 crate 的 release tag（首个此类 release 起可用）。
+//!
 //! # 版本对齐约定
 //!
 //! SDK 版本与 WIT 包 `maestro:plugin` 版本按 semver 对齐：SDK 1.x ↔ WIT 1.x，
