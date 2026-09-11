@@ -25,7 +25,7 @@ use crate::{provider::Provider, store::Store};
 
 mod bindings {
     wasmtime::component::bindgen!({
-        path: "../wit",
+        path: "../crates/maestro-plugin-sdk/wit",
         world: "plugin-world",
     });
 }

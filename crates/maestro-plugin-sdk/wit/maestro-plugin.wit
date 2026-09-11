@@ -1,4 +1,4 @@
-// Maestro 插件接口合同（仓库级单一来源：宿主 bindgen! 与插件 crate 共用，见 issue #34）。
+// Maestro 插件接口合同（单一来源：宿主 bindgen! 与插件 crate 共用，见 issue #34）。
 // Provider 领域模型焊进接口版本：加字段/加协议 = 升级包版本 + 插件重编译。
 package maestro:plugin@1.0.0;
 
