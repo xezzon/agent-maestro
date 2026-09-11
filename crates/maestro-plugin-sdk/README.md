@@ -41,4 +41,5 @@ export!(MyPlugin);
 ## 参考
 
 - 内置 pi 插件（`plugins/pi`）是参考实现，兼作本 crate 的常驻契约回归。
+- 面向插件作者的完整指南（manifest 语义、发布流、调试回路、安全规则）：[`docs/plugin-authoring.md`](../../docs/plugin-authoring.md)。
 - WIT 合同随本 crate 分发（`wit/maestro-plugin.wit`），构建时内嵌生成绑定（`build.rs`）；版本约定见 crate 文档（`src/lib.rs`）。
