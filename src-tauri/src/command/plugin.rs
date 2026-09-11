@@ -1,7 +1,7 @@
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    AppStore, lock_store,
+    AppStore,
     plugin::{PluginApplyReport, PluginService, PluginView},
     store::StoreError,
 };
@@ -13,7 +13,7 @@ pub fn list_plugins(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
-    let guard = lock_store(&store)?;
+    let guard = store.lock()?;
     guard.get().map_err(StoreError::message)?;
     Ok(service.list())
 }
@@ -26,7 +26,7 @@ pub fn set_plugin_enabled(
     source: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
+    let mut guard = store.lock()?;
     service.set_enabled(&mut guard, &source, enabled)
 }
 
@@ -34,10 +34,10 @@ pub fn set_plugin_enabled(
 ///
 /// 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
 #[tauri::command]
-pub async fn add_plugin(app: AppHandle, url: String) -> Result<(), String> {
+pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
     on_install_pool(app, move |store, service| {
         let mut guard = store.lock()?;
-        service.add_plugin(&mut guard, &url)
+        service.add_plugin(&mut guard, &source)
     })
     .await
 }
@@ -60,7 +60,7 @@ pub fn remove_plugin(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
+    let mut guard = store.lock()?;
     service.remove_plugin(&mut guard, &source)
 }
 
@@ -74,7 +74,7 @@ pub fn apply_providers(
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
     let providers = {
-        let guard = lock_store(&store)?;
+        let guard = store.lock()?;
         guard.get().map_err(StoreError::message)?.providers.clone()
     };
     Ok(service.apply(&providers))

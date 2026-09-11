@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tauri::State;
 
 use crate::{
-    AppStore, lock_store,
+    AppStore,
     provider::{Endpoints, ModelEntry, Provider},
     store::StoreError,
 };
@@ -40,7 +40,7 @@ impl From<ProviderRequest> for Provider {
 
 #[tauri::command]
 pub fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provider>, String> {
-    let guard = lock_store(&store)?;
+    let guard = store.lock()?;
     let config = guard.get().map_err(StoreError::message)?;
     Ok(config.providers.clone())
 }
@@ -50,7 +50,7 @@ pub fn create_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
+    let mut guard = store.lock()?;
 
     let slug = provider.slug.clone();
 
@@ -64,7 +64,7 @@ pub fn update_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
+    let mut guard = store.lock()?;
 
     let slug = provider.slug.clone();
 
@@ -76,7 +76,7 @@ pub fn update_provider(
 
 #[tauri::command]
 pub fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
-    let mut guard = lock_store(&store)?;
+    let mut guard = store.lock()?;
 
     guard
         .delete_provider(&slug)

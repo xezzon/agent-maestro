@@ -47,10 +47,10 @@ export async function setPluginEnabled(source, enabled) {
 /**
  * 添加插件：https 来源指向 manifest.json，下载、校验、落位并装载。
  * 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
- * @param {string} url 指向 manifest.json 的 https 地址
+ * @param {string} source 指向 manifest.json 的 https 地址
  */
-export async function addPlugin(url) {
-  await invoke("add_plugin", { url });
+export async function addPlugin(source) {
+  await invoke("add_plugin", { source });
 }
 
 /**

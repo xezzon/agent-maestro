@@ -25,10 +25,6 @@ impl AppStore {
     }
 }
 
-fn lock_store(store: &AppStore) -> Result<std::sync::MutexGuard<'_, Store>, String> {
-    store.lock()
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();

@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::manifest::{self, Manifest, SourceKind};
+use super::manifest::{self, Manifest};
 
 /// 落位目录中的 manifest 文件名。
 pub const PLACED_MANIFEST: &str = "manifest.json";
@@ -100,7 +100,7 @@ pub fn read(target: &Path) -> Result<Placed, String> {
     let manifest_path = target.join(PLACED_MANIFEST);
     let manifest_text = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("读取 {} 失败：{e}", manifest_path.display()))?;
-    let manifest = manifest::parse_manifest(SourceKind::File, &manifest_text)?;
+    let manifest = manifest::parse_placed(&manifest_text)?;
 
     let wasm_path = target.join(PLACED_WASM);
     let wasm =
@@ -121,14 +121,15 @@ pub fn remove(target: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const MANIFEST: &str = r#"{
-        "id": "zed",
-        "name": "Zed",
-        "tool": "zed",
-        "config_dir": "~/.config/zed",
-        "entry": "https://example.com/releases/download/v1/plugin.wasm",
-        "author": "someone"
-    }"#;
+    fn manifest() -> String {
+        crate::plugin::testutil::manifest_json(
+            "zed",
+            "Zed",
+            "zed",
+            "~/.config/zed",
+            "https://example.com/releases/download/v1/plugin.wasm",
+        )
+    }
 
     fn temp_root() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -138,20 +139,20 @@ mod tests {
     fn place_keeps_upstream_manifest_verbatim() {
         let root = temp_root();
         let target = plugin_dir(root.path(), "zed");
+        let manifest = manifest();
 
-        place(&target, MANIFEST, b"wasm-bytes").unwrap();
+        place(&target, &manifest, b"wasm-bytes").unwrap();
 
         let placed_text = fs::read_to_string(target.join(PLACED_MANIFEST)).unwrap();
         assert_eq!(
-            placed_text, MANIFEST,
+            placed_text, manifest,
             "落位 manifest 为上游 manifest 原样（entry 保留回源地址）"
         );
-        let manifest: serde_json::Value = serde_json::from_str(&placed_text).unwrap();
+        let placed_json: serde_json::Value = serde_json::from_str(&placed_text).unwrap();
         assert_eq!(
-            manifest["entry"], "https://example.com/releases/download/v1/plugin.wasm",
+            placed_json["entry"], "https://example.com/releases/download/v1/plugin.wasm",
             "entry 保留上游 URL，供「重新加载」回源"
         );
-        assert_eq!(manifest["author"], "someone", "上游未知字段原样保留");
         assert_eq!(fs::read(target.join(PLACED_WASM)).unwrap(), b"wasm-bytes");
 
         let placed = read(&target).unwrap();
@@ -164,9 +165,10 @@ mod tests {
     fn place_replaces_existing_dir_and_drops_backup() {
         let root = temp_root();
         let target = plugin_dir(root.path(), "zed");
-        place(&target, MANIFEST, b"old").unwrap();
+        let manifest = manifest();
+        place(&target, &manifest, b"old").unwrap();
 
-        place(&target, MANIFEST, b"new").unwrap();
+        place(&target, &manifest, b"new").unwrap();
 
         assert_eq!(fs::read(target.join(PLACED_WASM)).unwrap(), b"new");
         assert!(
@@ -187,7 +189,7 @@ mod tests {
     fn remove_is_idempotent() {
         let root = temp_root();
         let target = plugin_dir(root.path(), "zed");
-        place(&target, MANIFEST, b"wasm").unwrap();
+        place(&target, &manifest(), b"wasm").unwrap();
 
         remove(&target).unwrap();
         assert!(!target.exists());
@@ -202,7 +204,30 @@ mod tests {
         assert!(read(&target).unwrap_err().contains("manifest.json"));
 
         fs::create_dir_all(&target).unwrap();
-        fs::write(target.join(PLACED_MANIFEST), MANIFEST).unwrap();
+        fs::write(target.join(PLACED_MANIFEST), manifest()).unwrap();
         assert!(read(&target).unwrap_err().contains(PLACED_WASM));
+    }
+
+    #[test]
+    fn read_accepts_placed_manifest_whose_entry_escapes_the_plugin_dir() {
+        let root = temp_root();
+        let target = plugin_dir(root.path(), "zed");
+        // 落位 manifest 是上游原文，entry 已不是本机相对路径：读取时不得再按
+        // file 规则拒绝（装载根本不解析 entry，见 ADR 0006）。
+        let manifest = crate::plugin::testutil::manifest_json(
+            "zed",
+            "Zed",
+            "zed",
+            "~/.config/zed",
+            "https://host/a/../b.wasm",
+        );
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join(PLACED_MANIFEST), &manifest).unwrap();
+        fs::write(target.join(PLACED_WASM), b"wasm").unwrap();
+
+        let placed = read(&target).unwrap();
+
+        assert_eq!(placed.manifest.entry, "https://host/a/../b.wasm");
+        assert_eq!(placed.wasm, b"wasm");
     }
 }

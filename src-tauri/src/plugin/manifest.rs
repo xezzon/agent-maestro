@@ -1,6 +1,6 @@
-use std::path::{Component, Path};
-
+use crate::plugin::builtin;
 use serde::Deserialize;
+use std::path::{Component, Path};
 
 /// 插件来源种类：决定 `entry` 的校验规则（见 ADR 0006）。
 ///
@@ -14,6 +14,22 @@ pub enum SourceKind {
     Https,
     /// 本机目录中的 manifest（第三方来源的落位目录），`entry` 是目录内的相对路径。
     File,
+}
+
+impl SourceKind {
+    /// 来源字符串的种类：装载与生命周期操作按此分派。
+    ///
+    /// `builtin:<id>` 内置于应用；https URL 为正式发布来源；其余（本机绝对路径）
+    /// 为 file 来源——本地调试回路尚未实现（见 issue #43）。
+    pub fn from_source(source: &str) -> Self {
+        if source.starts_with(builtin::SOURCE_PREFIX) {
+            SourceKind::Builtin
+        } else if is_https_url(source) {
+            SourceKind::Https
+        } else {
+            SourceKind::File
+        }
+    }
 }
 
 /// 插件 metadata 的唯一来源：插件根目录的 `manifest.json`。
@@ -35,24 +51,7 @@ pub struct Manifest {
 
 /// 解析并校验 manifest 文本；`entry` 的约束按来源种类分列。
 pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> {
-    let manifest: Manifest =
-        serde_json::from_str(text).map_err(|e| format!("manifest.json 不合法：{e}"))?;
-    if !is_valid_plugin_id(&manifest.id) {
-        return Err(format!(
-            "manifest.json 不合法：插件 id「{}」需以小写字母开头，仅允许小写字母、数字、连字符和下划线",
-            manifest.id
-        ));
-    }
-    for (field, value) in [
-        ("name", &manifest.name),
-        ("tool", &manifest.tool),
-        ("config_dir", &manifest.config_dir),
-        ("entry", &manifest.entry),
-    ] {
-        if value.is_empty() {
-            return Err(format!("manifest.json 不合法：{field} 不能为空"));
-        }
-    }
+    let manifest = parse_metadata(text)?;
     match kind {
         // wasm 内嵌于二进制，entry 不参与解析。
         SourceKind::Builtin => {}
@@ -81,6 +80,37 @@ pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> 
     Ok(manifest)
 }
 
+/// 解析落位目录中的 manifest 文本。
+///
+/// 落位 manifest 是上游 manifest 原样，`entry` 仍指向上游地址：装载不解析 `entry`
+/// （wasm 固定为 `plugin.wasm`），故这里不加 entry 约束（见 ADR 0006）。
+pub fn parse_placed(text: &str) -> Result<Manifest, String> {
+    parse_metadata(text)
+}
+
+/// 解析并校验 metadata 与必填字段；不含按来源种类分列的 `entry` 约束。
+fn parse_metadata(text: &str) -> Result<Manifest, String> {
+    let manifest: Manifest =
+        serde_json::from_str(text).map_err(|e| format!("manifest.json 不合法：{e}"))?;
+    if !is_valid_plugin_id(&manifest.id) {
+        return Err(format!(
+            "manifest.json 不合法：插件 id「{}」需以小写字母开头，仅允许小写字母、数字、连字符和下划线",
+            manifest.id
+        ));
+    }
+    for (field, value) in [
+        ("name", &manifest.name),
+        ("tool", &manifest.tool),
+        ("config_dir", &manifest.config_dir),
+        ("entry", &manifest.entry),
+    ] {
+        if value.is_empty() {
+            return Err(format!("manifest.json 不合法：{field} 不能为空"));
+        }
+    }
+    Ok(manifest)
+}
+
 /// 是否为绝对 https URL：明文 http、其他 scheme 与空主机一律拒绝。
 pub fn is_https_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
@@ -101,9 +131,7 @@ mod tests {
     use super::*;
 
     fn manifest_text(id: &str, entry: &str) -> String {
-        format!(
-            r#"{{ "id": "{id}", "name": "x", "tool": "x", "config_dir": "~/.x", "entry": "{entry}" }}"#
-        )
+        crate::plugin::testutil::manifest_json(id, "x", "x", "~/.x", entry)
     }
 
     #[test]

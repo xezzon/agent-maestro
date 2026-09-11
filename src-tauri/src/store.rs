@@ -258,6 +258,19 @@ impl Store {
         Ok(removed)
     }
 
+    /// 按来源取插件条目（`source` 即条目唯一身份）。
+    pub fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        config
+            .plugins
+            .iter()
+            .find(|plugin| plugin.source == source)
+            .cloned()
+            .ok_or_else(|| StoreError::MissingSource {
+                source: source.to_owned(),
+            })
+    }
+
     /// 内置插件条目：每次启动时 upsert（缺省插入 enabled=true）。
     /// 已有条目原样保留——用户的禁用意图不被启动 upsert 覆盖。
     pub fn upsert_builtin_plugin(&mut self, source: &str, id: &str) -> Result<(), StoreError> {
