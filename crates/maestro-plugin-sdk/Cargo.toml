@@ -1,0 +1,12 @@
+[package]
+name = "maestro-plugin-sdk"
+# 版本与 WIT 包 maestro:plugin 按 semver 对齐：SDK 1.x ↔ WIT 1.x，breaking 升 major（见 lib.rs）。
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT"
+description = "Maestro 插件 SDK：maestro:plugin WIT 合同的类型化 Rust 绑定与导出入口"
+repository = "https://github.com/xezzon/agent-maestro"
+
+[dependencies]
+wit-bindgen = "0.61.1"

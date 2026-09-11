@@ -96,3 +96,51 @@ jobs:
           # Windows 更新包优先 NSIS 安装器（默认选 MSI 只是历史兼容行为）。
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+  # maestro-plugin-sdk 发布 crates.io（issue #41）。SDK 版本与 WIT 包版本按 semver
+  # 对齐（SDK 1.x ↔ maestro:plugin 1.x，breaking 升 major）；应用发版触发同一 tag，
+  # 版本未变时自动跳过。
+  publish-sdk:
+    name: Publish maestro-plugin-sdk to crates.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify SDK / WIT version alignment
+        id: version
+        run: |
+          wit_version=$(sed -n 's/^package maestro:plugin@\([0-9][0-9.]*\);/\1/p' wit/maestro-plugin.wit)
+          sdk_version=$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' crates/maestro-plugin-sdk/Cargo.toml | head -1)
+          wit_major=${wit_version%%.*}
+          sdk_major=${sdk_version%%.*}
+          if [ -z "$wit_version" ] || [ -z "$sdk_version" ] || [ "$wit_major" != "$sdk_major" ]; then
+            echo "Version misalignment: maestro:plugin@$wit_version vs maestro-plugin-sdk@$sdk_version (convention: SDK 1.x <-> WIT 1.x)"
+            exit 1
+          fi
+          echo "Aligned: maestro:plugin@$wit_version <-> maestro-plugin-sdk@$sdk_version"
+          echo "sdk_version=$sdk_version" >> "$GITHUB_OUTPUT"
+
+      # crates.io 包必须自包含：包根之外的 wit/ 无法打进包，发布前把合同拷入
+      # crate 目录（未 gitignore 以便打包；SDK build.rs 仅在包外无仓库 wit/ 时回退用它）。
+      - name: Copy WIT contract into the SDK crate
+        run: |
+          mkdir -p crates/maestro-plugin-sdk/wit
+          cp wit/maestro-plugin.wit crates/maestro-plugin-sdk/wit/
+
+      - name: Skip if version already published
+        id: published
+        run: |
+          if curl -fsS -o /dev/null "https://crates.io/api/v1/crates/maestro-plugin-sdk/${{ steps.version.outputs.sdk_version }}"; then
+            echo "maestro-plugin-sdk@${{ steps.version.outputs.sdk_version }} already published, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.published.outputs.skip != 'true'
+        working-directory: crates/maestro-plugin-sdk
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

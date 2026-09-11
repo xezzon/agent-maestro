@@ -19,6 +19,10 @@ fn build_builtin_plugin_wasm() {
     println!("cargo::rerun-if-changed=../plugins/pi/Cargo.lock");
     println!("cargo::rerun-if-changed=../plugins/pi/manifest.json");
     println!("cargo::rerun-if-changed=../wit");
+    // pi 插件依赖 SDK crate（issue #41）：SDK 源码或合同变更时重编内置 wasm。
+    println!("cargo::rerun-if-changed=../crates/maestro-plugin-sdk/src");
+    println!("cargo::rerun-if-changed=../crates/maestro-plugin-sdk/build.rs");
+    println!("cargo::rerun-if-changed=../crates/maestro-plugin-sdk/Cargo.toml");
 
     let out_path = Path::new(&env::var("OUT_DIR").expect("OUT_DIR 未设置")).join("pi-plugin.wasm");
     let status = Command::new("cargo")

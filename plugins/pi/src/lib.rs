@@ -1,17 +1,14 @@
 //! 内置 pi 插件：把 Maestro 录入的 Provider 投影为 `~/.pi/agent/models.json`。
 //!
-//! 宿主把 manifest 声明的 config_dir（pi 即 `~/.pi`）预开放为 "/"，
+//! 只依赖 `maestro-plugin-sdk`（`maestro:plugin` 合同的类型化绑定，见 issue #41），
+//! 实现 SDK re-export 的 `Guest` trait；本插件兼作 SDK 的常驻契约验证与插件作者的
+//! 参考实现。宿主把 manifest 声明的 config_dir（pi 即 `~/.pi`）预开放为 "/"，
 //! 插件以相对路径写入文件，整文件重写，保证已删除的 Provider 不残留。
-
-wit_bindgen::generate!({
-    path: "../../wit",
-    world: "plugin-world",
-});
 
 use std::fs;
 use std::path::Path;
 
-use exports::maestro::plugin::plugin::{Guest, Protocol, Provider};
+use maestro_plugin_sdk::{Guest, Model, Protocol, Provider, export};
 
 /// pi 的 models.json 中 provider 条目的字段名。
 const KEY_API: &str = "api";
@@ -81,7 +78,7 @@ fn escape_api_key(api_key: &str) -> String {
 }
 
 /// 模型列表：display-name 有值且非空才写 name 字段，否则省略。
-fn models_json(models: &[exports::maestro::plugin::plugin::Model]) -> serde_json::Value {
+fn models_json(models: &[Model]) -> serde_json::Value {
     models
         .iter()
         .map(|model| -> serde_json::Value {
