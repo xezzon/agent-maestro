@@ -34,7 +34,7 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 
 ## 插件开发
 
-第三方插件以 WASM 组件实现，经 https 来源（正式发布）或本地文件来源（本地调试）安装。面向插件作者的指南——manifest 字段语义、https 发布流约定、本地调试回路、`config_dir` 安全规则与沙箱边界——见 [docs/plugin-authoring.md](docs/plugin-authoring.md)；类型化绑定与依赖写法见 [crates/maestro-plugin-sdk](crates/maestro-plugin-sdk)。
+第三方插件以 WASM 组件实现，经 https 来源（正式发布）或 file 来源（指向本机 manifest.json，本地调试）安装。面向插件作者的指南——manifest 字段语义、https 发布流约定、本地调试回路、`config_dir` 安全规则与沙箱边界——见 [docs/plugin-authoring.md](docs/plugin-authoring.md)；类型化绑定与依赖写法见 [crates/maestro-plugin-sdk](crates/maestro-plugin-sdk)。
 
 ## 支持的平台
 

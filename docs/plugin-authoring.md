@@ -32,7 +32,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 | https URL | 必须是绝对 https URL（带主机）；明文 http 与其他 scheme 一律拒绝。 |
 | 本机绝对路径（file） | 插件目录内的相对路径（相对 manifest.json 所在目录，可含子目录），或 https URL（回源到网络）。 |
 
-通用拒绝项：**绝对路径、含 `..`、带非 https scheme 的 `entry` 一律被拒绝**——任何 manifest 都不能让宿主读插件根之外的文件。file 来源的相对 entry 在读取时还会按规范化的真实路径确认没有借符号链接逃出插件目录。
+通用拒绝项：**file 来源的 `entry` 若为相对路径，绝对路径、含 `..`、带非 https scheme（`http://`、`file://` 等）一律被拒绝**——任何 manifest 都不能让宿主读插件根之外的文件。file 来源的相对 entry 在读取时还会按规范化的真实路径确认没有借符号链接逃出插件目录。
 
 ### 两个例子
 
@@ -66,15 +66,16 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 
 一个版本的发布步骤：
 
-1. 锁定工具链，构建 wasm：`cargo build --release --target wasm32-wasip2`。产物是 WASM 组件，产物形态由作者自行决定（宿主只在安装与装载时做实例化校验）。
-2. 生成**发布版 manifest**：在仓库 manifest 的基础上把 `entry` 改写为本次 Release 的 wasm 资产 URL。因为仓库 manifest 的 `entry` 指向本地 target 路径、不是 https URL，它不能直接当发布版 manifest 用。
+1. 锁定工具链，构建 wasm：`cargo build --release --target wasm32-wasip2`。产物须是 WASM 组件，宿主会在安装与装载时做实例化校验。
+2. 生成**发布版 manifest**：在仓库 manifest 的基础上把 `entry` 改写为本次 Release 的 wasm 资产 URL。仓库 manifest 的 `entry` 指向本地 target 路径、不是 https URL，不能直接当发布版 manifest 用。
 
    ```bash
+   mkdir -p release
    jq --arg url "https://github.com/<owner>/<repo>/releases/download/$TAG/plugin.wasm" \
-     '.entry = $url' manifest.json > release-manifest.json
+     '.entry = $url' manifest.json > release/manifest.json
    ```
 
-3. 把 `plugin.wasm`（构建产物）与 `manifest.json`（发布版）两个资产挂到 GitHub Release。
+3. 把构建产物以资产名 `plugin.wasm`、`release/manifest.json` 以资产名 `manifest.json` 挂到 GitHub Release。
 4. 用户安装：在 Maestro「添加插件」里选「https 地址」，粘贴规整的 Release manifest URL：
 
    ```
@@ -83,14 +84,14 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 
 约定细节：
 
-- **资产名固定为 `plugin.wasm` 与 `manifest.json`**，上面的 URL 模板据此成立；`entry` 指向的正是 `plugin.wasm` 这一资产。
+- **两个资产名固定为 `plugin.wasm` 与 `manifest.json`**，上面的 URL 模板与 `entry` 都据此成立。
 - 发布版 manifest 只存在于 Release 资产、不回写仓库；发新版即打新 tag，Release 上的 manifest 不可变、可放心引用。
 - 宿主只做纯 https 下载并跟随重定向（GitHub 资产下载会重定向到对象存储域名）。4xx/5xx、超过 64 MiB 的响应按失败处理。
 - 安装失败时配置条目保留、插件进错误态并显示原因；修复后用「重新加载」按来源重试，无需重新填 URL。
 
 ## 本地调试回路（file 来源）
 
-开发回路是「**编译 → 重新加载**」，零拷贝：
+开发回路是「**编译 → 重新加载**」：`entry` 直接指向 cargo 原生产物路径，构建完点一下「重新加载」即可，不必手动搬运产物。
 
 1. 仓库 manifest 的 `entry` 指向 cargo 原生产物路径 `target/wasm32-wasip2/release/<crate>.wasm`（crate 名里的连字符在产物名中变为下划线，如 `maestro-plugin-pi` → `maestro_plugin_pi.wasm`）。不提交 wasm，仓库干净，产物也不会与源码漂移。
 2. `cargo build --release --target wasm32-wasip2`
