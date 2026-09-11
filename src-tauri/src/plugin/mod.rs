@@ -1,17 +1,20 @@
-//! 插件服务：从配置条目装载插件（内置字节）、维护内存注册表、
+//! 插件服务：从配置条目装载插件（内置字节或落位目录）、维护内存注册表、
 //! 并把 Provider 投影进各插件声明的配置目录（wasmtime 宿主，WASI 0.2）。
 //!
 //! 架构决策见 ADR 0004：宿主不代写文件，而是把 manifest 声明的 `config_dir`
 //! 预开放给组件（guest 路径 `/`），插件在沙箱内经 WASI 直接落盘。
+//! https 来源的下载、落位与生命周期见 ADR 0006。
 
 pub mod builtin;
+pub mod fetch;
+pub mod install;
 pub mod manifest;
 
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +24,12 @@ use wasmtime::{
 };
 use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
 
-use crate::{provider::Provider, store::Store};
+use crate::{
+    provider::Provider,
+    store::{Store, StoreError},
+};
+use fetch::{Fetcher, HttpFetcher};
+use manifest::{SourceKind, is_https_url, parse_manifest};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -33,13 +41,12 @@ mod bindings {
 use bindings::exports::maestro::plugin::plugin::Protocol as WitProtocol;
 /// WIT 合同 v1 的类型化绑定（宿主侧）。
 use bindings::exports::maestro::plugin::plugin::{Model as WitModel, Provider as WitProvider};
-use manifest::parse_manifest;
 
 /// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
 ///
-/// `source` 是条目唯一身份，重复添加在 store 层拒绝；第一期仅内置来源
-/// （`builtin:<id>`，Git / 本地来源见 issue #36）。
-/// `id` 为插件 id（内置条目在 upsert 时写入）。
+/// `source` 是条目唯一身份（内置 `builtin:<id>` 或指向 manifest.json 的 https URL），
+/// 重复添加在 store 层拒绝；`id` 为插件 id，内置条目在 upsert 时写入，
+/// https 条目在安装成功后写入——它是来源到落位目录的唯一映射（见 ADR 0006）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginEntry {
     pub source: String,
@@ -91,14 +98,16 @@ pub struct PluginApplyReport {
     pub reason: Option<String>,
 }
 
-/// 成功装载的插件（metadata + 内置 wasm 字节 + 已展开的配置目录）。
+/// 成功装载的插件（metadata + wasm 字节 + 已展开的配置目录）。
+///
+/// wasm 字节以 `Arc` 共享：内置插件是内嵌字节，https 插件是落位目录读入的产物。
 #[derive(Debug, Clone)]
 struct LoadedPlugin {
     id: String,
     name: String,
     tool: String,
     config_dir: PathBuf,
-    wasm: &'static [u8],
+    wasm: Arc<[u8]>,
 }
 
 /// 注册表条目的装载状态；装载失败进错误态并携带人类可读原因。
@@ -113,14 +122,19 @@ struct RegistryEntry {
     source: String,
     builtin: bool,
     enabled: bool,
+    /// 配置中记录的插件 id（内置条目启动时写入，https 条目安装成功后写入）；
+    /// 错误态下作为「这条来源本该是哪个插件」的线索。
+    id: Option<String>,
     state: PluginState,
 }
 
-/// 插件服务：内存注册表随配置/磁盘变更整体重建（`reload`）。
+/// 插件服务：内存注册表随配置/磁盘变更整体重建（`rebuild`）。
 pub struct PluginService {
     engine: Engine,
     /// 用于展开 manifest 的 `~`；测试可替换为临时主目录。
     home: Option<PathBuf>,
+    /// https 拉取的注入点（生产为同步 reqwest 实现，测试为替身）。
+    fetcher: Arc<dyn Fetcher>,
     entries: Mutex<Vec<RegistryEntry>>,
 }
 
@@ -191,19 +205,30 @@ fn build_engine() -> Engine {
 
 impl Default for PluginService {
     fn default() -> Self {
-        Self {
-            engine: build_engine(),
-            home: dirs::home_dir(),
-            entries: Default::default(),
-        }
+        Self::with_fetcher(dirs::home_dir(), Arc::new(HttpFetcher::new()))
     }
 }
 
 impl PluginService {
+    /// 注入 fetcher：生产用 https 实现，测试用替身（本设计唯一的新缝）。
+    pub fn with_fetcher(home: Option<PathBuf>, fetcher: Arc<dyn Fetcher>) -> Self {
+        Self {
+            engine: build_engine(),
+            home,
+            fetcher,
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+
     fn home(&self) -> Result<&Path, String> {
         self.home
             .as_deref()
             .ok_or_else(|| "无法确定用户主目录（HOME）".to_owned())
+    }
+
+    /// 指定插件 id 的落位目录（`~/.maestro/plugins/<id>`）。
+    fn plugin_dir(&self, id: &str) -> Result<PathBuf, String> {
+        Ok(install::plugin_dir(&install::root(self.home()?), id))
     }
 
     /// 应用启动：upsert 内置条目（离线、只读磁盘）并重建注册表。
@@ -220,48 +245,87 @@ impl PluginService {
         {
             eprintln!("failed to upsert builtin plugin entry: {}", e.message());
         }
-        self.reload(&guard);
+        self.rebuild(&guard);
     }
 
-    /// 只读磁盘重建注册表，不联网（手动修复插件文件后无需重启应用）。
-    pub fn reload(&self, store: &Store) {
+    /// 只读磁盘重建注册表，不联网；启动与来源变更后调用。
+    ///
+    /// 按来源回源获取由 [`PluginService::reload_plugin`] 负责。同一插件 id 只能由一个
+    /// 来源持有：后加载者进错误态并指明冲突来源。
+    fn rebuild(&self, store: &Store) {
         let entries = store
             .get()
             .map(|config| config.plugins.clone())
             .unwrap_or_default();
-        let built = entries
-            .into_iter()
-            .map(|entry| self.build_entry(entry))
-            .collect();
-        *self.entries.lock().unwrap() = built;
+        let mut claimed: BTreeMap<String, String> = BTreeMap::new();
+        let mut registry = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let mut built = self.build_entry(&entry);
+            if let Some(id) = &entry.id {
+                match claimed.get(id) {
+                    Some(owner) => {
+                        built.state = PluginState::Error(format!(
+                            "插件 id「{id}」与来源 {owner} 冲突：请移除其中一个条目"
+                        ));
+                    }
+                    None => {
+                        claimed.insert(id.clone(), entry.source.clone());
+                    }
+                }
+            }
+            registry.push(built);
+        }
+        *self.entries.lock().unwrap() = registry;
     }
 
-    /// 按配置条目顺序装载；第一期仅支持内置来源，其余条目进错误态（issue #36 回归）。
-    fn build_entry(&self, entry: PluginEntry) -> RegistryEntry {
-        let builtin = entry.source.starts_with("builtin:");
-        let state = match self.load_entry(&entry) {
+    /// 按配置条目顺序装载；不认识的来源形态进错误态（如旧配置残留的 Git 来源）。
+    fn build_entry(&self, entry: &PluginEntry) -> RegistryEntry {
+        let builtin = SourceKind::from_source(&entry.source) == SourceKind::Builtin;
+        let state = match self.load_entry(entry) {
             Ok(loaded) => PluginState::Loaded(loaded),
             Err(reason) => PluginState::Error(reason),
         };
         RegistryEntry {
-            source: entry.source,
+            source: entry.source.clone(),
             builtin,
             enabled: entry.enabled,
+            id: entry.id.clone(),
             state,
         }
     }
 
     fn load_entry(&self, entry: &PluginEntry) -> Result<LoadedPlugin, String> {
-        if entry.source.starts_with("builtin:") {
+        if entry.source.starts_with(builtin::SOURCE_PREFIX) {
             return self.load_builtin();
         }
-        Err(format!("暂不支持的插件来源：{}", entry.source))
+        if !is_https_url(&entry.source) {
+            return Err(format!("暂不支持的插件来源：{}", entry.source));
+        }
+        let id = entry.id.as_deref().ok_or_else(|| {
+            "尚未安装成功（下载、校验或落位失败），请点「重新加载」重试".to_owned()
+        })?;
+        self.load_placed(id)
     }
 
-    /// 装载管线：解析 manifest → 解析 config_dir（`~` 展开、目录不存在则先创建）→ 实例化校验。
+    /// 落位插件的装载管线：解析 manifest → 解析 config_dir（`~` 展开、目录不存在则先创建）
+    /// → 实例化校验。只读落位目录，不联网。
+    fn load_placed(&self, id: &str) -> Result<LoadedPlugin, String> {
+        let placed = install::read(&self.plugin_dir(id)?)?;
+        let config_dir = resolve_config_dir(&placed.manifest.config_dir, self.home()?)?;
+        instantiate_component(&self.engine, &placed.wasm, &config_dir)?;
+        Ok(LoadedPlugin {
+            id: placed.manifest.id.clone(),
+            name: placed.manifest.name.clone(),
+            tool: placed.manifest.tool.clone(),
+            config_dir,
+            wasm: Arc::from(placed.wasm),
+        })
+    }
+
+    /// 内置插件的装载管线：内嵌 manifest 校验 → config_dir 解析 → 实例化校验。
     fn load_builtin(&self) -> Result<LoadedPlugin, String> {
-        let manifest =
-            parse_manifest(builtin::PI_MANIFEST_JSON).map_err(|e| format!("内置插件损坏：{e}"))?;
+        let manifest = parse_manifest(SourceKind::Builtin, builtin::PI_MANIFEST_JSON)
+            .map_err(|e| format!("内置插件损坏：{e}"))?;
         let config_dir = resolve_config_dir(&manifest.config_dir, self.home()?)?;
         instantiate_component(&self.engine, builtin::PI_WASM, &config_dir)?;
         Ok(LoadedPlugin {
@@ -269,7 +333,7 @@ impl PluginService {
             name: manifest.name.clone(),
             tool: manifest.tool.clone(),
             config_dir,
-            wasm: builtin::PI_WASM,
+            wasm: Arc::from(builtin::PI_WASM),
         })
     }
 
@@ -284,7 +348,7 @@ impl PluginService {
                     source: entry.source.clone(),
                     builtin: entry.builtin,
                     enabled: entry.enabled,
-                    id: None,
+                    id: entry.id.clone(),
                     name: None,
                     tool: None,
                     config_dir: None,
@@ -319,8 +383,137 @@ impl PluginService {
         store
             .set_plugin_enabled(source, enabled)
             .map_err(|e| e.message())?;
-        self.reload(store);
+        self.rebuild(store);
         Ok(())
+    }
+
+    /// 添加 https 插件：先写配置条目（来源重复在 store 层拒绝），随后下载 manifest、
+    /// 校验、id 冲突检查、下载 wasm、落位并装载。
+    ///
+    /// 条目一旦写入即保留：安装失败进错误态并记下原因，用户无需重新填 URL，
+    /// 修复后用「重新加载」重试（见 ADR 0006）。
+    pub fn add_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
+        if !is_https_url(source) {
+            return Err(format!(
+                "插件来源仅支持指向 manifest.json 的 https 地址：{source}"
+            ));
+        }
+        store.add_plugin(source).map_err(|e| e.message())?;
+        let outcome = self.install(store, source);
+        self.rebuild(store);
+        if let Err(reason) = outcome {
+            self.record_failure(source, reason);
+        }
+        Ok(())
+    }
+
+    /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
+    /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
+    pub fn reload_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
+        let entry = store.plugin_by_source(source).map_err(|e| e.message())?;
+        match SourceKind::from_source(&entry.source) {
+            SourceKind::Builtin => return Err("内置插件不可重新加载".to_owned()),
+            SourceKind::File => {
+                return Err(format!("来源 {source} 不是 https 地址，无法重新加载"));
+            }
+            SourceKind::Https => {}
+        }
+        let outcome = self.install(store, source);
+        self.rebuild(store);
+        if let Err(reason) = outcome {
+            self.record_failure(source, reason.clone());
+            return Err(reason);
+        }
+        Ok(())
+    }
+
+    /// 移除插件：删落位目录与配置条目；两者都已不存在同样成功（幂等）。
+    ///
+    /// 只删宿主落位的目录，不动用户自己的文件；内置插件不可移除。
+    pub fn remove_plugin(&self, store: &mut Store, source: &str) -> Result<(), String> {
+        let entry = match store.plugin_by_source(source) {
+            Ok(entry) => entry,
+            // 条目不存在即视为已移除（幂等）。
+            Err(StoreError::MissingSource { .. }) => return Ok(()),
+            Err(e) => return Err(e.message()),
+        };
+        if SourceKind::from_source(&entry.source) == SourceKind::Builtin {
+            return Err("内置插件不可移除".to_owned());
+        }
+        if let Some(id) = &entry.id {
+            install::remove(&self.plugin_dir(id)?)?;
+        }
+        store.delete_plugin(source).map_err(|e| e.message())?;
+        self.rebuild(store);
+        Ok(())
+    }
+
+    /// 安装与重新加载共用管线：下载 manifest → 校验 → 上游 id 变更检查 → id 冲突检查 →
+    /// 下载 wasm → 实例化校验 → 落位 → 持久化 id。
+    ///
+    /// 实例化校验先于落位：任何失败都不会碰到已落位的旧版本。
+    fn install(&self, store: &mut Store, source: &str) -> Result<(), String> {
+        let manifest_bytes = self
+            .fetcher
+            .fetch(source)
+            .map_err(|e| format!("下载 manifest 失败：{e}"))?;
+        let text = std::str::from_utf8(&manifest_bytes)
+            .map_err(|e| format!("manifest.json 不是合法 UTF-8：{e}"))?;
+        let manifest = parse_manifest(SourceKind::Https, text)?;
+        let installed = self.installed_id(store, source)?;
+        check_upstream_id(installed.as_deref(), &manifest.id)?;
+        self.check_id_conflict(store, source, &manifest.id)?;
+
+        let wasm = self
+            .fetcher
+            .fetch(&manifest.entry)
+            .map_err(|e| format!("下载插件 wasm 失败：{e}"))?;
+        let dir = self.plugin_dir(&manifest.id)?;
+        let config_dir = resolve_config_dir(&manifest.config_dir, self.home()?)?;
+        instantiate_component(&self.engine, &wasm, &config_dir)?;
+        install::place(&dir, text, &wasm)?;
+
+        if installed.as_deref() != Some(manifest.id.as_str())
+            && let Err(e) = store.set_plugin_id(source, &manifest.id)
+        {
+            // 条目 id 是来源到落位目录的唯一映射：映射写不进去，就不能留下
+            // 注册表看不见的目录。
+            let _ = install::remove(&dir);
+            return Err(e.message());
+        }
+        Ok(())
+    }
+
+    /// 条目当前记录的插件 id：`None` 表示该来源尚未安装成功。
+    fn installed_id(&self, store: &Store, source: &str) -> Result<Option<String>, String> {
+        Ok(store.plugin_by_source(source).map_err(|e| e.message())?.id)
+    }
+
+    /// id 冲突检查：同一 id 只能由一个来源持有。
+    fn check_id_conflict(&self, store: &Store, source: &str, id: &str) -> Result<(), String> {
+        let config = store.get().map_err(|e| e.message())?;
+        match config
+            .plugins
+            .iter()
+            .find(|plugin| plugin.source != source && plugin.id.as_deref() == Some(id))
+        {
+            Some(other) => Err(format!("插件 id「{id}」已被来源 {} 占用", other.source)),
+            None => Ok(()),
+        }
+    }
+
+    /// 把本次安装失败的原因留在错误态：从磁盘重建注册表时只能按落位状态推导，
+    /// 具体原因是网络类还是磁盘类失败只有安装当场知道。
+    ///
+    /// 已装载的条目保持 `Loaded`：重新加载失败时旧版本仍然可用（原因经返回的错误
+    /// 送达界面），只有错误态条目的陈旧原因需要刷新。
+    fn record_failure(&self, source: &str, reason: String) {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(entry) = entries.iter_mut().find(|e| e.source == source)
+            && !matches!(&entry.state, PluginState::Loaded(_))
+        {
+            entry.state = PluginState::Error(reason);
+        }
     }
 
     /// 投影：调用所有已启用且加载成功的插件；单个插件失败不影响其他插件。
@@ -389,7 +582,7 @@ impl PluginService {
         loaded: &LoadedPlugin,
         providers: Vec<WitProvider>,
     ) -> Result<Vec<String>, String> {
-        let mut plugin = instantiate_component(&self.engine, loaded.wasm, &loaded.config_dir)?;
+        let mut plugin = instantiate_component(&self.engine, &loaded.wasm, &loaded.config_dir)?;
         let handle = plugin.world.maestro_plugin_plugin();
         let result = handle
             .call_write_providers(&mut plugin.store, &providers)
@@ -450,6 +643,16 @@ fn to_wit_provider(
     }
 }
 
+/// 上游 manifest 的 id 变更：报错并保持旧状态，避免静默换成另一个插件。
+fn check_upstream_id(installed: Option<&str>, id: &str) -> Result<(), String> {
+    match installed {
+        Some(old) if old != id => Err(format!(
+            "上游 manifest 的插件 id 已从「{old}」变更为「{id}」：已保持旧版本，如需换用请先移除再添加"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// 解析 manifest 声明的配置目录为宿主可控范围内的绝对路径。
 ///
 /// 仅接受 `~/…` 形式（展开为主目录下的相对路径），拒绝绝对路径、`..` 上跳
@@ -489,23 +692,55 @@ fn resolve_config_dir(config_dir: &str, home: &Path) -> Result<PathBuf, String> 
     Ok(canonical)
 }
 
-/// 测试共享助手：临时主目录 + 独立引擎的插件服务与配置存储。
+/// 测试共享助手：临时主目录 + 替身 fetcher 的插件服务与配置存储。
 #[cfg(test)]
 pub(crate) mod testutil {
-    use crate::Mutex;
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+    };
+
+    use super::{PluginService, fetch::Fetcher, install};
     use crate::store::Store;
-    use std::path::{Path, PathBuf};
 
-    use super::PluginService;
+    /// 测试替身：按 URL 返回预置响应；未预置的 URL 即失败——
+    /// 测试因此绝不会发起真实网络请求。
+    #[derive(Default)]
+    pub(crate) struct StubFetcher {
+        responses: Mutex<BTreeMap<String, Result<Vec<u8>, String>>>,
+    }
 
-    impl PluginService {
-        /// 测试专用构造器：注入任意主目录；生产代码使用 `Default`（读取真实 `~`）。
-        pub fn new(home: Option<PathBuf>) -> Self {
-            Self {
-                engine: super::build_engine(),
-                home,
-                entries: Mutex::new(Vec::new()),
-            }
+    impl StubFetcher {
+        pub(crate) fn new() -> Self {
+            Self::default()
+        }
+
+        /// 预置成功响应（覆盖同一 URL 的既有响应，用于模拟上游改版）。
+        pub(crate) fn serve(&self, url: &str, body: impl Into<Vec<u8>>) {
+            self.responses
+                .lock()
+                .unwrap()
+                .insert(url.to_owned(), Ok(body.into()));
+        }
+
+        /// 预置失败响应（网络不可达等）。
+        pub(crate) fn fail(&self, url: &str, reason: &str) {
+            self.responses
+                .lock()
+                .unwrap()
+                .insert(url.to_owned(), Err(reason.to_owned()));
+        }
+    }
+
+    impl Fetcher for StubFetcher {
+        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+            self.responses
+                .lock()
+                .unwrap()
+                .get(url)
+                .cloned()
+                .unwrap_or_else(|| Err(format!("未预置的 URL：{url}")))
         }
     }
 
@@ -513,20 +748,56 @@ pub(crate) mod testutil {
         tempfile::tempdir().unwrap()
     }
 
+    /// 不联网的插件服务：任何未预置的拉取都会失败。
     pub(crate) fn test_service(home: &Path) -> PluginService {
-        PluginService::new(Some(home.to_owned()))
+        stub_service(home, StubFetcher::new())
+    }
+
+    pub(crate) fn stub_service(home: &Path, fetcher: StubFetcher) -> PluginService {
+        PluginService::with_fetcher(Some(home.to_owned()), Arc::new(fetcher))
     }
 
     pub(crate) fn store_at(home: &Path) -> Store {
         Store::open(home.join(".maestro").join("config.json"))
     }
+
+    /// 测试关心的落位目录：与 install 模块共用同一套布局规则。
+    pub(crate) fn placed_dir(home: &Path, id: &str) -> PathBuf {
+        install::plugin_dir(&install::root(home), id)
+    }
+
+    /// 上游 manifest 模板：三个测试模块共用同一份 JSON 形状。
+    pub(crate) fn manifest_json(
+        id: &str,
+        name: &str,
+        tool: &str,
+        config_dir: &str,
+        entry: &str,
+    ) -> String {
+        format!(
+            r#"{{
+                "id": "{id}",
+                "name": "{name}",
+                "tool": "{tool}",
+                "config_dir": "{config_dir}",
+                "entry": "{entry}"
+            }}"#
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testutil::{store_at, temp_home, test_service};
+    use super::testutil::{
+        StubFetcher, manifest_json, placed_dir, store_at, stub_service, temp_home, test_service,
+    };
     use super::*;
     use crate::provider::{Endpoints, ModelEntry};
+
+    const MANIFEST_URL: &str =
+        "https://github.com/someone/maestro-plugin-pi2/releases/download/v1/manifest.json";
+    const WASM_URL: &str =
+        "https://github.com/someone/maestro-plugin-pi2/releases/download/v1/plugin.wasm";
 
     fn provider_openai(url: &str, api_key: &str, models: Vec<ModelEntry>) -> Provider {
         Provider {
@@ -537,6 +808,19 @@ mod tests {
             api_key: api_key.to_owned(),
             models,
         }
+    }
+
+    /// 第三方插件的上游 manifest：entry 指向 https 资产，
+    /// 产物用真实编译的 pi wasm 充当（内置 pi 已迁移到 SDK，其产物就是符合 WIT 合同的组件）。
+    fn third_party_manifest(id: &str, name: &str) -> String {
+        manifest_json(id, name, "pi", "~/.pi2", WASM_URL)
+    }
+
+    fn https_stub(id: &str, name: &str) -> StubFetcher {
+        let fetcher = StubFetcher::new();
+        fetcher.serve(MANIFEST_URL, third_party_manifest(id, name));
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        fetcher
     }
 
     fn startup_service(home: &Path) -> PluginService {
@@ -585,14 +869,15 @@ mod tests {
     }
 
     #[test]
-    fn non_builtin_source_entry_is_reported_as_error_state() {
+    fn unsupported_source_entry_is_reported_as_error_state() {
         let home = temp_home();
-        // 旧版本配置可能残留 Git 来源条目：第一期不支持，进错误态而非静默忽略（Git 来源见 issue #36）。
+        // 旧版本配置可能残留 Git 来源条目：Git 来源已整体废弃（ADR 0006），
+        // 进错误态而非静默忽略。
         let path = home.path().join(".maestro").join("config.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"version":1,"providers":{},"plugins":[{"source":"https://example.com/x.git","enabled":true}]}"#,
+            r#"{"version":1,"providers":{},"plugins":[{"source":"git://example.com/x.git","enabled":true}]}"#,
         )
         .unwrap();
         let store = Mutex::new(Store::open(path));
@@ -603,7 +888,7 @@ mod tests {
         assert_eq!(views.len(), 2);
         let git = views
             .iter()
-            .find(|v| v.source == "https://example.com/x.git")
+            .find(|v| v.source == "git://example.com/x.git")
             .unwrap();
         assert_eq!(git.status, "error");
         assert!(
@@ -611,6 +896,428 @@ mod tests {
             "实际错误：{:?}",
             git.error
         );
+    }
+
+    #[test]
+    fn https_entry_without_installed_dir_points_at_reload() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        store.add_plugin(MANIFEST_URL).unwrap();
+        let service = test_service(home.path());
+
+        service.rebuild(&store);
+
+        let view = &service.list()[0];
+        assert_eq!(view.status, "error");
+        assert_eq!(view.id, None, "从未安装成功：没有落位 id");
+        assert!(
+            view.error.as_deref().unwrap().contains("「重新加载」重试"),
+            "错误态需给出恢复路径：{:?}",
+            view.error
+        );
+    }
+
+    #[test]
+    fn id_conflict_marks_later_entry_as_error() {
+        let home = temp_home();
+        // 手工编辑出的 id 冲突：同一 id 由两个来源持有。
+        let path = home.path().join(".maestro").join("config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(
+                r#"{{"version":1,"providers":{{}},"plugins":[
+                    {{"source":"builtin:pi","enabled":true,"id":"pi"}},
+                    {{"source":"{MANIFEST_URL}","enabled":true,"id":"pi"}}]}}"#
+            ),
+        )
+        .unwrap();
+        let store = Mutex::new(Store::open(path));
+        let service = test_service(home.path());
+        service.startup(&store);
+
+        let views = service.list();
+        assert_eq!(views[0].status, "loaded", "内置插件先装载，占住 id");
+        assert_eq!(views[1].status, "error");
+        assert_eq!(views[1].id.as_deref(), Some("pi"));
+        let error = views[1].error.as_deref().unwrap();
+        assert!(error.contains("冲突"), "{error}");
+        assert!(error.contains("builtin:pi"), "需指明冲突来源：{error}");
+    }
+
+    // ---- 安装与重新加载 ----
+
+    #[test]
+    fn add_https_plugin_installs_places_and_projects() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+
+        // 条目：来源即身份，id 在安装成功后落盘（来源 → 落位目录的映射）。
+        let plugins = &store.get().unwrap().plugins;
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].source, MANIFEST_URL);
+        assert_eq!(plugins[0].id.as_deref(), Some("pi2"));
+
+        // 落位目录：manifest.json + plugin.wasm；manifest 原样保留（entry 仍是上游 URL）。
+        let dir = placed_dir(home.path(), "pi2");
+        let disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(disk["entry"], WASM_URL, "entry 保留回源地址");
+        assert_eq!(disk["name"], "Pi2");
+        assert!(!fs::read(dir.join("plugin.wasm")).unwrap().is_empty());
+
+        let views = service.list();
+        assert_eq!(views[0].status, "loaded", "{:?}", views[0].error);
+        assert!(!views[0].builtin, "https 来源可重新加载、可移除");
+        assert_eq!(views[0].id.as_deref(), Some("pi2"));
+        assert!(views[0].config_dir.as_deref().unwrap().ends_with(".pi2"));
+
+        // 投影：第三方插件与内置插件共用同一装载、校验与沙箱管线。
+        store
+            .create_provider(
+                "gateway",
+                provider_openai("https://api.example.com/v1", "sk-plain", vec![]),
+            )
+            .unwrap();
+        let reports = service.apply(&store.get().unwrap().providers);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+        assert_eq!(reports[0].files, vec!["agent/models.json"]);
+        let written: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(home.path().join(".pi2").join("agent").join("models.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            written["providers"]["gateway"]["baseUrl"],
+            "https://api.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn add_plugin_rejects_non_https_source() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = test_service(home.path());
+
+        for source in [
+            "http://example.com/manifest.json",
+            "file:///tmp/manifest.json",
+            "git://example.com/x.git",
+            "/tmp/manifest.json",
+        ] {
+            let err = service.add_plugin(&mut store, source).unwrap_err();
+            assert!(err.contains("插件来源仅支持"), "{source} 应被拒绝：{err}");
+            assert!(
+                !err.contains("未预置的 URL"),
+                "仅 https 的判定必须在发起下载之前：{err}"
+            );
+        }
+        assert!(
+            store.get().unwrap().plugins.is_empty(),
+            "被拒绝的来源不得留下条目"
+        );
+    }
+
+    #[test]
+    fn add_plugin_rejects_duplicate_source_in_store_layer() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+
+        let err = service.add_plugin(&mut store, MANIFEST_URL).unwrap_err();
+
+        assert!(err.contains("已存在同一来源"), "{err}");
+        assert_eq!(store.get().unwrap().plugins.len(), 1);
+    }
+
+    #[test]
+    fn add_plugin_keeps_entry_in_error_state_when_download_fails() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let fetcher = StubFetcher::new();
+        fetcher.fail(MANIFEST_URL, "网络不可达");
+        let service = stub_service(home.path(), fetcher);
+
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+
+        let plugins = &store.get().unwrap().plugins;
+        assert_eq!(plugins.len(), 1, "安装失败保留条目，用户无需重新填 URL");
+        assert_eq!(plugins[0].id, None);
+        let views = service.list();
+        assert_eq!(views[0].status, "error");
+        let error = views[0].error.as_deref().unwrap();
+        assert!(error.contains("下载 manifest 失败"), "{error}");
+        assert!(error.contains("网络不可达"), "原因需可见：{error}");
+        assert!(!placed_dir(home.path(), "pi2").exists());
+    }
+
+    #[test]
+    fn failed_install_can_be_retried_with_reload() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let fetcher = Arc::new(StubFetcher::new());
+        fetcher.fail(MANIFEST_URL, "网络不可达");
+        let service = PluginService::with_fetcher(Some(home.path().to_owned()), fetcher.clone());
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+        assert_eq!(service.list()[0].status, "error");
+
+        // 网络恢复后用「重新加载」重试同一来源，不必重新填 URL。
+        fetcher.serve(MANIFEST_URL, third_party_manifest("pi2", "Pi2"));
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        service.reload_plugin(&mut store, MANIFEST_URL).unwrap();
+
+        assert_eq!(service.list()[0].status, "loaded");
+        assert_eq!(store.get().unwrap().plugins[0].id.as_deref(), Some("pi2"));
+        assert!(placed_dir(home.path(), "pi2").join("plugin.wasm").exists());
+    }
+
+    #[test]
+    fn failed_reload_refreshes_the_error_state_reason() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let fetcher = Arc::new(StubFetcher::new());
+        fetcher.fail(MANIFEST_URL, "首次不可达");
+        let service = PluginService::with_fetcher(Some(home.path().to_owned()), fetcher.clone());
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+        let error = service.list()[0].error.clone().unwrap();
+        assert!(error.contains("首次不可达"), "{error}");
+
+        // 再次失败的原因不同：错误态里的陈旧原因必须被刷新。
+        fetcher.fail(MANIFEST_URL, "再次不可达");
+        let err = service.reload_plugin(&mut store, MANIFEST_URL).unwrap_err();
+        assert!(err.contains("再次不可达"), "{err}");
+        let error = service.list()[0].error.clone().unwrap();
+        assert!(error.contains("再次不可达"), "陈旧原因需刷新：{error}");
+        assert!(!error.contains("首次不可达"), "旧原因不得残留：{error}");
+    }
+
+    #[test]
+    fn install_rejects_invalid_third_party_manifest_and_config_dir() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let fetcher = StubFetcher::new();
+        // entry 不是 https URL：https 来源的 entry 约束与内置插件之外的来源一致从严。
+        fetcher.serve(
+            MANIFEST_URL,
+            manifest_json("pi2", "Pi2", "pi", "~/.pi2", "plugin.wasm"),
+        );
+        let service = stub_service(home.path(), fetcher);
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+        let view = &service.list()[0];
+        assert_eq!(view.status, "error");
+        assert!(
+            view.error.as_deref().unwrap().contains("https URL"),
+            "{:?}",
+            view.error
+        );
+
+        // config_dir 逃逸主目录：与内置插件同一套安全规则，拒绝且不落位。
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let fetcher = StubFetcher::new();
+        fetcher.serve(
+            MANIFEST_URL,
+            manifest_json("pi2", "Pi2", "pi", "~/.pi2/../../etc", WASM_URL),
+        );
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        let service = stub_service(home.path(), fetcher);
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+        let view = &service.list()[0];
+        assert_eq!(view.status, "error");
+        assert!(
+            view.error.as_deref().unwrap().contains("config_dir"),
+            "{:?}",
+            view.error
+        );
+        assert!(!placed_dir(home.path(), "pi2").exists());
+    }
+
+    #[test]
+    fn add_plugin_rejects_id_conflict_with_builtin() {
+        let home = temp_home();
+        let store = Mutex::new(store_at(home.path()));
+        let service = stub_service(home.path(), https_stub("pi", "Pi clone"));
+        service.startup(&store);
+        let mut store = store.into_inner().unwrap();
+
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+
+        let added = service
+            .list()
+            .into_iter()
+            .find(|view| view.source == MANIFEST_URL)
+            .unwrap();
+        assert_eq!(added.status, "error");
+        let error = added.error.unwrap();
+        assert!(error.contains("已被来源 builtin:pi 占用"), "{error}");
+        assert_eq!(
+            store
+                .get()
+                .unwrap()
+                .plugins
+                .iter()
+                .find(|plugin| plugin.source == MANIFEST_URL)
+                .unwrap()
+                .id,
+            None,
+            "冲突时不得写入 id"
+        );
+        assert!(
+            !placed_dir(home.path(), "pi").exists(),
+            "冲突不得落位覆盖既有插件"
+        );
+    }
+
+    #[test]
+    fn installed_plugin_loads_from_disk_offline_after_restart() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+
+        // 模拟重启：全新服务 + 空替身（任何拉取都会失败），只读磁盘重建注册表。
+        let offline = test_service(home.path());
+        offline.rebuild(&store);
+
+        let views = offline.list();
+        assert_eq!(views[0].status, "loaded", "{:?}", views[0].error);
+        assert_eq!(views[0].id.as_deref(), Some("pi2"));
+        assert_eq!(views[0].name.as_deref(), Some("Pi2"));
+    }
+
+    #[test]
+    fn reload_keeps_old_version_usable_when_download_or_validation_fails() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let fetcher = Arc::new(StubFetcher::new());
+        fetcher.serve(MANIFEST_URL, third_party_manifest("pi2", "Pi2 v1"));
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        let service = PluginService::with_fetcher(Some(home.path().to_owned()), fetcher.clone());
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+        let dir = placed_dir(home.path(), "pi2");
+        let installed = fs::read(dir.join("plugin.wasm")).unwrap();
+
+        // 上游 manifest 的 id 变更：报错并保持旧状态。
+        fetcher.serve(MANIFEST_URL, third_party_manifest("other", "Other"));
+        let err = service.reload_plugin(&mut store, MANIFEST_URL).unwrap_err();
+        assert!(err.contains("id 已从"), "{err}");
+        assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v1"));
+        assert_eq!(fs::read(dir.join("plugin.wasm")).unwrap(), installed);
+        assert!(
+            !placed_dir(home.path(), "other").exists(),
+            "id 变更不得落位到新 id 目录"
+        );
+
+        // wasm 不是有效的组件：装载校验失败，旧目录不被替换。
+        fetcher.serve(MANIFEST_URL, third_party_manifest("pi2", "Pi2 v2"));
+        fetcher.serve(WASM_URL, b"not a wasm component".to_vec());
+        let err = service.reload_plugin(&mut store, MANIFEST_URL).unwrap_err();
+        assert!(err.contains("WASM"), "{err}");
+        assert_eq!(
+            fs::read(dir.join("plugin.wasm")).unwrap(),
+            installed,
+            "重新加载失败旧版本保持可用"
+        );
+        assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v1"));
+        assert_eq!(store.get().unwrap().plugins[0].id.as_deref(), Some("pi2"));
+
+        // 重新加载成功：替换落位目录为新版本，不留备份。
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        service.reload_plugin(&mut store, MANIFEST_URL).unwrap();
+        assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v2"));
+        assert!(
+            !dir.with_extension("old").exists(),
+            "替换成功后不留备份目录"
+        );
+    }
+
+    #[test]
+    fn reload_rejects_builtin_and_missing_source() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        store
+            .upsert_builtin_plugin(builtin::BUILTIN_PI_SOURCE, builtin::BUILTIN_PI_ID)
+            .unwrap();
+        let service = test_service(home.path());
+
+        let err = service
+            .reload_plugin(&mut store, builtin::BUILTIN_PI_SOURCE)
+            .unwrap_err();
+        assert!(err.contains("内置插件不可重新加载"), "{err}");
+        let err = service
+            .remove_plugin(&mut store, builtin::BUILTIN_PI_SOURCE)
+            .unwrap_err();
+        assert!(err.contains("内置插件不可移除"), "{err}");
+        let err = service
+            .reload_plugin(&mut store, "https://nope.example.com/manifest.json")
+            .unwrap_err();
+        assert!(err.contains("插件条目不存在"), "{err}");
+    }
+
+    /// POSIX 权限是唯一能在「条目已写入」之后让配置文件写入失败的手段，
+    /// 用来覆盖 id 映射落盘失败时的回滚：不留注册表看不见的落位目录。
+    #[cfg(unix)]
+    #[test]
+    fn failed_id_write_rolls_back_the_placed_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+        store.add_plugin(MANIFEST_URL).unwrap();
+        let maestro_dir = home.path().join(".maestro");
+        fs::create_dir_all(maestro_dir.join("plugins")).unwrap();
+        // 配置目录不可写：落位成功，但条目 id 落盘失败。
+        fs::set_permissions(&maestro_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let outcome = service.reload_plugin(&mut store, MANIFEST_URL);
+
+        fs::set_permissions(&maestro_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(outcome.is_err(), "id 落盘失败应报错：{outcome:?}");
+        assert!(
+            !placed_dir(home.path(), "pi2").exists(),
+            "id 未落盘则回滚落位目录，不留注册表看不见的孤儿"
+        );
+    }
+
+    #[test]
+    fn remove_plugin_deletes_entry_and_placed_dir() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+        let dir = placed_dir(home.path(), "pi2");
+        assert!(dir.exists());
+
+        service.remove_plugin(&mut store, MANIFEST_URL).unwrap();
+
+        assert!(
+            store.get().unwrap().plugins.is_empty(),
+            "配置条目随移除删除"
+        );
+        assert!(!dir.exists(), "落位目录随移除删除");
+        assert!(service.list().is_empty());
+    }
+
+    #[test]
+    fn remove_plugin_is_idempotent() {
+        let home = temp_home();
+        let mut store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+        service.add_plugin(&mut store, MANIFEST_URL).unwrap();
+        // 落位目录已被人为删除：移除仍然成功（幂等）。
+        fs::remove_dir_all(placed_dir(home.path(), "pi2")).unwrap();
+
+        service.remove_plugin(&mut store, MANIFEST_URL).unwrap();
+        // 条目已不存在：视为已移除，不报错。
+        service.remove_plugin(&mut store, MANIFEST_URL).unwrap();
+
+        assert!(service.list().is_empty());
     }
 
     // ---- 投影 ----

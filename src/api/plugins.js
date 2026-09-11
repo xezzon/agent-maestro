@@ -1,14 +1,14 @@
 /**
  * @typedef {Object} PluginView
- * @property {string} source 插件条目唯一身份（第一期仅 `builtin:<id>`；Git / 本地来源见 issue #36）。
+ * @property {string} source 插件条目唯一身份（`builtin:<id>` 或指向 manifest.json 的 https URL）。
  * @property {boolean} builtin 内置插件可禁用、不可移除、不出现在添加流程。
  * @property {boolean} enabled
- * @property {string=} id 插件 id。
+ * @property {string=} id 插件 id（https 条目在安装成功后写入）。
  * @property {string=} name
  * @property {string=} tool 适配的工具。
  * @property {string=} config_dir 插件被授权写入的目录（`~` 已展开）。
  * @property {'loaded' | 'error'} status
- * @property {string=} error 错误态的原因（如来源暂不支持 / manifest 不合法 / 接口不兼容）。
+ * @property {string=} error 错误态的原因（如下载/校验失败 / manifest 不合法 / 接口不兼容）。
  */
 /**
  * @typedef {Object} SkippedProvider
@@ -44,9 +44,30 @@ export async function setPluginEnabled(source, enabled) {
   await invoke("set_plugin_enabled", { source, enabled });
 }
 
-/** 从磁盘重建插件注册表，不联网。 */
-export async function reloadPlugins() {
-  await invoke("reload_plugins");
+/**
+ * 添加插件：https 来源指向 manifest.json，下载、校验、落位并装载。
+ * 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
+ * @param {string} source 指向 manifest.json 的 https 地址
+ */
+export async function addPlugin(source) {
+  await invoke("add_plugin", { source });
+}
+
+/**
+ * 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，成功才替换旧版本
+ * （失败时旧版本保持可用）。
+ * @param {string} source
+ */
+export async function reloadPlugin(source) {
+  await invoke("reload_plugin", { source });
+}
+
+/**
+ * 移除插件：删配置条目与落位目录（幂等）。
+ * @param {string} source
+ */
+export async function removePlugin(source) {
+  await invoke("remove_plugin", { source });
 }
 
 /**

@@ -1,6 +1,36 @@
+use crate::plugin::builtin;
+use serde::Deserialize;
 use std::path::{Component, Path};
 
-use serde::Deserialize;
+/// 插件来源种类：决定 `entry` 的校验规则（见 ADR 0006）。
+///
+/// 三种来源共用同一份 manifest 校验，`entry` 语义按来源分列，
+/// 不做跨协议的统一解析。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// 内置于应用：wasm 内嵌，`entry` 不参与解析。
+    Builtin,
+    /// https 来源：指向正式发布的 manifest，`entry` 必须是 https URL。
+    Https,
+    /// 本机目录中的 manifest（第三方来源的落位目录），`entry` 是目录内的相对路径。
+    File,
+}
+
+impl SourceKind {
+    /// 来源字符串的种类：装载与生命周期操作按此分派。
+    ///
+    /// `builtin:<id>` 内置于应用；https URL 为正式发布来源；其余（本机绝对路径）
+    /// 为 file 来源——本地调试回路尚未实现（见 issue #43）。
+    pub fn from_source(source: &str) -> Self {
+        if source.starts_with(builtin::SOURCE_PREFIX) {
+            SourceKind::Builtin
+        } else if is_https_url(source) {
+            SourceKind::Https
+        } else {
+            SourceKind::File
+        }
+    }
+}
 
 /// 插件 metadata 的唯一来源：插件根目录的 `manifest.json`。
 ///
@@ -19,8 +49,47 @@ pub struct Manifest {
     pub entry: String,
 }
 
-/// 解析并校验 manifest 文本。
-pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
+/// 解析并校验 manifest 文本；`entry` 的约束按来源种类分列。
+pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> {
+    let manifest = parse_metadata(text)?;
+    match kind {
+        // wasm 内嵌于二进制，entry 不参与解析。
+        SourceKind::Builtin => {}
+        SourceKind::Https => {
+            if !is_https_url(&manifest.entry) {
+                return Err(format!(
+                    "manifest.json 不合法：https 来源的 entry「{}」必须是 https URL",
+                    manifest.entry
+                ));
+            }
+        }
+        // entry 必须是 manifest 所在目录内的相对路径：绝对路径或含 `..` 上跳即拒绝，
+        // 防止外置 manifest 借 entry 读取插件根目录之外的文件。
+        SourceKind::File => {
+            let entry_path = Path::new(&manifest.entry);
+            if entry_path.is_absolute()
+                || entry_path.components().any(|c| c == Component::ParentDir)
+            {
+                return Err(format!(
+                    "manifest.json 不合法：entry「{}」必须是插件目录内的相对路径",
+                    manifest.entry
+                ));
+            }
+        }
+    }
+    Ok(manifest)
+}
+
+/// 解析落位目录中的 manifest 文本。
+///
+/// 落位 manifest 是上游 manifest 原样，`entry` 仍指向上游地址：装载不解析 `entry`
+/// （wasm 固定为 `plugin.wasm`），故这里不加 entry 约束（见 ADR 0006）。
+pub fn parse_placed(text: &str) -> Result<Manifest, String> {
+    parse_metadata(text)
+}
+
+/// 解析并校验 metadata 与必填字段；不含按来源种类分列的 `entry` 约束。
+fn parse_metadata(text: &str) -> Result<Manifest, String> {
     let manifest: Manifest =
         serde_json::from_str(text).map_err(|e| format!("manifest.json 不合法：{e}"))?;
     if !is_valid_plugin_id(&manifest.id) {
@@ -39,16 +108,12 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
             return Err(format!("manifest.json 不合法：{field} 不能为空"));
         }
     }
-    // entry 必须是插件目录内的相对路径：绝对路径或含 `..` 上跳即拒绝，
-    // 防止外置 manifest 借 entry 读取插件根目录之外的文件。
-    let entry_path = Path::new(&manifest.entry);
-    if entry_path.is_absolute() || entry_path.components().any(|c| c == Component::ParentDir) {
-        return Err(format!(
-            "manifest.json 不合法：entry「{}」必须是插件目录内的相对路径",
-            manifest.entry
-        ));
-    }
     Ok(manifest)
+}
+
+/// 是否为绝对 https URL：明文 http、其他 scheme 与空主机一律拒绝。
+pub fn is_https_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
 }
 
 /// 插件 id 规则与 Provider slug 一致（见 CONTEXT.md）。
@@ -65,9 +130,14 @@ pub fn is_valid_plugin_id(id: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn manifest_text(id: &str, entry: &str) -> String {
+        crate::plugin::testutil::manifest_json(id, "x", "x", "~/.x", entry)
+    }
+
     #[test]
     fn manifest_parses_required_fields_and_tolerates_unknown_fields() {
         let manifest = parse_manifest(
+            SourceKind::File,
             r#"{
                 "id": "pi",
                 "name": "Pi",
@@ -90,17 +160,15 @@ mod tests {
     #[test]
     fn manifest_missing_required_field_is_rejected() {
         // 只留 id：其余必填缺失即加载失败。
-        let err = parse_manifest(r#"{"id": "pi"}"#).unwrap_err();
+        let err = parse_manifest(SourceKind::File, r#"{"id": "pi"}"#).unwrap_err();
         assert!(err.contains("manifest.json 不合法"), "{err}");
     }
 
     #[test]
     fn manifest_with_invalid_id_is_rejected() {
         for id in ["Pi", "1pi", "-pi", "pi.", "pi 中文", ""] {
-            let text = format!(
-                r#"{{ "id": "{id}", "name": "x", "tool": "x", "config_dir": "~/.x", "entry": "p.wasm" }}"#
-            );
-            let err = parse_manifest(&text).unwrap_err();
+            let text = manifest_text(id, "p.wasm");
+            let err = parse_manifest(SourceKind::File, &text).unwrap_err();
             assert!(err.contains("id"), "id {id:?} 应被拒绝：{err}");
         }
     }
@@ -119,13 +187,53 @@ mod tests {
     }
 
     #[test]
-    fn manifest_with_escaping_entry_is_rejected() {
+    fn file_entry_must_be_a_relative_path_without_parent_dir() {
         for entry in ["/etc/passwd", "../outside.wasm", "sub/../../outside.wasm"] {
-            let text = format!(
-                r#"{{ "id": "pi", "name": "x", "tool": "x", "config_dir": "~/.x", "entry": "{entry}" }}"#
-            );
-            let err = parse_manifest(&text).unwrap_err();
+            let err = parse_manifest(SourceKind::File, &manifest_text("pi", entry)).unwrap_err();
             assert!(err.contains("entry"), "entry {entry:?} 应被拒绝：{err}");
         }
+        assert!(parse_manifest(SourceKind::File, &manifest_text("pi", "sub/p.wasm")).is_ok());
+    }
+
+    #[test]
+    fn https_entry_must_be_an_https_url() {
+        let ok = manifest_text("pi", "https://example.com/releases/download/v1/plugin.wasm");
+        assert_eq!(
+            parse_manifest(SourceKind::Https, &ok).unwrap().entry,
+            "https://example.com/releases/download/v1/plugin.wasm"
+        );
+
+        for entry in [
+            "plugin.wasm",
+            "sub/p.wasm",
+            "/etc/passwd",
+            "../outside.wasm",
+            "http://example.com/plugin.wasm",
+            "https://",
+        ] {
+            let err = parse_manifest(SourceKind::Https, &manifest_text("pi", entry)).unwrap_err();
+            assert!(
+                err.contains("https URL"),
+                "https 来源的 entry {entry:?} 应被拒绝：{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_entry_is_not_constrained() {
+        // 内置插件的 wasm 内嵌于二进制，entry 不参与解析。
+        let text = manifest_text("pi", "target/wasm32-wasip2/release/maestro_plugin_pi.wasm");
+        assert!(parse_manifest(SourceKind::Builtin, &text).is_ok());
+    }
+
+    #[test]
+    fn is_https_url_accepts_only_absolute_https_urls() {
+        assert!(is_https_url("https://example.com/manifest.json"));
+        assert!(is_https_url("https://example.com:8443/a/b?c=d"));
+        assert!(!is_https_url("http://example.com/manifest.json"));
+        assert!(!is_https_url("file:///tmp/manifest.json"));
+        assert!(!is_https_url("/tmp/manifest.json"));
+        assert!(!is_https_url("https://"));
+        assert!(!is_https_url(""));
     }
 }

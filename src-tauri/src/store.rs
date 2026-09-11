@@ -54,6 +54,8 @@ pub enum StoreError {
     MissingSlug { slug: String },
     /// 插件条目不存在。
     MissingSource { source: String },
+    /// 已存在同一来源的插件条目（来源即条目唯一身份）。
+    DuplicateSource { source: String },
 }
 
 impl StoreError {
@@ -76,6 +78,9 @@ impl StoreError {
             StoreError::DuplicateSlug { slug } => format!("已存在同名 Provider：{slug}"),
             StoreError::MissingSlug { slug } => format!("Provider 不存在：{slug}"),
             StoreError::MissingSource { source } => format!("插件条目不存在：{source}"),
+            StoreError::DuplicateSource { source } => {
+                format!("已存在同一来源的插件条目：{source}")
+            }
         }
     }
 }
@@ -199,6 +204,71 @@ impl Store {
             }
             false
         })
+    }
+
+    /// 新增插件条目（`source` 即唯一身份，重复添加即拒绝），追加在现有条目之后。
+    ///
+    /// `id` 留待安装成功后经 [`Store::set_plugin_id`] 写入：条目先落盘、安装后补全，
+    /// 因此安装失败时条目仍在（错误态），可修复后直接重试（见 ADR 0006）。
+    pub fn add_plugin(&mut self, source: &str) -> Result<(), StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        if config.plugins.iter().any(|plugin| plugin.source == source) {
+            return Err(StoreError::DuplicateSource {
+                source: source.to_owned(),
+            });
+        }
+        let mut next = config.clone();
+        next.plugins.push(PluginEntry {
+            source: source.to_owned(),
+            enabled: true,
+            id: None,
+        });
+        self.persist(&next)?;
+        self.state = Ok(next);
+        Ok(())
+    }
+
+    /// 写入条目的插件 id：来源 → 落位目录的映射，安装成功后落盘。
+    pub fn set_plugin_id(&mut self, source: &str, id: &str) -> Result<(), StoreError> {
+        self.update_plugins(source, |plugins| {
+            for plugin in plugins.iter_mut() {
+                if plugin.source == source {
+                    plugin.id = Some(id.to_owned());
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
+    /// 删除插件条目，返回被删除的条目（调用方据此删除落位目录）。
+    pub fn delete_plugin(&mut self, source: &str) -> Result<PluginEntry, StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        let mut next = config.clone();
+        let index = next
+            .plugins
+            .iter()
+            .position(|plugin| plugin.source == source)
+            .ok_or_else(|| StoreError::MissingSource {
+                source: source.to_owned(),
+            })?;
+        let removed = next.plugins.remove(index);
+        self.persist(&next)?;
+        self.state = Ok(next);
+        Ok(removed)
+    }
+
+    /// 按来源取插件条目（`source` 即条目唯一身份）。
+    pub fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        config
+            .plugins
+            .iter()
+            .find(|plugin| plugin.source == source)
+            .cloned()
+            .ok_or_else(|| StoreError::MissingSource {
+                source: source.to_owned(),
+            })
     }
 
     /// 内置插件条目：每次启动时 upsert（缺省插入 enabled=true）。
@@ -1127,6 +1197,71 @@ mod tests {
 
         assert!(store.set_plugin_enabled("builtin:pi", true).is_err());
         assert!(store.upsert_builtin_plugin("builtin:pi", "pi").is_err());
+        assert!(
+            store
+                .add_plugin("https://example.com/manifest.json")
+                .is_err()
+        );
+        assert!(store.set_plugin_id("builtin:pi", "pi").is_err());
+        assert!(store.delete_plugin("builtin:pi").is_err());
+    }
+
+    #[test]
+    fn add_plugin_appends_entry_and_rejects_duplicate_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
+        let source = "https://example.com/releases/download/v1/manifest.json";
+
+        store.add_plugin(source).unwrap();
+        let err = store.add_plugin(source).unwrap_err();
+
+        assert!(matches!(err, StoreError::DuplicateSource { .. }));
+        assert!(err.message().contains(source));
+        let reopened = Store::open(path);
+        let plugins = &reopened.get().unwrap().plugins;
+        assert_eq!(plugins.len(), 2, "重复添加不产生第二条");
+        assert_eq!(plugins[0].source, "builtin:pi", "内置条目始终在最前");
+        assert_eq!(plugins[1].source, source);
+        assert!(plugins[1].enabled);
+        assert_eq!(plugins[1].id, None, "id 待安装成功后写入");
+    }
+
+    #[test]
+    fn set_plugin_id_persists_and_missing_source_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+        let source = "https://example.com/manifest.json";
+        store.add_plugin(source).unwrap();
+
+        store.set_plugin_id(source, "zed").unwrap();
+
+        let err = store
+            .set_plugin_id("https://other.example.com/manifest.json", "zed")
+            .unwrap_err();
+        assert!(matches!(err, StoreError::MissingSource { .. }));
+        assert_eq!(
+            Store::open(path).get().unwrap().plugins[0].id.as_deref(),
+            Some("zed")
+        );
+    }
+
+    #[test]
+    fn delete_plugin_removes_entry_and_missing_source_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut store = Store::open(path.clone());
+        let source = "https://example.com/manifest.json";
+        store.add_plugin(source).unwrap();
+
+        let removed = store.delete_plugin(source).unwrap();
+
+        assert_eq!(removed.source, source);
+        assert!(Store::open(path).get().unwrap().plugins.is_empty());
+        let err = store.delete_plugin(source).unwrap_err();
+        assert!(matches!(err, StoreError::MissingSource { .. }));
     }
 
     #[test]
