@@ -23,9 +23,9 @@ jobs:
             args: '--target aarch64-apple-darwin'
           - platform: 'macos-latest' # for Intel based macs.
             args: '--target x86_64-apple-darwin'
-          - platform: 'ubuntu-22.04'
+          - platform: 'ubuntu-latest'
             args: ''
-          - platform: 'ubuntu-22.04-arm' # Only available in public repos.
+          - platform: 'ubuntu-24.04-arm' # Only available in public repos; ARM 没有 ubuntu-latest-arm 滚动标签。
             args: ''
           - platform: 'windows-latest'
             args: ''
@@ -56,11 +56,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          # xdg-utils（xdg-open）是 AppImage 打包的必需项；ubuntu-22.04-arm 镜像未预装。
+          # xdg-utils（xdg-open）是 AppImage 打包的必需项；ARM 镜像（ubuntu-24.04-arm）可能未预装。
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
 
-      # key 带 os/arch 前缀：与 Check 工作流按 runner.os 写入的缓存区分开，
-      # 并区分 matrix 中两个共用 macos-latest 的条目（ARM64 / X64）。
+      # key 与 Check 工作流保持一致：tag 触发的运行可读取默认分支作用域的缓存，
+      # 从而直接复用 Check 在 main 上保存的缓存（tag 之间互不可见）。
+      # os/arch 前缀用于区分 matrix 中两个共用 macos-latest 的条目（ARM64 / X64）。
+      # restore-keys 使 Cargo.lock 变化后仍能部分复用旧缓存。
       - uses: actions/cache@v6
         with:
           path: |
@@ -71,7 +73,8 @@ jobs:
             src-tauri/target/
             # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
             plugins/pi/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

@@ -72,7 +72,10 @@ jobs:
             src-tauri/target/
             # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
             plugins/pi/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # key 与 Release 工作流保持一致：tag 触发的 Release 运行可读取默认分支
+          # （本工作流 push 到 main 时）保存的缓存。os/arch 前缀区分平台。
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
 
       - name: Format
         run: cargo fmt --check
