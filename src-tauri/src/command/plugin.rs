@@ -26,8 +26,7 @@ pub fn set_plugin_enabled(
     source: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut guard = store.lock()?;
-    service.set_enabled(&mut guard, &source, enabled)
+    service.set_enabled(store.handle(), &source, enabled)
 }
 
 /// 添加插件（来源为指向 manifest.json 的 https 地址或本机绝对路径）：写条目后获取、
@@ -37,8 +36,7 @@ pub fn set_plugin_enabled(
 #[tauri::command]
 pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
     on_install_pool(app, move |store, service| {
-        let mut guard = store.lock()?;
-        service.add_plugin(&mut guard, &source)
+        service.add_plugin(store.handle(), &source)
     })
     .await
 }
@@ -48,8 +46,7 @@ pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String> {
     on_install_pool(app, move |store, service| {
-        let mut guard = store.lock()?;
-        service.reload_plugin(&mut guard, &source)
+        service.reload_plugin(store.handle(), &source)
     })
     .await
 }
@@ -61,8 +58,7 @@ pub fn remove_plugin(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<(), String> {
-    let mut guard = store.lock()?;
-    service.remove_plugin(&mut guard, &source)
+    service.remove_plugin(store.handle(), &source)
 }
 
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，
@@ -83,6 +79,9 @@ pub fn apply_providers(
 
 /// 在阻塞线程池执行含网络下载的安装类操作：下载可能持续数秒，
 /// 不得占用 IPC 线程。状态在阻塞任务内获取，避免跨线程持有引用。
+///
+/// 配置存储的锁由插件服务按短临界区自行获取：这里绝不代为持锁，
+/// 下载、校验与落位全程不阻塞其它命令。
 async fn on_install_pool<T, F>(app: AppHandle, task: F) -> Result<T, String>
 where
     T: Send + 'static,

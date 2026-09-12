@@ -9,7 +9,7 @@ use command::{
 };
 use plugin::PluginService;
 use std::sync::Mutex;
-use store::Store;
+use store::{STORE_LOCK_POISONED, Store};
 use tauri::Manager;
 
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
@@ -21,7 +21,15 @@ impl AppStore {
     /// 取配置存储的锁。其它命令持锁期间 panic 会毒化锁，
     /// 此时报错而非静默继续（读取或写入都不可信）。
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Store>, String> {
-        self.store.lock().map_err(|_| "配置存储不可用".to_owned())
+        self.store
+            .lock()
+            .map_err(|_| STORE_LOCK_POISONED.to_owned())
+    }
+
+    /// 配置存储的锁句柄：插件服务的下载、校验与落位必须发生在临界区之外，
+    /// 因此交给它的是互斥体本身，而不是一次长锁（见 `plugin::lock_store`）。
+    fn handle(&self) -> &Mutex<Store> {
+        &self.store
     }
 }
 

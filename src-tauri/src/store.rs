@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 /// 配置文件 schema 版本（见 ADR 0001）。
 pub const CONFIG_VERSION: u32 = 1;
 
+/// 配置存储的锁被毒化（其它命令持锁期间 panic）时对用户可见的原因。
+/// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
+pub const STORE_LOCK_POISONED: &str = "配置存储不可用";
+
 /// `~/.maestro/config.json` 的顶层文档（version 1 schema）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {

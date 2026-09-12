@@ -263,6 +263,7 @@ export default function PluginsPage() {
   const [loadError, setLoadError] = useState(null);
   const [adding, setAdding] = useState(false);
 
+  /** 刷新插件列表：成功返回列表；失败置 loadError 并返回 `null`（区别于空列表）。 */
   const reload = useCallback(async () => {
     setLoading(true);
     try {
@@ -272,7 +273,8 @@ export default function PluginsPage() {
       return list;
     } catch (err) {
       setLoadError(String(err));
-      return [];
+      // 刷新失败与「列表为空」必须可区分：调用方不得把失败当成安装成功。
+      return null;
     } finally {
       setLoading(false);
     }
@@ -286,8 +288,11 @@ export default function PluginsPage() {
   async function handleAdd(source) {
     await addPlugin(source);
     const list = await reload();
+    // 刷新失败已展示错误；列表中不见新条目也不谎报成功。
+    if (list === null) return;
     const added = list.find((plugin) => plugin.source === source);
-    if (added?.status === "error") {
+    if (!added) return;
+    if (added.status === "error") {
       message.warning("插件条目已添加，但安装未完成：见卡片上的原因，可点「重新加载」重试");
     } else {
       message.success("已添加插件");

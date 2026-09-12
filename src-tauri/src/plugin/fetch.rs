@@ -18,8 +18,10 @@ const BODY_LIMIT: u64 = 64 * 1024 * 1024;
 /// 建连（含 TLS 握手）时限：主机不可达时快速失败，而非让用户干等。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 每次读写的时限。下载总耗时取决于用户的链路（实测有 ~50KB/s 的慢链路），
-/// 故不设总时限，只用来兜住彻底无响应的服务器。
+/// 每次阻塞读写的时限（**不是**整次下载的总时限）。reqwest 的 blocking 客户端
+/// 没有独立的 `read_timeout`，`ClientBuilder::timeout` 在这里逐次作用于建连、
+/// 取响应头与每次读取：链路持续有进展（实测有 ~50KB/s 的慢链路）就不会被掐断，
+/// 彻底无响应的服务器则会被兜住。
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 生产实现：同步 reqwest（rustls + 平台信任库）。

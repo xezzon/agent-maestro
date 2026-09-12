@@ -51,7 +51,6 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 - [ ] Provider / 模型、MCP、Skills 的统一管理与投影
 - [ ] Profile 与 Agent 工具绑定
 - [ ] 配置跨设备同步
-- [ ] 第三方插件机制
 - [ ] 更多 Agent 工具适配（Cherry Studio 等）
 - [ ] Skills 在线注册表浏览与安装
 
