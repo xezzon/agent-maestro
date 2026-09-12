@@ -1,6 +1,6 @@
 [package]
 name = "agent-maestro"
-version = "0.1.0"
+version = "0.2.0"
 description = "An APP for managing agents profile unified."
 authors = ["xezzon <agent-maestro@xezzon.xyz>"]
 edition = "2024"
