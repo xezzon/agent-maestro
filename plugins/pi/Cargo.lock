@@ -92,7 +92,14 @@ dependencies = [
 name = "maestro-plugin-pi"
 version = "0.1.0"
 dependencies = [
+ "maestro-plugin-sdk",
  "serde_json",
+]
+
+[[package]]
+name = "maestro-plugin-sdk"
+version = "1.0.0"
+dependencies = [
  "wit-bindgen",
 ]
 

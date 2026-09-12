@@ -82,3 +82,13 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      # SDK crate 是独立 package（无 workspace 覆盖），单独跑 fmt 与 clippy；
+      # 作为库 crate 不提交 Cargo.lock，故不用 --locked。
+      - name: Format (maestro-plugin-sdk)
+        run: cargo fmt --check
+        working-directory: crates/maestro-plugin-sdk
+
+      - name: Clippy (maestro-plugin-sdk)
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: crates/maestro-plugin-sdk

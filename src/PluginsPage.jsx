@@ -5,13 +5,25 @@ import {
   Card,
   Empty,
   Flex,
+  Form,
+  Input,
   message,
+  Modal,
+  Popconfirm,
+  Radio,
   Spin,
   Switch,
   Tag,
   Typography,
 } from "antd";
-import { listPlugins, reloadPlugins, setPluginEnabled } from "./api/plugins";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import {
+  addPlugin,
+  listPlugins,
+  reloadPlugin,
+  removePlugin,
+  setPluginEnabled,
+} from "./api/plugins";
 
 /**
  * @param {Object} param0
@@ -76,7 +88,172 @@ function PluginCard({ plugin, onReload }) {
           <Tag color="success">已加载</Tag>
         </div>
       )}
+      {!plugin.builtin && (
+        <div className="card-actions">
+          <Button
+            disabled={busy}
+            onClick={() =>
+              run(() => reloadPlugin(plugin.source), "已重新加载插件")
+            }
+          >
+            重新加载
+          </Button>
+          <Popconfirm
+            title="移除插件"
+            description="将删除该插件的配置条目与已落位的插件文件，确定移除？"
+            okText="移除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() =>
+              run(() => removePlugin(plugin.source), "已移除插件")
+            }
+          >
+            <Button danger disabled={busy}>
+              移除
+            </Button>
+          </Popconfirm>
+        </div>
+      )}
     </Card>
+  );
+}
+
+const URL_RULES = [
+  { required: true, message: "请输入 manifest.json 的 https 地址" },
+  {
+    validator: (_, value) => {
+      if (!value) return Promise.resolve();
+      let url;
+      try {
+        url = new URL(value);
+      } catch {
+        return Promise.reject(new Error("不是合法的 URL"));
+      }
+      if (url.protocol !== "https:") {
+        return Promise.reject(new Error("插件来源仅支持 https 地址"));
+      }
+      return Promise.resolve();
+    },
+  },
+];
+
+const PATH_RULES = [{ required: true, message: "请选择插件的 manifest.json" }];
+
+/** 来源种类：文案与来源模型的命名一致（不出现「Git」）。 */
+const SOURCE_OPTIONS = [
+  { label: "https 地址", value: "https" },
+  { label: "本地文件", value: "file" },
+];
+
+/**
+ * 添加插件对话框：radio 切换来源种类——「https 地址」为默认（联动 URL 输入框），
+ * 「本地文件」联动文件选择器选中本机 manifest.json（插件作者的本地调试回路）。
+ *
+ * @param {Object} param0
+ * @param {boolean} param0.open
+ * @param {() => void} param0.onClose
+ * @param {(source: string) => Promise<void>} param0.onSubmit
+ */
+function AddPluginModal({ open, onClose, onSubmit }) {
+  const [form] = Form.useForm();
+  const [kind, setKind] = useState("https");
+  const [picking, setPicking] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  /** 关闭即复位：每次打开都回到默认来源与空输入。 */
+  function close() {
+    form.resetFields();
+    setKind("https");
+    onClose();
+  }
+
+  async function pickManifest() {
+    setPicking(true);
+    try {
+      const selected = await openDialog({
+        title: "选择插件的 manifest.json",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "manifest.json", extensions: ["json"] }],
+      });
+      if (typeof selected === "string") {
+        form.setFieldValue("path", selected);
+      }
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setPicking(false);
+    }
+  }
+
+  async function handleSubmit() {
+    let values;
+    try {
+      values = await form.validateFields();
+    } catch {
+      // 校验失败已内联展示。
+      return;
+    }
+    const source = kind === "https" ? values.url : values.path;
+    setSaving(true);
+    try {
+      await onSubmit(source);
+      close();
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal
+      title="添加插件"
+      open={open}
+      okText="添加"
+      cancelText="取消"
+      confirmLoading={saving}
+      destroyOnHidden
+      onOk={handleSubmit}
+      onCancel={close}
+    >
+      <Form form={form} layout="vertical" onFinish={handleSubmit}>
+        <Form.Item label="来源">
+          <Radio.Group
+            options={SOURCE_OPTIONS}
+            value={kind}
+            disabled={saving}
+            onChange={(e) => setKind(e.target.value)}
+          />
+        </Form.Item>
+        {kind === "https" ? (
+          <Form.Item
+            name="url"
+            label="https 地址"
+            extra="指向插件 manifest.json 的 https 地址，例如 GitHub Release 上的 manifest.json"
+            rules={URL_RULES}
+          >
+            <Input placeholder="https://github.com/owner/repo/releases/download/v1/manifest.json" />
+          </Form.Item>
+        ) : (
+          <>
+            <Form.Item
+              name="path"
+              label="本地 manifest.json"
+              extra="插件项目根目录下的 manifest.json；entry 为相对路径时读该目录内的产物，为 https 地址时联网获取"
+              rules={PATH_RULES}
+            >
+              <Input readOnly placeholder="选择本机插件项目的 manifest.json" />
+            </Form.Item>
+            <Form.Item style={{ marginBottom: 0 }}>
+              <Button loading={picking} disabled={saving} onClick={pickManifest}>
+                选择文件
+              </Button>
+            </Form.Item>
+          </>
+        )}
+      </Form>
+    </Modal>
   );
 }
 
@@ -84,14 +261,20 @@ export default function PluginsPage() {
   const [plugins, setPlugins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [adding, setAdding] = useState(false);
 
+  /** 刷新插件列表：成功返回列表；失败置 loadError 并返回 `null`（区别于空列表）。 */
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      setPlugins(await listPlugins());
+      const list = await listPlugins();
+      setPlugins(list);
       setLoadError(null);
+      return list;
     } catch (err) {
       setLoadError(String(err));
+      // 刷新失败与「列表为空」必须可区分：调用方不得把失败当成安装成功。
+      return null;
     } finally {
       setLoading(false);
     }
@@ -101,16 +284,18 @@ export default function PluginsPage() {
     reload();
   }, [reload]);
 
-  async function handleReloadRegistry() {
-    setLoading(true);
-    try {
-      await reloadPlugins();
-      message.success("已从磁盘重新加载插件");
-      await reload();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setLoading(false);
+  /** 条目先落盘再安装：安装失败也保留条目（错误态），因此这里总能刷新出结果。 */
+  async function handleAdd(source) {
+    await addPlugin(source);
+    const list = await reload();
+    // 刷新失败已展示错误；列表中不见新条目也不谎报成功。
+    if (list === null) return;
+    const added = list.find((plugin) => plugin.source === source);
+    if (!added) return;
+    if (added.status === "error") {
+      message.warning("插件条目已添加，但安装未完成：见卡片上的原因，可点「重新加载」重试");
+    } else {
+      message.success("已添加插件");
     }
   }
 
@@ -139,11 +324,21 @@ export default function PluginsPage() {
           Plugins
         </Typography.Title>
         <Flex gap={8}>
-          <Button disabled={loading} onClick={handleReloadRegistry}>
-            重新加载
+          <Button
+            type="primary"
+            disabled={loading || adding}
+            onClick={() => setAdding(true)}
+          >
+            添加插件
           </Button>
         </Flex>
       </div>
+
+      <AddPluginModal
+        open={adding}
+        onClose={() => setAdding(false)}
+        onSubmit={handleAdd}
+      />
 
       {loading && plugins.length === 0 ? (
         <div className="page-loading">

@@ -4,23 +4,33 @@ mod provider;
 mod store;
 
 use command::{
-    apply_providers, create_provider, delete_provider, list_plugins, list_providers,
-    reload_plugins, set_plugin_enabled, update_provider,
+    add_plugin, apply_providers, create_provider, delete_provider, list_plugins, list_providers,
+    reload_plugin, remove_plugin, set_plugin_enabled, update_provider,
 };
 use plugin::PluginService;
 use std::sync::Mutex;
-use store::Store;
-use tauri::{Manager, State};
+use store::{STORE_LOCK_POISONED, Store};
+use tauri::Manager;
 
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
 struct AppStore {
     store: Mutex<Store>,
 }
 
-fn lock_store<'a>(
-    app: &'a State<'a, AppStore>,
-) -> Result<std::sync::MutexGuard<'a, Store>, String> {
-    app.store.lock().map_err(|_| "配置存储不可用".to_owned())
+impl AppStore {
+    /// 取配置存储的锁。其它命令持锁期间 panic 会毒化锁，
+    /// 此时报错而非静默继续（读取或写入都不可信）。
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Store>, String> {
+        self.store
+            .lock()
+            .map_err(|_| STORE_LOCK_POISONED.to_owned())
+    }
+
+    /// 配置存储的锁句柄：插件服务的下载、校验与落位必须发生在临界区之外，
+    /// 因此交给它的是互斥体本身，而不是一次长锁（见 `plugin::lock_store`）。
+    fn handle(&self) -> &Mutex<Store> {
+        &self.store
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -38,6 +48,8 @@ pub fn run() {
     }));
     builder
         .plugin(tauri_plugin_opener::init())
+        // 添加插件对话框用它选择本机 manifest.json（file 来源）。
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let store = match store::default_path() {
                 Ok(path) => Store::open(path),
@@ -62,7 +74,9 @@ pub fn run() {
             delete_provider,
             list_plugins,
             set_plugin_enabled,
-            reload_plugins,
+            add_plugin,
+            reload_plugin,
+            remove_plugin,
             apply_providers
         ])
         .run(tauri::generate_context!())

@@ -32,6 +32,10 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 - **Skills 以符号链接部署**：安装的 Skills 会通过符号链接出现在各工具的 Skills 目录中（Windows 上使用目录联接 Junction，无需管理员权限），请勿手动删除这些链接。
 - 对各 Agent 工具的适配由内置插件（Plugin）提供，第一期包含 Pi、OpenCode、Zed 三个插件。
 
+## 插件开发
+
+第三方插件以 WASM 组件实现，经 https 来源（正式发布）或 file 来源（指向本机 manifest.json，本地调试）安装。面向插件作者的指南——manifest 字段语义、https 发布流约定、本地调试回路、`config_dir` 安全规则与沙箱边界——见 [docs/plugin-authoring.md](docs/plugin-authoring.md)；类型化绑定与依赖写法见 [crates/maestro-plugin-sdk](crates/maestro-plugin-sdk)。
+
 ## 支持的平台
 
 基于 Tauri v2，Maestro 提供桌面端应用，支持以下平台：
@@ -47,7 +51,6 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 - [ ] Provider / 模型、MCP、Skills 的统一管理与投影
 - [ ] Profile 与 Agent 工具绑定
 - [ ] 配置跨设备同步
-- [ ] 第三方插件机制
 - [ ] 更多 Agent 工具适配（Cherry Studio 等）
 - [ ] Skills 在线注册表浏览与安装
 

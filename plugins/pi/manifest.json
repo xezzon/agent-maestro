@@ -3,5 +3,5 @@
   "name": "Pi",
   "tool": "pi",
   "config_dir": "~/.pi",
-  "entry": "plugin.wasm"
+  "entry": "target/wasm32-wasip2/release/maestro_plugin_pi.wasm"
 }
