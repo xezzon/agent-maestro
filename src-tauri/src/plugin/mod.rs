@@ -173,26 +173,6 @@ struct InstantiatedPlugin {
     world: bindings::PluginWorld,
 }
 
-/// 实例化组件（编译通过 + 导出接口匹配 + config_dir 可开放 + fuel 预算就位）；
-/// 装载时用于兼容性校验，投影时用于实际调用。
-fn instantiate_component(
-    engine: &Engine,
-    bytes: &[u8],
-    config_dir: &Path,
-) -> Result<InstantiatedPlugin, String> {
-    let component =
-        Component::new(engine, bytes).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
-    let mut store = wasmtime::Store::new(engine, HostState::new(config_dir)?);
-    store
-        .set_fuel(FUEL_BUDGET)
-        .map_err(|e| format!("设置插件执行预算失败：{e}"))?;
-    let mut linker = Linker::new(engine);
-    p2::add_to_linker_sync(&mut linker).map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
-    let world = bindings::PluginWorld::instantiate(&mut store, &component, &linker)
-        .map_err(|e| format!("插件接口不兼容：{e}"))?;
-    Ok(InstantiatedPlugin { store, world })
-}
-
 /// 单次插件调用的执行预算（fuel）：投影任务的量级远小于该值，
 /// 死循环或超量计算的插件会被中断并走失败路径，不会卡死投影。
 const FUEL_BUDGET: u64 = 1 << 30;
@@ -310,12 +290,29 @@ impl PluginService {
         }
     }
 
+    fn instantiate_component(&self, wasm: &[u8], tool_config_path: &Path) -> Result<InstantiatedPlugin, String> {
+        let engine = &self.engine;
+
+        let component =
+            Component::new(engine, wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
+        let mut store = wasmtime::Store::new(engine, HostState::new(tool_config_path)?);
+        store
+            .set_fuel(FUEL_BUDGET)
+            .map_err(|e| format!("设置插件执行预算失败：{e}"))?;
+        let mut linker = Linker::new(engine);
+        p2::add_to_linker_sync(&mut linker)
+            .map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
+        let world = bindings::PluginWorld::instantiate(&mut store, &component, &linker)
+            .map_err(|e| format!("插件接口不兼容：{e}"))?;
+        Ok(InstantiatedPlugin { store, world })
+    }
+
     /// 落位插件的装载管线：解析 manifest → 解析 config_dir（`~` 展开、目录不存在则先创建）
     /// → 实例化校验。只读落位目录，不联网。
     fn load_placed(&self, id: &str) -> Result<LoadedPlugin, String> {
         let placed = install::read(&self.maestro_paths.plugin_dir(id))?;
-        let config_dir = resolve_config_dir(&placed.manifest.config_dir, &self.maestro_paths)?;
-        instantiate_component(&self.engine, &placed.wasm, &config_dir)?;
+        let config_dir = self.resolve_config_dir(&placed.manifest.config_dir)?;
+        self.instantiate_component(&placed.wasm, &config_dir)?;
         Ok(LoadedPlugin {
             id: placed.manifest.id.clone(),
             name: placed.manifest.name.clone(),
@@ -329,8 +326,8 @@ impl PluginService {
     fn load_builtin(&self) -> Result<LoadedPlugin, String> {
         let manifest = parse_manifest(SourceKind::Builtin, builtin::PI_MANIFEST_JSON)
             .map_err(|e| format!("内置插件损坏：{e}"))?;
-        let config_dir = resolve_config_dir(&manifest.config_dir, &self.maestro_paths)?;
-        instantiate_component(&self.engine, builtin::PI_WASM, &config_dir)?;
+        let config_dir = self.resolve_config_dir(&manifest.config_dir)?;
+        self.instantiate_component(builtin::PI_WASM, &config_dir)?;
         Ok(LoadedPlugin {
             id: manifest.id.clone(),
             name: manifest.name.clone(),
@@ -477,8 +474,8 @@ impl PluginService {
 
         let wasm = self.source_wasm(source, &manifest)?;
         let dir = self.maestro_paths.plugin_dir(&manifest.id);
-        let config_dir = resolve_config_dir(&manifest.config_dir, &self.maestro_paths)?;
-        instantiate_component(&self.engine, &wasm, &config_dir)?;
+        let config_dir = self.resolve_config_dir(&manifest.config_dir)?;
+        self.instantiate_component(&wasm, &config_dir)?;
         install::place(&dir, &text, &wasm)?;
 
         if installed.as_deref() != Some(manifest.id.as_str()) {
@@ -642,12 +639,55 @@ impl PluginService {
         loaded: &LoadedPlugin,
         providers: Vec<WitProvider>,
     ) -> Result<Vec<String>, String> {
-        let mut plugin = instantiate_component(&self.engine, &loaded.wasm, &loaded.config_dir)?;
+        let mut plugin = self.instantiate_component(&loaded.wasm, &loaded.config_dir)?;
         let handle = plugin.world.maestro_plugin_plugin();
         let result = handle
             .call_write_providers(&mut plugin.store, &providers)
             .map_err(|e| format!("调用插件失败：{e}"))?;
         result.map_err(|msg| format!("插件返回错误：{msg}"))
+    }
+
+    /// 解析 manifest 声明的配置目录为宿主可控范围内的绝对路径。
+    ///
+    /// 仅接受 `~/…` 形式（展开为主目录下的相对路径），拒绝绝对路径、`..` 上跳
+    /// 与空的 `~`；目录创建后规范化验证仍在主目录内，防止外置 manifest 声明
+    /// 任意主机目录并借 WASI 预开放获得读写权限。
+    fn resolve_config_dir(
+        &self,
+        config_dir: &str,
+    ) -> Result<PathBuf, String> {
+        let home = &self.maestro_paths.home();
+        let rest = config_dir
+        .strip_prefix("~/")
+        .filter(|rest| !rest.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "manifest.json 不合法：config_dir「{config_dir}」必须是主目录内的相对路径（~/…）"
+            )
+        })?;
+        let relative = Path::new(rest);
+        if relative
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(format!(
+                "manifest.json 不合法：config_dir「{config_dir}」不得包含「..」"
+            ));
+        }
+        let dir = home.join(relative);
+        fs::create_dir_all(&dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
+        let canonical_home = home
+            .canonicalize()
+            .map_err(|e| format!("解析主目录失败：{e}"))?;
+        let canonical = dir
+            .canonicalize()
+            .map_err(|e| format!("解析插件配置目录失败：{e}"))?;
+        if !canonical.starts_with(&canonical_home) {
+            return Err(format!(
+                "manifest.json 不合法：config_dir「{config_dir}」逃逸了主目录"
+            ));
+        }
+        Ok(canonical)
     }
 }
 
@@ -719,46 +759,6 @@ fn check_upstream_id(installed: Option<&str>, id: &str) -> Result<(), String> {
 /// Provider / 插件命令（见 ADR 0006）。锁被毒化时与 `AppStore::lock` 报同一原因。
 fn lock_store(store: &Mutex<Store>) -> Result<MutexGuard<'_, Store>, String> {
     store.lock().map_err(|_| STORE_LOCK_POISONED.to_owned())
-}
-
-/// 解析 manifest 声明的配置目录为宿主可控范围内的绝对路径。
-///
-/// 仅接受 `~/…` 形式（展开为主目录下的相对路径），拒绝绝对路径、`..` 上跳
-/// 与空的 `~`；目录创建后规范化验证仍在主目录内，防止外置 manifest 声明
-/// 任意主机目录并借 WASI 预开放获得读写权限。
-fn resolve_config_dir(config_dir: &str, maestro_paths: &MaestroPaths) -> Result<PathBuf, String> {
-    let home = maestro_paths.home();
-    let rest = config_dir
-        .strip_prefix("~/")
-        .filter(|rest| !rest.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "manifest.json 不合法：config_dir「{config_dir}」必须是主目录内的相对路径（~/…）"
-            )
-        })?;
-    let relative = Path::new(rest);
-    if relative
-        .components()
-        .any(|c| c == std::path::Component::ParentDir)
-    {
-        return Err(format!(
-            "manifest.json 不合法：config_dir「{config_dir}」不得包含「..」"
-        ));
-    }
-    let dir = home.join(relative);
-    fs::create_dir_all(&dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
-    let canonical_home = home
-        .canonicalize()
-        .map_err(|e| format!("解析主目录失败：{e}"))?;
-    let canonical = dir
-        .canonicalize()
-        .map_err(|e| format!("解析插件配置目录失败：{e}"))?;
-    if !canonical.starts_with(&canonical_home) {
-        return Err(format!(
-            "manifest.json 不合法：config_dir「{config_dir}」逃逸了主目录"
-        ));
-    }
-    Ok(canonical)
 }
 
 /// 读取 file 来源 manifest 的相对 entry（相对 manifest.json 所在目录）。
@@ -1977,7 +1977,8 @@ mod tests {
         let config_dir = home.path().join("config");
         fs::create_dir_all(&config_dir).unwrap();
 
-        let mut plugin = instantiate_component(&service.engine, builtin::PI_WASM, &config_dir)
+        let mut plugin = service
+            .instantiate_component(builtin::PI_WASM, &config_dir)
             .expect("内置 pi 组件应可实例化");
         // 预算归零：第一条 guest 指令即触发 fuel 耗尽中断，调用转错误路径。
         plugin.store.set_fuel(0).unwrap();
