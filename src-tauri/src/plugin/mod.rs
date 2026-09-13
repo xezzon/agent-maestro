@@ -805,7 +805,10 @@ pub(crate) mod testutil {
     };
 
     use super::{PluginService, fetch::Fetcher, install};
-    use crate::store::{Config, Store};
+    use crate::{
+        paths::MaestroPaths,
+        store::{Config, Store},
+    };
 
     /// 测试替身：按 URL 返回预置响应；未预置的 URL 即失败——
     /// 测试因此绝不会发起真实网络请求。
@@ -861,7 +864,8 @@ pub(crate) mod testutil {
     }
 
     pub(crate) fn store_at(home: &Path) -> Mutex<Store> {
-        Mutex::new(Store::open(home.join(".maestro").join("config.json")))
+        let maestro_paths = MaestroPaths::new(home);
+        Mutex::new(Store::new(&maestro_paths))
     }
 
     /// 测试读取配置快照：走与服务同一套短锁访问。
@@ -924,6 +928,7 @@ mod tests {
         temp_home, test_service,
     };
     use super::*;
+    use crate::paths::MaestroPaths;
     use crate::provider::{Endpoints, ModelEntry};
 
     const MANIFEST_URL: &str =
@@ -993,7 +998,8 @@ mod tests {
         service.startup(&store);
 
         // 启动 upsert 落盘；重启（重新 open）后条目仍在。
-        let reopened = Store::open(home.path().join(".maestro").join("config.json"));
+        let maestro_paths = MaestroPaths::new(home.path());
+        let reopened = Store::new(&maestro_paths);
         let plugins = &reopened.get().unwrap().plugins;
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].source, builtin::BUILTIN_PI_SOURCE);
@@ -1005,14 +1011,14 @@ mod tests {
         let home = temp_home();
         // 旧版本配置可能残留 Git 来源条目：Git 来源已整体废弃（ADR 0006），
         // 进错误态而非静默忽略。
-        let path = home.path().join(".maestro").join("config.json");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let maestro_paths = MaestroPaths::new(home.path());
+        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
         fs::write(
-            &path,
+            maestro_paths.config_path(),
             r#"{"version":1,"providers":{},"plugins":[{"source":"git://example.com/x.git","enabled":true}]}"#,
         )
         .unwrap();
-        let store = Mutex::new(Store::open(path));
+        let store = Mutex::new(Store::new(&maestro_paths));
         let service = test_service(home.path());
         service.startup(&store);
 
@@ -1053,10 +1059,10 @@ mod tests {
     fn id_conflict_marks_later_entry_as_error() {
         let home = temp_home();
         // 手工编辑出的 id 冲突：同一 id 由两个来源持有。
-        let path = home.path().join(".maestro").join("config.json");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let maestro_paths = MaestroPaths::new(home.path());
+        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
         fs::write(
-            &path,
+            maestro_paths.config_path(),
             format!(
                 r#"{{"version":1,"providers":{{}},"plugins":[
                     {{"source":"builtin:pi","enabled":true,"id":"pi"}},
@@ -1064,7 +1070,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let store = Mutex::new(Store::open(path));
+        let store = Mutex::new(Store::new(&maestro_paths));
         let service = test_service(home.path());
         service.startup(&store);
 
