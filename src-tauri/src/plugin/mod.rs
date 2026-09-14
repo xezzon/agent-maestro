@@ -25,6 +25,7 @@ use wasmtime::{
 use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
 
 use crate::{
+    paths::MaestroPaths,
     provider::Provider,
     store::{STORE_LOCK_POISONED, Store, StoreError},
 };
@@ -132,7 +133,7 @@ struct RegistryEntry {
 pub struct PluginService {
     engine: Engine,
     /// 用于展开 manifest 的 `~`；测试可替换为临时主目录。
-    home: Option<PathBuf>,
+    maestro_paths: MaestroPaths,
     /// https 拉取的注入点（生产为同步 reqwest 实现，测试为替身）。
     fetcher: Arc<dyn Fetcher>,
     entries: Mutex<Vec<RegistryEntry>>,
@@ -203,32 +204,19 @@ fn build_engine() -> Engine {
     Engine::new(&config).expect("failed to create wasm engine")
 }
 
-impl Default for PluginService {
-    fn default() -> Self {
-        Self::with_fetcher(dirs::home_dir(), Arc::new(HttpFetcher::new()))
-    }
-}
-
 impl PluginService {
+    pub fn new(maestro_paths: &MaestroPaths) -> Self {
+        Self::with_fetcher(maestro_paths, Arc::new(HttpFetcher::new()))
+    }
+
     /// 注入 fetcher：生产用 https 实现，测试用替身（本设计唯一的新缝）。
-    pub fn with_fetcher(home: Option<PathBuf>, fetcher: Arc<dyn Fetcher>) -> Self {
+    pub fn with_fetcher(maestro_paths: &MaestroPaths, fetcher: Arc<dyn Fetcher>) -> Self {
         Self {
             engine: build_engine(),
-            home,
+            maestro_paths: maestro_paths.clone(),
             fetcher,
             entries: Mutex::new(Vec::new()),
         }
-    }
-
-    fn home(&self) -> Result<&Path, String> {
-        self.home
-            .as_deref()
-            .ok_or_else(|| "无法确定用户主目录（HOME）".to_owned())
-    }
-
-    /// 指定插件 id 的落位目录（`~/.maestro/plugins/<id>`）。
-    fn plugin_dir(&self, id: &str) -> Result<PathBuf, String> {
-        Ok(install::plugin_dir(&install::root(self.home()?), id))
     }
 
     /// 应用启动：upsert 内置条目（离线、只读磁盘）并重建注册表。
@@ -325,8 +313,8 @@ impl PluginService {
     /// 落位插件的装载管线：解析 manifest → 解析 config_dir（`~` 展开、目录不存在则先创建）
     /// → 实例化校验。只读落位目录，不联网。
     fn load_placed(&self, id: &str) -> Result<LoadedPlugin, String> {
-        let placed = install::read(&self.plugin_dir(id)?)?;
-        let config_dir = resolve_config_dir(&placed.manifest.config_dir, self.home()?)?;
+        let placed = install::read(&self.maestro_paths.plugin_dir(id))?;
+        let config_dir = resolve_config_dir(&placed.manifest.config_dir, &self.maestro_paths)?;
         instantiate_component(&self.engine, &placed.wasm, &config_dir)?;
         Ok(LoadedPlugin {
             id: placed.manifest.id.clone(),
@@ -341,7 +329,7 @@ impl PluginService {
     fn load_builtin(&self) -> Result<LoadedPlugin, String> {
         let manifest = parse_manifest(SourceKind::Builtin, builtin::PI_MANIFEST_JSON)
             .map_err(|e| format!("内置插件损坏：{e}"))?;
-        let config_dir = resolve_config_dir(&manifest.config_dir, self.home()?)?;
+        let config_dir = resolve_config_dir(&manifest.config_dir, &self.maestro_paths)?;
         instantiate_component(&self.engine, builtin::PI_WASM, &config_dir)?;
         Ok(LoadedPlugin {
             id: manifest.id.clone(),
@@ -468,7 +456,7 @@ impl PluginService {
             return Err("内置插件不可移除".to_owned());
         }
         if let Some(id) = &entry.id {
-            install::remove(&self.plugin_dir(id)?)?;
+            install::remove(&self.maestro_paths.plugin_dir(id))?;
         }
         guard.delete_plugin(source).map_err(|e| e.message())?;
         drop(guard);
@@ -488,8 +476,8 @@ impl PluginService {
         self.check_id_conflict(store, source, &manifest.id)?;
 
         let wasm = self.source_wasm(source, &manifest)?;
-        let dir = self.plugin_dir(&manifest.id)?;
-        let config_dir = resolve_config_dir(&manifest.config_dir, self.home()?)?;
+        let dir = self.maestro_paths.plugin_dir(&manifest.id);
+        let config_dir = resolve_config_dir(&manifest.config_dir, &self.maestro_paths)?;
         instantiate_component(&self.engine, &wasm, &config_dir)?;
         install::place(&dir, &text, &wasm)?;
 
@@ -738,7 +726,8 @@ fn lock_store(store: &Mutex<Store>) -> Result<MutexGuard<'_, Store>, String> {
 /// 仅接受 `~/…` 形式（展开为主目录下的相对路径），拒绝绝对路径、`..` 上跳
 /// 与空的 `~`；目录创建后规范化验证仍在主目录内，防止外置 manifest 声明
 /// 任意主机目录并借 WASI 预开放获得读写权限。
-fn resolve_config_dir(config_dir: &str, home: &Path) -> Result<PathBuf, String> {
+fn resolve_config_dir(config_dir: &str, maestro_paths: &MaestroPaths) -> Result<PathBuf, String> {
+    let home = maestro_paths.home();
     let rest = config_dir
         .strip_prefix("~/")
         .filter(|rest| !rest.is_empty())
@@ -800,11 +789,11 @@ fn read_source_entry(source: &str, entry: &str) -> Result<Vec<u8>, String> {
 pub(crate) mod testutil {
     use std::{
         collections::BTreeMap,
-        path::{Path, PathBuf},
+        path::Path,
         sync::{Arc, Mutex},
     };
 
-    use super::{PluginService, fetch::Fetcher, install};
+    use super::{PluginService, fetch::Fetcher};
     use crate::{
         paths::MaestroPaths,
         store::{Config, Store},
@@ -860,7 +849,8 @@ pub(crate) mod testutil {
     }
 
     pub(crate) fn stub_service(home: &Path, fetcher: StubFetcher) -> PluginService {
-        PluginService::with_fetcher(Some(home.to_owned()), Arc::new(fetcher))
+        let maestro_paths = MaestroPaths::new(home);
+        PluginService::with_fetcher(&maestro_paths, Arc::new(fetcher))
     }
 
     pub(crate) fn store_at(home: &Path) -> Mutex<Store> {
@@ -896,11 +886,6 @@ pub(crate) mod testutil {
         }
     }
 
-    /// 测试关心的落位目录：与 install 模块共用同一套布局规则。
-    pub(crate) fn placed_dir(home: &Path, id: &str) -> PathBuf {
-        install::plugin_dir(&install::root(home), id)
-    }
-
     /// 上游 manifest 模板：三个测试模块共用同一份 JSON 形状。
     pub(crate) fn manifest_json(
         id: &str,
@@ -924,8 +909,8 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::testutil::{
-        LockProbeFetcher, StubFetcher, manifest_json, placed_dir, snapshot, store_at, stub_service,
-        temp_home, test_service,
+        LockProbeFetcher, StubFetcher, manifest_json, snapshot, store_at, stub_service, temp_home,
+        test_service,
     };
     use super::*;
     use crate::paths::MaestroPaths;
@@ -1088,6 +1073,7 @@ mod tests {
     #[test]
     fn add_https_plugin_installs_places_and_projects() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
 
@@ -1100,7 +1086,7 @@ mod tests {
         assert_eq!(plugins[0].id.as_deref(), Some("pi2"));
 
         // 落位目录：manifest.json + plugin.wasm；manifest 原样保留（entry 仍是上游 URL）。
-        let dir = placed_dir(home.path(), "pi2");
+        let dir = maestro_paths.plugin_dir("pi2");
         let disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(disk["entry"], WASM_URL, "entry 保留回源地址");
@@ -1178,6 +1164,7 @@ mod tests {
     #[test]
     fn add_plugin_keeps_entry_in_error_state_when_download_fails() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let fetcher = StubFetcher::new();
         fetcher.fail(MANIFEST_URL, "网络不可达");
@@ -1193,7 +1180,7 @@ mod tests {
         let error = views[0].error.as_deref().unwrap();
         assert!(error.contains("下载 manifest 失败"), "{error}");
         assert!(error.contains("网络不可达"), "原因需可见：{error}");
-        assert!(!placed_dir(home.path(), "pi2").exists());
+        assert!(!maestro_paths.plugin_dir("pi2").exists());
     }
 
     /// 下载可能持续数秒：全程不得持有配置存储锁，否则会连锁阻塞所有 Provider / 插件命令。
@@ -1201,12 +1188,13 @@ mod tests {
     #[test]
     fn downloads_do_not_hold_the_store_lock() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = Arc::new(store_at(home.path()));
         let fetcher = StubFetcher::new();
         fetcher.serve(MANIFEST_URL, third_party_manifest("pi2", "Pi2"));
         fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
         let service = PluginService::with_fetcher(
-            Some(home.path().to_owned()),
+            &maestro_paths,
             Arc::new(LockProbeFetcher::new(Arc::clone(&store), fetcher)),
         );
 
@@ -1219,10 +1207,11 @@ mod tests {
     #[test]
     fn failed_install_can_be_retried_with_reload() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let fetcher = Arc::new(StubFetcher::new());
         fetcher.fail(MANIFEST_URL, "网络不可达");
-        let service = PluginService::with_fetcher(Some(home.path().to_owned()), fetcher.clone());
+        let service = PluginService::with_fetcher(&maestro_paths, fetcher.clone());
         service.add_plugin(&store, MANIFEST_URL).unwrap();
         assert_eq!(service.list()[0].status, "error");
 
@@ -1233,16 +1222,17 @@ mod tests {
 
         assert_eq!(service.list()[0].status, "loaded");
         assert_eq!(snapshot(&store).plugins[0].id.as_deref(), Some("pi2"));
-        assert!(placed_dir(home.path(), "pi2").join("plugin.wasm").exists());
+        assert!(maestro_paths.plugin_dir("pi2").join("plugin.wasm").exists());
     }
 
     #[test]
     fn failed_reload_refreshes_the_error_state_reason() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let fetcher = Arc::new(StubFetcher::new());
         fetcher.fail(MANIFEST_URL, "首次不可达");
-        let service = PluginService::with_fetcher(Some(home.path().to_owned()), fetcher.clone());
+        let service = PluginService::with_fetcher(&maestro_paths, fetcher.clone());
         service.add_plugin(&store, MANIFEST_URL).unwrap();
         let error = service.list()[0].error.clone().unwrap();
         assert!(error.contains("首次不可达"), "{error}");
@@ -1259,6 +1249,7 @@ mod tests {
     #[test]
     fn install_rejects_invalid_third_party_manifest_and_config_dir() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let fetcher = StubFetcher::new();
         // entry 不是 https URL：https 来源的 entry 约束与内置插件之外的来源一致从严。
@@ -1294,12 +1285,13 @@ mod tests {
             "{:?}",
             view.error
         );
-        assert!(!placed_dir(home.path(), "pi2").exists());
+        assert!(!maestro_paths.plugin_dir("pi2").exists());
     }
 
     #[test]
     fn add_plugin_rejects_id_conflict_with_builtin() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = stub_service(home.path(), https_stub("pi", "Pi clone"));
         service.startup(&store);
@@ -1325,7 +1317,7 @@ mod tests {
             "冲突时不得写入 id"
         );
         assert!(
-            !placed_dir(home.path(), "pi").exists(),
+            !maestro_paths.plugin_dir("pi").exists(),
             "冲突不得落位覆盖既有插件"
         );
     }
@@ -1350,13 +1342,14 @@ mod tests {
     #[test]
     fn reload_keeps_old_version_usable_when_download_or_validation_fails() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let fetcher = Arc::new(StubFetcher::new());
         fetcher.serve(MANIFEST_URL, third_party_manifest("pi2", "Pi2 v1"));
         fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
-        let service = PluginService::with_fetcher(Some(home.path().to_owned()), fetcher.clone());
+        let service = PluginService::with_fetcher(&maestro_paths, fetcher.clone());
         service.add_plugin(&store, MANIFEST_URL).unwrap();
-        let dir = placed_dir(home.path(), "pi2");
+        let dir = maestro_paths.plugin_dir("pi2");
         let installed = fs::read(dir.join("plugin.wasm")).unwrap();
 
         // 上游 manifest 的 id 变更：报错并保持旧状态。
@@ -1366,7 +1359,7 @@ mod tests {
         assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v1"));
         assert_eq!(fs::read(dir.join("plugin.wasm")).unwrap(), installed);
         assert!(
-            !placed_dir(home.path(), "other").exists(),
+            !maestro_paths.plugin_dir("other").exists(),
             "id 变更不得落位到新 id 目录"
         );
 
@@ -1426,6 +1419,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
         store.lock().unwrap().add_plugin(MANIFEST_URL).unwrap();
@@ -1439,7 +1433,7 @@ mod tests {
         fs::set_permissions(&maestro_dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(outcome.is_err(), "id 落盘失败应报错：{outcome:?}");
         assert!(
-            !placed_dir(home.path(), "pi2").exists(),
+            !maestro_paths.plugin_dir("pi2").exists(),
             "id 未落盘则回滚落位目录，不留注册表看不见的孤儿"
         );
     }
@@ -1447,10 +1441,11 @@ mod tests {
     #[test]
     fn remove_plugin_deletes_entry_and_placed_dir() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
         service.add_plugin(&store, MANIFEST_URL).unwrap();
-        let dir = placed_dir(home.path(), "pi2");
+        let dir = maestro_paths.plugin_dir("pi2");
         assert!(dir.exists());
 
         service.remove_plugin(&store, MANIFEST_URL).unwrap();
@@ -1463,11 +1458,12 @@ mod tests {
     #[test]
     fn remove_plugin_is_idempotent() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
         service.add_plugin(&store, MANIFEST_URL).unwrap();
         // 落位目录已被人为删除：移除仍然成功（幂等）。
-        fs::remove_dir_all(placed_dir(home.path(), "pi2")).unwrap();
+        fs::remove_dir_all(maestro_paths.plugin_dir("pi2")).unwrap();
 
         service.remove_plugin(&store, MANIFEST_URL).unwrap();
         // 条目已不存在：视为已移除，不报错。
@@ -1523,6 +1519,7 @@ mod tests {
     #[test]
     fn add_file_plugin_reads_source_dir_places_and_projects() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = test_service(home.path());
         let source = SourceDir::new();
@@ -1540,7 +1537,7 @@ mod tests {
             "安装成功后写入来源 → 落位目录的映射"
         );
 
-        let dir = placed_dir(home.path(), "pi2");
+        let dir = maestro_paths.plugin_dir("pi2");
         assert_eq!(
             fs::read_to_string(dir.join("manifest.json")).unwrap(),
             fs::read_to_string(&manifest).unwrap(),
@@ -1581,6 +1578,7 @@ mod tests {
     #[test]
     fn add_file_plugin_with_https_entry_fetches_wasm_over_network() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let fetcher = StubFetcher::new();
         fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
@@ -1592,7 +1590,7 @@ mod tests {
 
         let views = service.list();
         assert_eq!(views[0].status, "loaded", "{:?}", views[0].error);
-        let placed = placed_dir(home.path(), "pi2");
+        let placed = maestro_paths.plugin_dir("pi2");
         assert_eq!(
             fs::read(placed.join("plugin.wasm")).unwrap(),
             builtin::PI_WASM.to_vec()
@@ -1606,10 +1604,11 @@ mod tests {
     #[test]
     fn file_source_with_https_entry_recovers_when_the_network_returns() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let fetcher = Arc::new(StubFetcher::new());
         fetcher.fail(WASM_URL, "网络不可达");
-        let service = PluginService::with_fetcher(Some(home.path().to_owned()), fetcher.clone());
+        let service = PluginService::with_fetcher(&maestro_paths, fetcher.clone());
         let source = SourceDir::new();
         source.write_manifest("pi2", "Pi2", WASM_URL);
 
@@ -1623,7 +1622,7 @@ mod tests {
             view.error
         );
         assert_eq!(view.id, None, "没有取到 wasm 即无落位");
-        assert!(!placed_dir(home.path(), "pi2").exists());
+        assert!(!maestro_paths.plugin_dir("pi2").exists());
 
         // 上游恢复后「重新加载」即成功：file 来源没有单独的「更新」动作。
         fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
@@ -1644,6 +1643,7 @@ mod tests {
     #[test]
     fn reload_file_plugin_picks_up_the_rebuilt_artifact() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = test_service(home.path());
         let source = SourceDir::new();
@@ -1657,7 +1657,7 @@ mod tests {
         service.reload_plugin(&store, &manifest).unwrap();
 
         assert_eq!(service.list()[0].name.as_deref(), Some("Pi2 v2"));
-        let placed = placed_dir(home.path(), "pi2");
+        let placed = maestro_paths.plugin_dir("pi2");
         let disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(placed.join("manifest.json")).unwrap())
                 .unwrap();
@@ -1718,6 +1718,7 @@ mod tests {
     #[test]
     fn remove_file_plugin_deletes_entry_and_placed_copy_but_keeps_source_dir() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = test_service(home.path());
         let source = SourceDir::new();
@@ -1731,7 +1732,7 @@ mod tests {
         service.remove_plugin(&store, &manifest).unwrap();
 
         assert!(snapshot(&store).plugins.is_empty());
-        assert!(!placed_dir(home.path(), "pi2").exists());
+        assert!(!maestro_paths.plugin_dir("pi2").exists());
         assert!(source.manifest_path().exists(), "不动用户的插件项目目录");
         assert!(
             source.dir.path().join(ARTIFACT_ENTRY).exists(),
@@ -1747,6 +1748,7 @@ mod tests {
             "http://example.com/plugin.wasm",
         ] {
             let home = temp_home();
+            let maestro_paths = MaestroPaths::new(home.path());
             let store = store_at(home.path());
             let service = test_service(home.path());
             let source = SourceDir::new();
@@ -1761,7 +1763,7 @@ mod tests {
                 "entry {entry:?}: {:?}",
                 view.error
             );
-            assert!(!placed_dir(home.path(), "pi2").exists());
+            assert!(!maestro_paths.plugin_dir("pi2").exists());
         }
     }
 
@@ -1770,6 +1772,7 @@ mod tests {
     #[test]
     fn file_source_entry_cannot_escape_the_source_dir_via_symlink() {
         let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
         let store = store_at(home.path());
         let service = test_service(home.path());
         let source = SourceDir::new();
@@ -1788,7 +1791,7 @@ mod tests {
             "{:?}",
             view.error
         );
-        assert!(!placed_dir(home.path(), "pi2").exists());
+        assert!(!maestro_paths.plugin_dir("pi2").exists());
     }
 
     // ---- 投影 ----

@@ -27,4 +27,8 @@ impl MaestroPaths {
     pub fn plugin_dir(&self, plugin_id: &str) -> PathBuf {
         self.plugins_dir().join(plugin_id)
     }
+
+    pub fn home(&self) -> PathBuf {
+        self.home.clone()
+    }
 }
