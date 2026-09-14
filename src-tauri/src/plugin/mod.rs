@@ -6,6 +6,7 @@
 //! 第三方来源（https 与 file）的获取、落位与生命周期见 ADR 0006。
 
 mod builtin;
+mod execution;
 mod fetch;
 mod manifest;
 
@@ -18,11 +19,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use wasmtime::{
-    Engine,
-    component::{Component, Linker},
-};
-use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
+use wasmtime::Engine;
 
 use crate::{
     paths::MaestroPaths,
@@ -31,16 +28,6 @@ use crate::{
 };
 use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, SourceKind, is_https_url, parse_manifest};
-mod bindings {
-    wasmtime::component::bindgen!({
-        path: "../crates/maestro-plugin-sdk/wit",
-        world: "plugin-world",
-    });
-}
-
-use bindings::exports::maestro::plugin::plugin::Protocol as WitProtocol;
-/// WIT 合同 v1 的类型化绑定（宿主侧）。
-use bindings::exports::maestro::plugin::plugin::{Model as WitModel, Provider as WitProvider};
 
 /// 落位目录中的 manifest 文件名。
 pub const PLACED_MANIFEST: &str = "manifest.json";
@@ -213,44 +200,6 @@ pub struct PluginService {
     entries: Mutex<Vec<RegistryEntry>>,
 }
 
-/// WASI 宿主状态：唯一被授权的写入面是预开放的插件配置目录。
-struct HostState {
-    table: ResourceTable,
-    ctx: WasiCtx,
-}
-
-impl WasiView for HostState {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-
-impl HostState {
-    fn new(config_dir: &Path) -> Result<Self, String> {
-        let mut builder = WasiCtxBuilder::new();
-        builder
-            .preopened_dir(config_dir, "/", FsPerms::ReadWrite)
-            .map_err(|e| format!("无法开放插件配置目录：{e}"))?;
-        Ok(Self {
-            table: ResourceTable::new(),
-            ctx: builder.build(),
-        })
-    }
-}
-
-/// 已实例化的插件：实例化验证与实际调用共用同一管线。
-struct InstantiatedPlugin {
-    store: wasmtime::Store<HostState>,
-    world: bindings::PluginWorld,
-}
-
-/// 单次插件调用的执行预算（fuel）：投影任务的量级远小于该值，
-/// 死循环或超量计算的插件会被中断并走失败路径，不会卡死投影。
-const FUEL_BUDGET: u64 = 1 << 30;
-
 /// 引擎配置：启用 fuel 计量（配合 `FUEL_BUDGET` 限制插件执行时长）。
 fn build_engine() -> Engine {
     let mut config = wasmtime::Config::new();
@@ -364,34 +313,12 @@ impl PluginService {
         }
     }
 
-    fn instantiate_component(
-        &self,
-        wasm: &[u8],
-        tool_config_path: &Path,
-    ) -> Result<InstantiatedPlugin, String> {
-        let engine = &self.engine;
-
-        let component =
-            Component::new(engine, wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
-        let mut store = wasmtime::Store::new(engine, HostState::new(tool_config_path)?);
-        store
-            .set_fuel(FUEL_BUDGET)
-            .map_err(|e| format!("设置插件执行预算失败：{e}"))?;
-        let mut linker = Linker::new(engine);
-        p2::add_to_linker_sync(&mut linker)
-            .map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
-        let world = bindings::PluginWorld::instantiate(&mut store, &component, &linker)
-            .map_err(|e| format!("插件接口不兼容：{e}"))?;
-        Ok(InstantiatedPlugin { store, world })
-    }
-
     /// 落位插件的装载管线：解析 manifest → 解析 config_dir（`~` 展开、目录不存在则先创建）
     /// → 实例化校验。只读落位目录，不联网。
     fn load_placed(&self, id: &str) -> Result<LoadedPlugin, String> {
         let placed = Plugin::from_plugin_dir(&self.maestro_paths.plugin_dir(id))?;
         let plugin = placed.load()?;
-        let config_dir = self.resolve_config_dir(&plugin.manifest.config_dir)?;
-        self.instantiate_component(&plugin.wasm, &config_dir)?;
+        plugin.instantiate_component(&self.engine)?;
         Ok(plugin)
     }
 
@@ -403,8 +330,7 @@ impl PluginService {
             builtin::PI_WASM,
         );
         let plugin = placed.load()?;
-        let config_dir = self.resolve_config_dir(&plugin.manifest.config_dir)?;
-        self.instantiate_component(builtin::PI_WASM, &config_dir)?;
+        plugin.instantiate_component(&self.engine)?;
         Ok(plugin)
     }
 
@@ -634,71 +560,6 @@ impl PluginService {
             .collect()
     }
 
-    fn apply_entry(
-        &self,
-        entry: &RegistryEntry,
-        providers: &BTreeMap<String, Provider>,
-    ) -> PluginApplyReport {
-        let mut report = PluginApplyReport {
-            source: entry.source.clone(),
-            id: None,
-            name: None,
-            status: "skipped",
-            files: Vec::new(),
-            skipped: Vec::new(),
-            reason: None,
-        };
-        if !entry.enabled {
-            report.reason = Some("已禁用".to_owned());
-            return report;
-        }
-        let loaded = match &entry.state {
-            PluginState::Loaded(loaded) => loaded,
-            PluginState::Error(reason) => {
-                report.reason = Some(format!("插件加载失败：{reason}"));
-                return report;
-            }
-        };
-        report.id = Some(loaded.manifest.id.clone());
-        report.name = Some(loaded.manifest.name.clone());
-        let mut wit_providers = Vec::new();
-        for (slug, provider) in providers {
-            match select_endpoint(provider) {
-                Ok((protocol, base_url)) => {
-                    wit_providers.push(to_wit_provider(slug, provider, protocol, base_url));
-                }
-                Err(reason) => report.skipped.push(SkippedProvider {
-                    slug: slug.clone(),
-                    reason,
-                }),
-            }
-        }
-        match self.call_write_providers(loaded, wit_providers) {
-            Ok(files) => {
-                report.status = "applied";
-                report.files = files;
-            }
-            Err(reason) => {
-                report.status = "failed";
-                report.reason = Some(reason);
-            }
-        }
-        report
-    }
-
-    fn call_write_providers(
-        &self,
-        loaded: &LoadedPlugin,
-        providers: Vec<WitProvider>,
-    ) -> Result<Vec<String>, String> {
-        let mut plugin = self.instantiate_component(&loaded.wasm, &loaded.manifest.config_dir)?;
-        let handle = plugin.world.maestro_plugin_plugin();
-        let result = handle
-            .call_write_providers(&mut plugin.store, &providers)
-            .map_err(|e| format!("调用插件失败：{e}"))?;
-        result.map_err(|msg| format!("插件返回错误：{msg}"))
-    }
-
     /// 解析 manifest 声明的配置目录为宿主可控范围内的绝对路径。
     ///
     /// 仅接受 `~/…` 形式（展开为主目录下的相对路径），拒绝绝对路径、`..` 上跳
@@ -763,33 +624,6 @@ fn select_endpoint(provider: &Provider) -> Result<(EndpointProtocol, String), St
 enum EndpointProtocol {
     OpenaiCompletions,
     AnthropicMessages,
-}
-
-/// 映射为 WIT 合同的单协议 Provider：每条只携带一个协议的端点；
-/// 空 api_key 由宿主归一化为 none。
-fn to_wit_provider(
-    slug: &str,
-    provider: &Provider,
-    protocol: EndpointProtocol,
-    base_url: String,
-) -> WitProvider {
-    WitProvider {
-        slug: slug.to_owned(),
-        protocol: match protocol {
-            EndpointProtocol::OpenaiCompletions => WitProtocol::OpenaiCompletions,
-            EndpointProtocol::AnthropicMessages => WitProtocol::AnthropicMessages,
-        },
-        base_url,
-        api_key: (!provider.api_key.is_empty()).then(|| provider.api_key.clone()),
-        models: provider
-            .models
-            .iter()
-            .map(|model| WitModel {
-                id: model.id.clone(),
-                display_name: model.display_name.clone(),
-            })
-            .collect(),
-    }
 }
 
 /// 上游 manifest 的 id 变更：报错并保持旧状态，避免静默换成另一个插件。
@@ -2016,24 +1850,5 @@ mod tests {
         let reports = service.apply(&BTreeMap::new());
         assert_eq!(reports[0].status, "skipped");
         assert_eq!(reports[0].reason.as_deref(), Some("已禁用"));
-    }
-
-    #[test]
-    fn wasm_call_is_interrupted_when_fuel_exhausted() {
-        let home = temp_home();
-        let service = test_service(home.path());
-        let config_dir = home.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
-
-        let mut plugin = service
-            .instantiate_component(builtin::PI_WASM, &config_dir)
-            .expect("内置 pi 组件应可实例化");
-        // 预算归零：第一条 guest 指令即触发 fuel 耗尽中断，调用转错误路径。
-        plugin.store.set_fuel(0).unwrap();
-        let handle = plugin.world.maestro_plugin_plugin();
-        let err = handle
-            .call_write_providers(&mut plugin.store, &Vec::new())
-            .expect_err("fuel 耗尽应中断 wasm 调用");
-        assert!(format!("{err:#}").contains("fuel"), "实际错误：{err:#}");
     }
 }

@@ -118,14 +118,6 @@ pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> 
     Ok(manifest)
 }
 
-/// 解析落位目录中的 manifest 文本。
-///
-/// 落位 manifest 是上游 manifest 原样，`entry` 仍指向上游地址：装载不解析 `entry`
-/// （wasm 固定为 `plugin.wasm`），故这里不加 entry 约束（见 ADR 0006）。
-pub fn parse_placed(text: &str) -> Result<Manifest, String> {
-    Manifest::try_from(text)
-}
-
 /// 是否为绝对 https URL：明文 http、其他 scheme 与空主机一律拒绝。
 pub fn is_https_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
