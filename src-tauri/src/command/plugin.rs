@@ -3,7 +3,6 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     AppStore,
     plugin::{PluginApplyReport, PluginService, PluginView},
-    store::StoreError,
 };
 
 /// 列出插件注册表（metadata 与加载状态）。
@@ -14,7 +13,7 @@ pub fn list_plugins(
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
     let guard = store.lock()?;
-    guard.get().map_err(StoreError::message)?;
+    guard.get()?;
     Ok(service.list())
 }
 
@@ -72,7 +71,7 @@ pub fn apply_providers(
 ) -> Result<Vec<PluginApplyReport>, String> {
     let providers = {
         let guard = store.lock()?;
-        guard.get().map_err(StoreError::message)?.providers.clone()
+        guard.get()?.providers.clone()
     };
     Ok(service.apply(&providers))
 }

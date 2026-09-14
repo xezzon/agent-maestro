@@ -211,7 +211,7 @@ impl PluginService {
         if let Err(e) =
             guard.upsert_builtin_plugin(builtin::BUILTIN_PI_SOURCE, builtin::BUILTIN_PI_ID)
         {
-            eprintln!("failed to upsert builtin plugin entry: {}", e.message());
+            eprintln!("failed to upsert builtin plugin entry: {}", String::from(e));
         }
         // 条目写完即释放：重建注册表要编译 wasm，不属于短临界区。
         drop(guard);
@@ -380,9 +380,7 @@ impl PluginService {
         source: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        lock_store(store)?
-            .set_plugin_enabled(source, enabled)
-            .map_err(|e| e.message())?;
+        lock_store(store)?.set_plugin_enabled(source, enabled)?;
         self.rebuild(store);
         Ok(())
     }
@@ -403,9 +401,7 @@ impl PluginService {
                 ));
             }
         };
-        lock_store(store)?
-            .add_plugin(source)
-            .map_err(|e| e.message())?;
+        lock_store(store)?.add_plugin(source)?;
         let outcome = self.install(store, source, kind);
         self.rebuild(store);
         if let Err(reason) = outcome {
@@ -419,9 +415,7 @@ impl PluginService {
     ///
     /// file 来源没有单独的「更新」动作：重新加载即开发者回路的「编译 → 重新加载」。
     pub fn reload_plugin(&self, store: &Mutex<Store>, source: &str) -> Result<(), String> {
-        let entry = lock_store(store)?
-            .plugin_by_source(source)
-            .map_err(|e| e.message())?;
+        let entry = lock_store(store)?.plugin_by_source(source)?;
         let kind = match SourceKind::from_source(&entry.source) {
             Some(SourceKind::Builtin) => return Err("内置插件不可重新加载".to_owned()),
             Some(kind) => kind,
@@ -447,7 +441,7 @@ impl PluginService {
             Ok(entry) => entry,
             // 条目不存在即视为已移除（幂等）。
             Err(StoreError::MissingSource { .. }) => return Ok(()),
-            Err(e) => return Err(e.message()),
+            Err(e) => return Err(e.into()),
         };
         if SourceKind::from_source(&entry.source) == Some(SourceKind::Builtin) {
             return Err("内置插件不可移除".to_owned());
@@ -455,7 +449,7 @@ impl PluginService {
         if let Some(id) = &entry.id {
             install::remove(&self.maestro_paths.plugin_dir(id))?;
         }
-        guard.delete_plugin(source).map_err(|e| e.message())?;
+        guard.delete_plugin(source)?;
         drop(guard);
         self.rebuild(store);
         Ok(())
@@ -482,7 +476,7 @@ impl PluginService {
             let written = lock_store(store).and_then(|mut guard| {
                 guard
                     .set_plugin_id(source, &manifest.id)
-                    .map_err(|e| e.message())
+                    .map_err(String::from)
             });
             if let Err(reason) = written {
                 // 条目 id 是来源到落位目录的唯一映射：映射写不进去，就不能留下
@@ -534,10 +528,7 @@ impl PluginService {
 
     /// 条目当前记录的插件 id：`None` 表示该来源尚未安装成功。
     fn installed_id(&self, store: &Mutex<Store>, source: &str) -> Result<Option<String>, String> {
-        Ok(lock_store(store)?
-            .plugin_by_source(source)
-            .map_err(|e| e.message())?
-            .id)
+        Ok(lock_store(store)?.plugin_by_source(source)?.id)
     }
 
     /// id 冲突检查：同一 id 只能由一个来源持有。
@@ -548,7 +539,7 @@ impl PluginService {
         id: &str,
     ) -> Result<(), String> {
         let guard = lock_store(store)?;
-        let config = guard.get().map_err(|e| e.message())?;
+        let config = guard.get()?;
         match config
             .plugins
             .iter()

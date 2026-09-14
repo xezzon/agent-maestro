@@ -38,7 +38,7 @@ impl Default for Config {
     }
 }
 
-/// 配置存储的错误；`message()` 面向最终用户。
+/// 配置存储的错误；转为 `String` 时面向最终用户。
 #[derive(Debug, Clone)]
 pub enum StoreError {
     /// 配置文件存在但无法解析。
@@ -57,9 +57,9 @@ pub enum StoreError {
     DuplicateSource { source: String },
 }
 
-impl StoreError {
-    pub fn message(&self) -> String {
-        match self {
+impl From<&StoreError> for String {
+    fn from(value: &StoreError) -> Self {
+        match value {
             StoreError::Corrupt { path, detail } => format!(
                 "配置文件已损坏：{}\n原因：{detail}\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
                 path.display()
@@ -81,6 +81,12 @@ impl StoreError {
                 format!("已存在同一来源的插件条目：{source}")
             }
         }
+    }
+}
+
+impl From<StoreError> for String {
+    fn from(value: StoreError) -> Self {
+        (&value).into()
     }
 }
 
@@ -505,7 +511,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, StoreError::MissingSlug { .. }));
-        assert!(err.message().contains("ghost"));
+        assert!(String::from(err).contains("ghost"));
         assert!(store.get().unwrap().providers.is_empty());
         assert!(
             !maestro_paths.config_path().exists(),
@@ -625,7 +631,7 @@ mod tests {
         let err = store.delete_provider("ghost").unwrap_err();
 
         assert!(matches!(err, StoreError::MissingSlug { .. }));
-        assert!(err.message().contains("ghost"));
+        assert!(String::from(err).contains("ghost"));
     }
 
     #[test]
@@ -846,10 +852,7 @@ mod tests {
 
         let err = store.get().unwrap_err();
         assert!(matches!(err, StoreError::Corrupt { .. }));
-        assert!(
-            err.message()
-                .contains(maestro_paths.config_path().to_str().unwrap())
-        );
+        assert!(String::from(err).contains(maestro_paths.config_path().to_str().unwrap()));
 
         assert!(
             store
@@ -888,10 +891,7 @@ mod tests {
 
         let err = store.get().unwrap_err();
         assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
-        assert!(
-            err.message()
-                .contains(maestro_paths.config_path().to_str().unwrap())
-        );
+        assert!(String::from(err).contains(maestro_paths.config_path().to_str().unwrap()));
 
         assert!(
             store
@@ -1225,7 +1225,7 @@ mod tests {
         let err = store.add_plugin(source).unwrap_err();
 
         assert!(matches!(err, StoreError::DuplicateSource { .. }));
-        assert!(err.message().contains(source));
+        assert!(String::from(err).contains(source));
         let reopened = Store::new(&maestro_paths);
         let plugins = &reopened.get().unwrap().plugins;
         assert_eq!(plugins.len(), 2, "重复添加不产生第二条");
