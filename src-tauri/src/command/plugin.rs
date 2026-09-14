@@ -25,7 +25,7 @@ pub fn set_plugin_enabled(
     source: String,
     enabled: bool,
 ) -> Result<(), String> {
-    service.set_enabled(store.handle(), &source, enabled)
+    service.set_enabled(&store, &source, enabled)
 }
 
 /// 添加插件（来源为指向 manifest.json 的 https 地址或本机绝对路径）：写条目后获取、
@@ -35,7 +35,7 @@ pub fn set_plugin_enabled(
 #[tauri::command]
 pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
     on_install_pool(app, move |store, service| {
-        service.add_plugin(store.handle(), &source)
+        service.add_plugin(store, &source)
     })
     .await
 }
@@ -45,7 +45,7 @@ pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String> {
     on_install_pool(app, move |store, service| {
-        service.reload_plugin(store.handle(), &source)
+        service.reload_plugin(store, &source)
     })
     .await
 }
@@ -57,7 +57,7 @@ pub fn remove_plugin(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<(), String> {
-    service.remove_plugin(store.handle(), &source)
+    service.remove_plugin(&store, &source)
 }
 
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，

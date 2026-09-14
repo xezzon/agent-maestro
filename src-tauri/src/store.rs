@@ -346,12 +346,6 @@ impl AppStore {
             .lock()
             .map_err(|_| STORE_LOCK_POISONED.to_owned())
     }
-
-    /// 配置存储的锁句柄：插件服务的下载、校验与落位必须发生在临界区之外，
-    /// 因此交给它的是互斥体本身，而不是一次长锁（见 `plugin::lock_store`）。
-    pub fn handle(&self) -> &Mutex<Store> {
-        &self.store
-    }
 }
 
 #[cfg(test)]

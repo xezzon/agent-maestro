@@ -44,7 +44,7 @@ pub fn run() {
             // 启动时 upsert 内置插件条目并从磁盘重建注册表（不联网，离线可用）。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
-            service.startup(&app_store.store);
+            service.startup(&app_store);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

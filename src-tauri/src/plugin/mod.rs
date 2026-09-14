@@ -14,7 +14,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView
 use crate::{
     paths::MaestroPaths,
     provider::Provider,
-    store::{STORE_LOCK_POISONED, Store, StoreError},
+    store::{AppStore, StoreError},
 };
 use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, SourceKind, is_https_url, parse_manifest};
@@ -200,7 +200,7 @@ impl PluginService {
     }
 
     /// 应用启动：upsert 内置条目（离线、只读磁盘）并重建注册表。
-    pub fn startup(&self, store: &Mutex<Store>) {
+    pub fn startup(&self, store: &AppStore) {
         let mut guard = match store.lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -224,8 +224,8 @@ impl PluginService {
     /// 来源持有：后加载者进错误态并指明冲突来源。
     ///
     /// 配置只在开头以短锁取一份快照，装载（编译 wasm）在锁外进行。
-    fn rebuild(&self, store: &Mutex<Store>) {
-        let entries = match lock_store(store) {
+    fn rebuild(&self, store: &AppStore) {
+        let entries = match store.lock() {
             Ok(guard) => guard
                 .get()
                 .map(|config| config.plugins.clone())
@@ -290,7 +290,11 @@ impl PluginService {
         }
     }
 
-    fn instantiate_component(&self, wasm: &[u8], tool_config_path: &Path) -> Result<InstantiatedPlugin, String> {
+    fn instantiate_component(
+        &self,
+        wasm: &[u8],
+        tool_config_path: &Path,
+    ) -> Result<InstantiatedPlugin, String> {
         let engine = &self.engine;
 
         let component =
@@ -374,13 +378,8 @@ impl PluginService {
     }
 
     /// 启用/禁用插件条目。
-    pub fn set_enabled(
-        &self,
-        store: &Mutex<Store>,
-        source: &str,
-        enabled: bool,
-    ) -> Result<(), String> {
-        lock_store(store)?.set_plugin_enabled(source, enabled)?;
+    pub fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
+        store.lock()?.set_plugin_enabled(source, enabled)?;
         self.rebuild(store);
         Ok(())
     }
@@ -392,7 +391,7 @@ impl PluginService {
     /// 修复后用「重新加载」重试（见 ADR 0006）。
     ///
     /// 配置存储只在短读/短写处加锁：下载、校验与落位全程不持锁。
-    pub fn add_plugin(&self, store: &Mutex<Store>, source: &str) -> Result<(), String> {
+    pub fn add_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
         let kind = match SourceKind::from_source(source) {
             Some(kind @ (SourceKind::Https | SourceKind::File)) => kind,
             _ => {
@@ -401,7 +400,7 @@ impl PluginService {
                 ));
             }
         };
-        lock_store(store)?.add_plugin(source)?;
+        store.lock()?.add_plugin(source)?;
         let outcome = self.install(store, source, kind);
         self.rebuild(store);
         if let Err(reason) = outcome {
@@ -414,8 +413,8 @@ impl PluginService {
     /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
     ///
     /// file 来源没有单独的「更新」动作：重新加载即开发者回路的「编译 → 重新加载」。
-    pub fn reload_plugin(&self, store: &Mutex<Store>, source: &str) -> Result<(), String> {
-        let entry = lock_store(store)?.plugin_by_source(source)?;
+    pub fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        let entry = store.lock()?.plugin_by_source(source)?;
         let kind = match SourceKind::from_source(&entry.source) {
             Some(SourceKind::Builtin) => return Err("内置插件不可重新加载".to_owned()),
             Some(kind) => kind,
@@ -435,8 +434,8 @@ impl PluginService {
     /// 只删宿主落位的副本，不动用户的插件项目目录；内置插件不可移除。
     /// 读条目、删落位目录与删条目在同一临界区内：这是配置与磁盘的一次读-改-写，
     /// 中间不得插入另一次安装（重建注册表则放到锁外）。
-    pub fn remove_plugin(&self, store: &Mutex<Store>, source: &str) -> Result<(), String> {
-        let mut guard = lock_store(store)?;
+    pub fn remove_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        let mut guard = store.lock()?;
         let entry = match guard.plugin_by_source(source) {
             Ok(entry) => entry,
             // 条目不存在即视为已移除（幂等）。
@@ -460,7 +459,7 @@ impl PluginService {
     ///
     /// 实例化校验先于落位：任何失败都不会碰到已落位的旧版本。
     /// 加锁只覆盖两处短访问（读旧 id 与冲突、写新 id），下载、校验与落位都在锁外。
-    fn install(&self, store: &Mutex<Store>, source: &str, kind: SourceKind) -> Result<(), String> {
+    fn install(&self, store: &AppStore, source: &str, kind: SourceKind) -> Result<(), String> {
         let (text, manifest) = self.source_manifest(source, kind)?;
         let installed = self.installed_id(store, source)?;
         check_upstream_id(installed.as_deref(), &manifest.id)?;
@@ -473,7 +472,7 @@ impl PluginService {
         install::place(&dir, &text, &wasm)?;
 
         if installed.as_deref() != Some(manifest.id.as_str()) {
-            let written = lock_store(store).and_then(|mut guard| {
+            let written = store.lock().and_then(|mut guard| {
                 guard
                     .set_plugin_id(source, &manifest.id)
                     .map_err(String::from)
@@ -527,18 +526,13 @@ impl PluginService {
     }
 
     /// 条目当前记录的插件 id：`None` 表示该来源尚未安装成功。
-    fn installed_id(&self, store: &Mutex<Store>, source: &str) -> Result<Option<String>, String> {
-        Ok(lock_store(store)?.plugin_by_source(source)?.id)
+    fn installed_id(&self, store: &AppStore, source: &str) -> Result<Option<String>, String> {
+        Ok(store.lock()?.plugin_by_source(source)?.id)
     }
 
     /// id 冲突检查：同一 id 只能由一个来源持有。
-    fn check_id_conflict(
-        &self,
-        store: &Mutex<Store>,
-        source: &str,
-        id: &str,
-    ) -> Result<(), String> {
-        let guard = lock_store(store)?;
+    fn check_id_conflict(&self, store: &AppStore, source: &str, id: &str) -> Result<(), String> {
+        let guard = store.lock()?;
         let config = guard.get()?;
         match config
             .plugins
@@ -643,10 +637,7 @@ impl PluginService {
     /// 仅接受 `~/…` 形式（展开为主目录下的相对路径），拒绝绝对路径、`..` 上跳
     /// 与空的 `~`；目录创建后规范化验证仍在主目录内，防止外置 manifest 声明
     /// 任意主机目录并借 WASI 预开放获得读写权限。
-    fn resolve_config_dir(
-        &self,
-        config_dir: &str,
-    ) -> Result<PathBuf, String> {
+    fn resolve_config_dir(&self, config_dir: &str) -> Result<PathBuf, String> {
         let home = &self.maestro_paths.home();
         let rest = config_dir
         .strip_prefix("~/")
@@ -744,14 +735,6 @@ fn check_upstream_id(installed: Option<&str>, id: &str) -> Result<(), String> {
     }
 }
 
-/// 取配置存储的锁；只应包裹短读/短写。
-///
-/// 下载、校验、落位与装载都在锁外进行：慢操作一旦持锁，会连带阻塞所有
-/// Provider / 插件命令（见 ADR 0006）。锁被毒化时与 `AppStore::lock` 报同一原因。
-fn lock_store(store: &Mutex<Store>) -> Result<MutexGuard<'_, Store>, String> {
-    store.lock().map_err(|_| STORE_LOCK_POISONED.to_owned())
-}
-
 /// 读取 file 来源 manifest 的相对 entry（相对 manifest.json 所在目录）。
 ///
 /// 解析 manifest 时已拒绝绝对路径与 `..`；这里再按规范化后的真实路径确认它仍落在
@@ -787,7 +770,7 @@ pub(crate) mod testutil {
     use super::{PluginService, fetch::Fetcher};
     use crate::{
         paths::MaestroPaths,
-        store::{Config, Store},
+        store::{AppStore, Config, Store},
     };
 
     /// 测试替身：按 URL 返回预置响应；未预置的 URL 即失败——
@@ -844,25 +827,27 @@ pub(crate) mod testutil {
         PluginService::with_fetcher(&maestro_paths, Arc::new(fetcher))
     }
 
-    pub(crate) fn store_at(home: &Path) -> Mutex<Store> {
+    pub(crate) fn store_at(home: &Path) -> AppStore {
         let maestro_paths = MaestroPaths::new(home);
-        Mutex::new(Store::new(&maestro_paths))
+        AppStore {
+            store: Mutex::new(Store::new(&maestro_paths)),
+        }
     }
 
     /// 测试读取配置快照：走与服务同一套短锁访问。
-    pub(crate) fn snapshot(store: &Mutex<Store>) -> Config {
+    pub(crate) fn snapshot(store: &AppStore) -> Config {
         store.lock().unwrap().get().unwrap().clone()
     }
 
     /// 代理替身：转发到内层替身，并要求每次拉取期间配置存储可被加锁——
     /// 守住「下载不得持有配置存储锁」这条边界。
     pub(crate) struct LockProbeFetcher {
-        store: Arc<Mutex<Store>>,
+        store: Arc<AppStore>,
         inner: StubFetcher,
     }
 
     impl LockProbeFetcher {
-        pub(crate) fn new(store: Arc<Mutex<Store>>, inner: StubFetcher) -> Self {
+        pub(crate) fn new(store: Arc<AppStore>, inner: StubFetcher) -> Self {
             Self { store, inner }
         }
     }
@@ -870,7 +855,7 @@ pub(crate) mod testutil {
     impl Fetcher for LockProbeFetcher {
         fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
             assert!(
-                self.store.try_lock().is_ok(),
+                self.store.store.try_lock().is_ok(),
                 "拉取 {url} 期间不得持有配置存储锁"
             );
             self.inner.fetch(url)
@@ -906,6 +891,7 @@ mod tests {
     use super::*;
     use crate::paths::MaestroPaths;
     use crate::provider::{Endpoints, ModelEntry};
+    use crate::store::Store;
 
     const MANIFEST_URL: &str =
         "https://github.com/someone/maestro-plugin-pi2/releases/download/v1/manifest.json";
@@ -994,7 +980,9 @@ mod tests {
             r#"{"version":1,"providers":{},"plugins":[{"source":"git://example.com/x.git","enabled":true}]}"#,
         )
         .unwrap();
-        let store = Mutex::new(Store::new(&maestro_paths));
+        let store = AppStore {
+            store: Mutex::new(Store::new(&maestro_paths)),
+        };
         let service = test_service(home.path());
         service.startup(&store);
 
@@ -1046,7 +1034,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let store = Mutex::new(Store::new(&maestro_paths));
+        let store = AppStore {
+            store: Mutex::new(Store::new(&maestro_paths)),
+        };
         let service = test_service(home.path());
         service.startup(&store);
 
