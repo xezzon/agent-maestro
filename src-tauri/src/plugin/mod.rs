@@ -5,14 +5,14 @@
 //! 预开放给组件（guest 路径 `/`），插件在沙箱内经 WASI 直接落盘。
 //! 第三方来源（https 与 file）的获取、落位与生命周期见 ADR 0006。
 
-pub mod builtin;
-pub mod fetch;
-pub mod install;
-pub mod manifest;
+mod builtin;
+mod fetch;
+mod manifest;
 
 use std::{
     collections::BTreeMap,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -31,7 +31,6 @@ use crate::{
 };
 use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, SourceKind, is_https_url, parse_manifest};
-
 mod bindings {
     wasmtime::component::bindgen!({
         path: "../crates/maestro-plugin-sdk/wit",
@@ -42,6 +41,95 @@ mod bindings {
 use bindings::exports::maestro::plugin::plugin::Protocol as WitProtocol;
 /// WIT 合同 v1 的类型化绑定（宿主侧）。
 use bindings::exports::maestro::plugin::plugin::{Model as WitModel, Provider as WitProvider};
+
+/// 落位目录中的 manifest 文件名。
+pub const PLACED_MANIFEST: &str = "manifest.json";
+/// 落位目录中的 wasm 文件名；上游资源内容固定落到该名，装载时只读此名、不解析 `entry`。
+pub const PLACED_WASM: &str = "plugin.wasm";
+
+pub struct Plugin {
+    plugin_dir: PathBuf,
+    raw_manifest: String,
+    wasm: Vec<u8>,
+}
+
+pub struct LoadedPlugin {
+    manifest: Manifest,
+    wasm: Arc<[u8]>,
+    plugin: Plugin,
+}
+
+impl Plugin {
+    fn new(plugin_dir: &Path, raw_manifest: String, wasm: &[u8]) -> Self {
+        Self {
+            plugin_dir: plugin_dir.to_path_buf(),
+            raw_manifest,
+            wasm: wasm.into(),
+        }
+    }
+
+    fn from_plugin_dir(plugin_dir: &Path) -> Result<Self, String> {
+        let manifest_path = plugin_dir.join(PLACED_MANIFEST);
+        let raw_manifest = fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("读取 {} 失败：{e}", manifest_path.display()))?;
+
+        let wasm_path = plugin_dir.join(PLACED_WASM);
+        let wasm =
+            fs::read(&wasm_path).map_err(|e| format!("读取 {} 失败：{e}", wasm_path.display()))?;
+
+        Ok(Self {
+            plugin_dir: plugin_dir.to_path_buf(),
+            raw_manifest,
+            wasm,
+        })
+    }
+
+    fn save(&self) -> Result<(), String> {
+        // 插件根目录
+        let plugins_dir = self
+            .plugin_dir
+            .parent()
+            .ok_or_else(|| format!("落位目录不合法：{}", self.plugin_dir.display()))?;
+        fs::create_dir_all(plugins_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
+        // 写入临时目录
+        let staging = tempfile::Builder::new()
+            .prefix(".staging-")
+            .tempdir_in(plugins_dir)
+            .map_err(|e| format!("创建临时落位目录失败：{e}"))?;
+        let staging_path = staging.path().to_owned();
+        let io_error = |what: &str| {
+            let what = what.to_owned();
+            move |e: std::io::Error| format!("写入{what}失败：{e}")
+        };
+        fs::write(staging_path.join(PLACED_MANIFEST), &self.raw_manifest)
+            .map_err(io_error(PLACED_MANIFEST))?;
+        fs::write(staging_path.join(PLACED_WASM), self.wasm.clone())
+            .map_err(io_error(PLACED_WASM))?;
+
+        todo!()
+    }
+
+    fn uninstall(&self) -> Result<(), String> {
+        match fs::remove_dir_all(&self.plugin_dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!(
+                "删除插件目录 {} 失败：{e}",
+                &self.plugin_dir.display()
+            )),
+        }
+    }
+
+    pub fn load(self) -> Result<LoadedPlugin, String> {
+        let manifest = Manifest::try_from(self.raw_manifest.as_str())?;
+        let wasm = Arc::from(self.wasm.clone());
+        Ok(LoadedPlugin {
+            manifest,
+            wasm,
+            plugin: self,
+        })
+    }
+}
 
 /// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
 ///
@@ -99,26 +187,12 @@ pub struct PluginApplyReport {
     pub reason: Option<String>,
 }
 
-/// 成功装载的插件（metadata + wasm 字节 + 已展开的配置目录）。
-///
-/// wasm 字节以 `Arc` 共享：内置插件是内嵌字节，https 插件是落位目录读入的产物。
-#[derive(Debug, Clone)]
-struct LoadedPlugin {
-    id: String,
-    name: String,
-    tool: String,
-    config_dir: PathBuf,
-    wasm: Arc<[u8]>,
-}
-
 /// 注册表条目的装载状态；装载失败进错误态并携带人类可读原因。
-#[derive(Debug, Clone)]
 enum PluginState {
     Loaded(LoadedPlugin),
     Error(String),
 }
 
-#[derive(Debug, Clone)]
 struct RegistryEntry {
     source: String,
     builtin: bool,
@@ -314,31 +388,24 @@ impl PluginService {
     /// 落位插件的装载管线：解析 manifest → 解析 config_dir（`~` 展开、目录不存在则先创建）
     /// → 实例化校验。只读落位目录，不联网。
     fn load_placed(&self, id: &str) -> Result<LoadedPlugin, String> {
-        let placed = install::read(&self.maestro_paths.plugin_dir(id))?;
-        let config_dir = self.resolve_config_dir(&placed.manifest.config_dir)?;
-        self.instantiate_component(&placed.wasm, &config_dir)?;
-        Ok(LoadedPlugin {
-            id: placed.manifest.id.clone(),
-            name: placed.manifest.name.clone(),
-            tool: placed.manifest.tool.clone(),
-            config_dir,
-            wasm: Arc::from(placed.wasm),
-        })
+        let placed = Plugin::from_plugin_dir(&self.maestro_paths.plugin_dir(id))?;
+        let plugin = placed.load()?;
+        let config_dir = self.resolve_config_dir(&plugin.manifest.config_dir)?;
+        self.instantiate_component(&plugin.wasm, &config_dir)?;
+        Ok(plugin)
     }
 
     /// 内置插件的装载管线：内嵌 manifest 校验 → config_dir 解析 → 实例化校验。
     fn load_builtin(&self) -> Result<LoadedPlugin, String> {
-        let manifest = parse_manifest(SourceKind::Builtin, builtin::PI_MANIFEST_JSON)
-            .map_err(|e| format!("内置插件损坏：{e}"))?;
-        let config_dir = self.resolve_config_dir(&manifest.config_dir)?;
+        let placed = Plugin::new(
+            &self.maestro_paths.plugin_dir("pi"),
+            builtin::PI_MANIFEST_JSON.to_string(),
+            builtin::PI_WASM,
+        );
+        let plugin = placed.load()?;
+        let config_dir = self.resolve_config_dir(&plugin.manifest.config_dir)?;
         self.instantiate_component(builtin::PI_WASM, &config_dir)?;
-        Ok(LoadedPlugin {
-            id: manifest.id.clone(),
-            name: manifest.name.clone(),
-            tool: manifest.tool.clone(),
-            config_dir,
-            wasm: Arc::from(builtin::PI_WASM),
-        })
+        Ok(plugin)
     }
 
     /// 当前注册表视图。
@@ -361,10 +428,10 @@ impl PluginService {
                 };
                 match &entry.state {
                     PluginState::Loaded(p) => PluginView {
-                        id: Some(p.id.clone()),
-                        name: Some(p.name.clone()),
-                        tool: Some(p.tool.clone()),
-                        config_dir: Some(p.config_dir.display().to_string()),
+                        id: Some(p.manifest.id.clone()),
+                        name: Some(p.manifest.name.clone()),
+                        tool: Some(p.manifest.tool.clone()),
+                        config_dir: Some(p.manifest.config_dir.clone()),
                         status: "loaded",
                         ..base
                     },
@@ -592,8 +659,8 @@ impl PluginService {
                 return report;
             }
         };
-        report.id = Some(loaded.id.clone());
-        report.name = Some(loaded.name.clone());
+        report.id = Some(loaded.manifest.id.clone());
+        report.name = Some(loaded.manifest.name.clone());
         let mut wit_providers = Vec::new();
         for (slug, provider) in providers {
             match select_endpoint(provider) {
@@ -624,7 +691,7 @@ impl PluginService {
         loaded: &LoadedPlugin,
         providers: Vec<WitProvider>,
     ) -> Result<Vec<String>, String> {
-        let mut plugin = self.instantiate_component(&loaded.wasm, &loaded.config_dir)?;
+        let mut plugin = self.instantiate_component(&loaded.wasm, &loaded.manifest.config_dir)?;
         let handle = plugin.world.maestro_plugin_plugin();
         let result = handle
             .call_write_providers(&mut plugin.store, &providers)
