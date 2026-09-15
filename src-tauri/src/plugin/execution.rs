@@ -8,6 +8,7 @@ mod bindings {
 use bindings::exports::maestro::plugin::plugin::Protocol as WitProtocol;
 /// WIT 合同 v1 的类型化绑定（宿主侧）。
 use bindings::exports::maestro::plugin::plugin::{Model as WitModel, Provider as WitProvider};
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use wasmtime::{
@@ -76,32 +77,67 @@ impl LoadedPlugin {
 }
 
 impl InstantiatedPlugin {
-    fn write_provider(
+    pub fn write_provider(
         &mut self,
         providers: &BTreeMap<String, Provider>,
-    ) -> Result<Vec<String>, String> {
-        let providers = to_wit_provider(providers);
+    ) -> Result<(Vec<String>, Vec<SkippedProvider>), String> {
+        let (wit_providers, skipped_providers) = to_wit_provider(providers);
         let handle = self.world.maestro_plugin_plugin();
         let result = handle
-            .call_write_providers(&mut self.store, &providers)
+            .call_write_providers(&mut self.store, &wit_providers)
             .map_err(|e| format!("调用插件失败：{e}"))?;
-        result.map_err(|msg| format!("插件返回错误：{msg}"))
+        result
+            .map(|files| (files, skipped_providers))
+            .map_err(|msg| format!("插件返回错误：{msg}"))
     }
 }
 
-fn to_wit_provider(providers: &BTreeMap<String, Provider>) -> Vec<WitProvider> {
+/// 投影结果中被跳过的 Provider 及原因（协议槽位为零或两个非空）。
+#[derive(Debug, Serialize)]
+pub struct SkippedProvider {
+    pub slug: String,
+    pub reason: String,
+}
+
+/// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
+#[derive(Debug, Serialize)]
+pub struct PluginApplyReport {
+    pub source: String,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    /// `applied` | `failed` | `skipped`（禁用或加载失败时不执行投影）。
+    pub status: &'static str,
+    /// 已写入文件的路径列表（相对 config_dir，由插件返回）。
+    pub files: Vec<String>,
+    pub skipped: Vec<SkippedProvider>,
+    pub reason: Option<String>,
+}
+
+fn to_wit_provider(
+    providers: &BTreeMap<String, Provider>,
+) -> (Vec<WitProvider>, Vec<SkippedProvider>) {
     let mut wit_providers = Vec::new();
+    let mut skipped_provider = Vec::new();
     for (slug, provider) in providers {
-        let (protocol, base_url) = select_endpoint(provider).unwrap();
-        wit_providers.push(WitProvider {
-            slug: slug.to_owned(),
-            protocol,
-            base_url,
-            api_key: Some(provider.api_key.clone()),
-            models: provider.models.iter().map(to_wit_model).collect(),
-        });
+        match select_endpoint(provider) {
+            Ok((protocol, base_url)) => {
+                wit_providers.push(WitProvider {
+                    slug: slug.to_owned(),
+                    protocol,
+                    base_url,
+                    api_key: Some(provider.api_key.clone()),
+                    models: provider.models.iter().map(to_wit_model).collect(),
+                });
+            }
+            Err(reason) => {
+                skipped_provider.push(SkippedProvider {
+                    slug: slug.clone(),
+                    reason,
+                });
+            }
+        }
     }
-    wit_providers
+    (wit_providers, skipped_provider)
 }
 
 fn to_wit_model(model: &ModelEntry) -> WitModel {
@@ -222,7 +258,7 @@ mod tests {
             },
         )]);
 
-        let mapped = to_wit_provider(&providers);
+        let (mapped, _) = to_wit_provider(&providers);
 
         assert_eq!(mapped.len(), 1);
         assert_eq!(mapped[0].slug, "gateway");
@@ -262,7 +298,7 @@ mod tests {
             .instantiate_component(&build_engine())
             .unwrap();
 
-        let files = plugin.write_provider(&providers).unwrap();
+        let (files, _) = plugin.write_provider(&providers).unwrap();
 
         assert_eq!(files, vec!["agent/models.json"]);
         let written: serde_json::Value = serde_json::from_str(

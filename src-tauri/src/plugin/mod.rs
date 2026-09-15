@@ -26,6 +26,7 @@ use crate::{
     provider::Provider,
     store::{AppStore, StoreError},
 };
+use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, SourceKind, is_https_url, parse_manifest};
 
@@ -93,7 +94,15 @@ impl Plugin {
         fs::write(staging_path.join(PLACED_WASM), self.wasm.clone())
             .map_err(io_error(PLACED_WASM))?;
 
-        todo!()
+        match swap_placed(&staging_path, &self.plugin_dir) {
+            Ok(()) => {
+                // 替换成功后 staging 已改名为目标目录，交由 TempDir 的清理逻辑空跑。
+                let _ = staging.keep();
+                Ok(())
+            }
+            // 替换失败：staging 仍留在磁盘上，随 TempDir 一并清理。
+            Err(e) => Err(e),
+        }
     }
 
     fn uninstall(&self) -> Result<(), String> {
@@ -115,6 +124,33 @@ impl Plugin {
             wasm,
             plugin: self,
         })
+    }
+}
+
+/// 用 staging 目录替换目标目录；目标不存在即直接改名。
+///
+/// 目标已存在时先备份旧目录，替换成功才删除备份、失败则恢复备份——因此「重新加载」
+/// 失败时旧版本保持可用。staging 与目标同父目录，保证替换是一次改名而非跨设备拷贝。
+fn swap_placed(staging: &Path, target: &Path) -> Result<(), String> {
+    if !target.exists() {
+        return fs::rename(staging, target).map_err(|e| format!("落位插件目录失败：{e}"));
+    }
+    // 插件 id 仅允许 [a-z0-9-_]，故 `<id>.old` 不会与其它插件的落位目录同名。
+    let backup = target.with_extension("old");
+    if backup.exists() {
+        fs::remove_dir_all(&backup).map_err(|e| format!("清理上次落位的备份目录失败：{e}"))?;
+    }
+    fs::rename(target, &backup).map_err(|e| format!("备份旧版本失败：{e}"))?;
+    match fs::rename(staging, target) {
+        Ok(()) => {
+            // 替换已成功：旧版本删除失败不影响新版本可用。
+            let _ = fs::remove_dir_all(&backup);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::rename(&backup, target);
+            Err(format!("替换插件目录失败：{e}"))
+        }
     }
 }
 
@@ -151,13 +187,6 @@ pub struct PluginView {
     /// `loaded` 或 `error`。
     pub status: &'static str,
     pub error: Option<String>,
-}
-
-/// 投影结果中被跳过的 Provider 及原因（协议槽位为零或两个非空）。
-#[derive(Debug, Serialize)]
-pub struct SkippedProvider {
-    pub slug: String,
-    pub reason: String,
 }
 
 /// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
@@ -553,11 +582,7 @@ impl PluginService {
 
     /// 投影：调用所有已启用且加载成功的插件；单个插件失败不影响其他插件。
     pub fn apply(&self, providers: &BTreeMap<String, Provider>) -> Vec<PluginApplyReport> {
-        let entries = self.entries.lock().unwrap().clone();
-        entries
-            .iter()
-            .map(|entry| self.apply_entry(entry, providers))
-            .collect()
+        todo!()
     }
 
     /// 解析 manifest 声明的配置目录为宿主可控范围内的绝对路径。
