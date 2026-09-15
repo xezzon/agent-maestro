@@ -134,6 +134,28 @@ pub fn is_valid_plugin_id(id: &str) -> bool {
 }
 
 #[cfg(test)]
+pub mod testutil {
+    /// 上游 manifest 模板：三个测试模块共用同一份 JSON 形状。
+    pub fn manifest_json(
+        id: &str,
+        name: &str,
+        tool: &str,
+        config_dir: &str,
+        entry: &str,
+    ) -> String {
+        format!(
+            r#"{{
+                    "id": "{id}",
+                    "name": "{name}",
+                    "tool": "{tool}",
+                    "config_dir": "{config_dir}",
+                    "entry": "{entry}"
+                }}"#
+        )
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

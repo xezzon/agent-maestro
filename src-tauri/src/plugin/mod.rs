@@ -688,56 +688,17 @@ fn read_source_entry(source: &str, entry: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::{
-        collections::BTreeMap,
         path::Path,
         sync::{Arc, Mutex},
     };
 
-    use super::{PluginService, fetch::Fetcher};
+    use super::PluginService;
+    pub use super::fetch::testutil::{LockProbeFetcher, StubFetcher};
+    pub use super::manifest::testutil::manifest_json;
     use crate::{
         paths::MaestroPaths,
         store::{AppStore, Config, Store},
     };
-
-    /// 测试替身：按 URL 返回预置响应；未预置的 URL 即失败——
-    /// 测试因此绝不会发起真实网络请求。
-    #[derive(Default)]
-    pub(crate) struct StubFetcher {
-        responses: Mutex<BTreeMap<String, Result<Vec<u8>, String>>>,
-    }
-
-    impl StubFetcher {
-        pub(crate) fn new() -> Self {
-            Self::default()
-        }
-
-        /// 预置成功响应（覆盖同一 URL 的既有响应，用于模拟上游改版）。
-        pub(crate) fn serve(&self, url: &str, body: impl Into<Vec<u8>>) {
-            self.responses
-                .lock()
-                .unwrap()
-                .insert(url.to_owned(), Ok(body.into()));
-        }
-
-        /// 预置失败响应（网络不可达等）。
-        pub(crate) fn fail(&self, url: &str, reason: &str) {
-            self.responses
-                .lock()
-                .unwrap()
-                .insert(url.to_owned(), Err(reason.to_owned()));
-        }
-    }
-
-    impl Fetcher for StubFetcher {
-        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
-            self.responses
-                .lock()
-                .unwrap()
-                .get(url)
-                .cloned()
-                .unwrap_or_else(|| Err(format!("未预置的 URL：{url}")))
-        }
-    }
 
     pub(crate) fn temp_home() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -763,48 +724,6 @@ pub(crate) mod testutil {
     /// 测试读取配置快照：走与服务同一套短锁访问。
     pub(crate) fn snapshot(store: &AppStore) -> Config {
         store.lock().unwrap().get().unwrap().clone()
-    }
-
-    /// 代理替身：转发到内层替身，并要求每次拉取期间配置存储可被加锁——
-    /// 守住「下载不得持有配置存储锁」这条边界。
-    pub(crate) struct LockProbeFetcher {
-        store: Arc<AppStore>,
-        inner: StubFetcher,
-    }
-
-    impl LockProbeFetcher {
-        pub(crate) fn new(store: Arc<AppStore>, inner: StubFetcher) -> Self {
-            Self { store, inner }
-        }
-    }
-
-    impl Fetcher for LockProbeFetcher {
-        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
-            assert!(
-                self.store.store.try_lock().is_ok(),
-                "拉取 {url} 期间不得持有配置存储锁"
-            );
-            self.inner.fetch(url)
-        }
-    }
-
-    /// 上游 manifest 模板：三个测试模块共用同一份 JSON 形状。
-    pub(crate) fn manifest_json(
-        id: &str,
-        name: &str,
-        tool: &str,
-        config_dir: &str,
-        entry: &str,
-    ) -> String {
-        format!(
-            r#"{{
-                "id": "{id}",
-                "name": "{name}",
-                "tool": "{tool}",
-                "config_dir": "{config_dir}",
-                "entry": "{entry}"
-            }}"#
-        )
     }
 }
 
