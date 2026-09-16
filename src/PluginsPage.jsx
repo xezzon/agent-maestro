@@ -284,19 +284,14 @@ export default function PluginsPage() {
     reload();
   }, [reload]);
 
-  /** 条目先落盘再安装：安装失败也保留条目（错误态），因此这里总能刷新出结果。 */
+  /** 安装成功才写入条目：失败由命令层抛出原因（对话框内展示），这里只刷新成功的结果。 */
   async function handleAdd(source) {
     await addPlugin(source);
     const list = await reload();
     // 刷新失败已展示错误；列表中不见新条目也不谎报成功。
     if (list === null) return;
-    const added = list.find((plugin) => plugin.source === source);
-    if (!added) return;
-    if (added.status === "error") {
-      message.warning("插件条目已添加，但安装未完成：见卡片上的原因，可点「重新加载」重试");
-    } else {
-      message.success("已添加插件");
-    }
+    if (!list.some((plugin) => plugin.source === source)) return;
+    message.success("已添加插件");
   }
 
   if (loadError) {

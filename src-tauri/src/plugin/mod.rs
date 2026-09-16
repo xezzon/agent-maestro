@@ -11,7 +11,7 @@ mod fetch;
 mod manifest;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -164,8 +164,8 @@ pub struct PluginEntry {
     pub source: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    #[serde(default)]
+    pub id: String,
 }
 
 fn default_true() -> bool {
@@ -179,13 +179,11 @@ pub struct PluginView {
     /// 来源以内置前缀标识；内置插件可禁用、不可移除、不出现在添加流程。
     pub builtin: bool,
     pub enabled: bool,
-    pub id: Option<String>,
+    pub id: String,
     pub name: Option<String>,
     pub tool: Option<String>,
     /// manifest 声明的配置目录（`~` 已展开为绝对路径）。
     pub config_dir: Option<String>,
-    /// `loaded` 或 `error`。
-    pub status: &'static str,
     pub error: Option<String>,
 }
 
@@ -205,18 +203,12 @@ pub struct PluginApplyReport {
 
 /// 注册表条目的装载状态；装载失败进错误态并携带人类可读原因。
 enum PluginState {
-    Loaded(LoadedPlugin),
+    /// 损坏的插件
     Error(String),
-}
-
-struct RegistryEntry {
-    source: String,
-    builtin: bool,
-    enabled: bool,
-    /// 配置中记录的插件 id（内置条目启动时写入，https 条目安装成功后写入）；
-    /// 错误态下作为「这条来源本该是哪个插件」的线索。
-    id: Option<String>,
-    state: PluginState,
+    /// 禁用的插件，不加载到内存
+    Disabled(Manifest),
+    /// 已落位且文件没有损坏的插件，可以正常加载
+    Loaded(LoadedPlugin),
 }
 
 /// 插件服务：内存注册表随配置/磁盘变更整体重建（`rebuild`）。
@@ -226,7 +218,8 @@ pub struct PluginService {
     maestro_paths: MaestroPaths,
     /// https 拉取的注入点（生产为同步 reqwest 实现，测试为替身）。
     fetcher: Arc<dyn Fetcher>,
-    entries: Mutex<Vec<RegistryEntry>>,
+    /// 内存注册表：插件 id（配置条目的 `id`）→ 装载状态。
+    entries: Mutex<HashMap<String, PluginState>>,
 }
 
 /// 引擎配置：启用 fuel 计量（配合 `FUEL_BUDGET` 限制插件执行时长）。
@@ -247,7 +240,7 @@ impl PluginService {
             engine: build_engine(),
             maestro_paths: maestro_paths.clone(),
             fetcher,
-            entries: Mutex::new(Vec::new()),
+            entries: Mutex::new(HashMap::new()),
         }
     }
 
@@ -364,39 +357,41 @@ impl PluginService {
     }
 
     /// 当前注册表视图。
-    pub fn list(&self) -> Vec<PluginView> {
-        self.entries
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|entry| {
-                let base = PluginView {
+    pub fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
+        let plugin_entries = store.lock()?.list_plugins().map_err(|_| "配置文件损坏")?;
+        let plugins = self.entries.lock().map_err(|_| "插件未加载")?;
+        let plugin_view =
+            |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| {
+                let source_kind = SourceKind::from_source(&entry.source);
+                PluginView {
                     source: entry.source.clone(),
-                    builtin: entry.builtin,
+                    builtin: source_kind == Some(SourceKind::Builtin),
                     enabled: entry.enabled,
                     id: entry.id.clone(),
-                    name: None,
-                    tool: None,
-                    config_dir: None,
-                    status: "error",
-                    error: None,
-                };
-                match &entry.state {
-                    PluginState::Loaded(p) => PluginView {
-                        id: Some(p.manifest.id.clone()),
-                        name: Some(p.manifest.name.clone()),
-                        tool: Some(p.manifest.tool.clone()),
-                        config_dir: Some(p.manifest.config_dir.clone()),
-                        status: "loaded",
-                        ..base
+                    name: manifest.map(|m| m.name.clone()),
+                    tool: manifest.map(|m| m.tool.clone()),
+                    config_dir: manifest.map(|m| m.config_dir.clone()),
+                    error,
+                }
+            };
+        Ok(plugin_entries
+            .iter()
+            .map(|entry| {
+                let plugin = plugins.get(&entry.id);
+                match plugin {
+                    Some(plugin) => match plugin {
+                        PluginState::Loaded(loaded_plugin) => {
+                            plugin_view(entry, Some(&loaded_plugin.manifest), None)
+                        }
+                        PluginState::Disabled(manifest) => {
+                            plugin_view(entry, Some(&manifest), None)
+                        }
+                        PluginState::Error(err) => plugin_view(entry, None, Some(err.to_owned())),
                     },
-                    PluginState::Error(reason) => PluginView {
-                        error: Some(reason.clone()),
-                        ..base
-                    },
+                    None => plugin_view(entry, None, Some(format!("插件 {} 未加载", entry.id))),
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// 启用/禁用插件条目。
@@ -624,64 +619,6 @@ impl PluginService {
         }
         Ok(canonical)
     }
-}
-
-/// 宿主侧挑选规则：取唯一非空的协议槽位；零个或两个非空 → 跳过并报告原因。
-fn select_endpoint(provider: &Provider) -> Result<(EndpointProtocol, String), String> {
-    let openai = provider
-        .base_url
-        .openai_completions
-        .as_deref()
-        .filter(|url| !url.is_empty());
-    let anthropic = provider
-        .base_url
-        .anthropic_messages
-        .as_deref()
-        .filter(|url| !url.is_empty());
-    match (openai, anthropic) {
-        (Some(url), None) => Ok((EndpointProtocol::OpenaiCompletions, url.to_owned())),
-        (None, Some(url)) => Ok((EndpointProtocol::AnthropicMessages, url.to_owned())),
-        (None, None) => Err("未配置任何协议端点".to_owned()),
-        (Some(_), Some(_)) => Err("同时配置了两种协议端点，暂无法确定投影端点".to_owned()),
-    }
-}
-
-enum EndpointProtocol {
-    OpenaiCompletions,
-    AnthropicMessages,
-}
-
-/// 上游 manifest 的 id 变更：报错并保持旧状态，避免静默换成另一个插件。
-fn check_upstream_id(installed: Option<&str>, id: &str) -> Result<(), String> {
-    match installed {
-        Some(old) if old != id => Err(format!(
-            "上游 manifest 的插件 id 已从「{old}」变更为「{id}」：已保持旧版本，如需换用请先移除再添加"
-        )),
-        _ => Ok(()),
-    }
-}
-
-/// 读取 file 来源 manifest 的相对 entry（相对 manifest.json 所在目录）。
-///
-/// 解析 manifest 时已拒绝绝对路径与 `..`；这里再按规范化后的真实路径确认它仍落在
-/// 来源目录内——符号链接不得把读取带到插件目录之外（与 `config_dir` 同一套规则）。
-fn read_source_entry(source: &str, entry: &str) -> Result<Vec<u8>, String> {
-    let dir = Path::new(source)
-        .parent()
-        .ok_or_else(|| format!("插件来源路径不合法：{source}"))?;
-    let target = dir.join(entry);
-    let canonical_dir = dir
-        .canonicalize()
-        .map_err(|e| format!("解析插件来源目录 {} 失败：{e}", dir.display()))?;
-    let canonical = target
-        .canonicalize()
-        .map_err(|e| format!("读取 {} 失败：{e}", target.display()))?;
-    if !canonical.starts_with(&canonical_dir) {
-        return Err(format!(
-            "manifest.json 不合法：entry「{entry}」逃逸了插件来源目录"
-        ));
-    }
-    fs::read(&canonical).map_err(|e| format!("读取 {} 失败：{e}", canonical.display()))
 }
 
 /// 测试共享助手：临时主目录 + 替身 fetcher 的插件服务与配置存储。

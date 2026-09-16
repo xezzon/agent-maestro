@@ -254,6 +254,11 @@ impl Store {
         Ok(removed)
     }
 
+    pub fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        Ok(config.plugins.clone())
+    }
+
     /// 按来源取插件条目（`source` 即条目唯一身份）。
     pub fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;

@@ -14,7 +14,7 @@ pub fn list_plugins(
 ) -> Result<Vec<PluginView>, String> {
     let guard = store.lock()?;
     guard.get()?;
-    Ok(service.list())
+    service.list(&store)
 }
 
 /// 启用/禁用插件。

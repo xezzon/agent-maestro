@@ -99,20 +99,6 @@ pub struct SkippedProvider {
     pub reason: String,
 }
 
-/// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
-#[derive(Debug, Serialize)]
-pub struct PluginApplyReport {
-    pub source: String,
-    pub id: Option<String>,
-    pub name: Option<String>,
-    /// `applied` | `failed` | `skipped`（禁用或加载失败时不执行投影）。
-    pub status: &'static str,
-    /// 已写入文件的路径列表（相对 config_dir，由插件返回）。
-    pub files: Vec<String>,
-    pub skipped: Vec<SkippedProvider>,
-    pub reason: Option<String>,
-}
-
 fn to_wit_provider(
     providers: &BTreeMap<String, Provider>,
 ) -> (Vec<WitProvider>, Vec<SkippedProvider>) {

@@ -47,7 +47,7 @@ export async function setPluginEnabled(source, enabled) {
 /**
  * 添加插件：来源为指向 manifest.json 的 https 地址或本机绝对路径（本地调试），
  * 按来源获取 manifest 与 wasm、校验、落位并装载。
- * 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
+ * 安装成功才写入条目：失败直接抛出原因，不留下半成品条目。
  * @param {string} source 指向 manifest.json 的 https 地址或本机绝对路径
  */
 export async function addPlugin(source) {
