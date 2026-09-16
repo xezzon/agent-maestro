@@ -6,8 +6,7 @@ use std::{
     sync::Mutex,
 };
 
-use crate::provider::Provider;
-use crate::{paths::MaestroPaths, plugin::PluginEntry};
+use crate::{paths::MaestroPaths, plugin::PluginEntry, provider::Provider};
 use serde::{Deserialize, Serialize};
 
 /// 配置文件 schema 版本（见 ADR 0001）。
@@ -189,24 +188,12 @@ impl Store {
         }
     }
 
-    /// 启用/禁用插件条目。
-    pub fn set_plugin_enabled(&mut self, source: &str, enabled: bool) -> Result<(), StoreError> {
-        self.update_plugins(source, |plugins| {
-            for plugin in plugins.iter_mut() {
-                if plugin.source == source {
-                    plugin.enabled = enabled;
-                    return true;
-                }
-            }
-            false
-        })
-    }
-
     /// 新增插件条目（`source` 即唯一身份，重复添加即拒绝），追加在现有条目之后。
     ///
     /// `id` 留待安装成功后经 [`Store::set_plugin_id`] 写入：条目先落盘、安装后补全，
     /// 因此安装失败时条目仍在（错误态），可修复后直接重试（见 ADR 0006）。
-    pub fn add_plugin(&mut self, source: &str) -> Result<(), StoreError> {
+    pub fn add_plugin(&mut self, plugin_entry: &PluginEntry) -> Result<(), StoreError> {
+        let source = plugin_entry.source.clone();
         let config = self.state.as_ref().map_err(Clone::clone)?;
         if config.plugins.iter().any(|plugin| plugin.source == source) {
             return Err(StoreError::DuplicateSource {
@@ -214,27 +201,11 @@ impl Store {
             });
         }
         let mut next = config.clone();
-        next.plugins.push(PluginEntry {
-            source: source.to_owned(),
-            enabled: true,
-            id: None,
-        });
+        next.plugins.push(plugin_entry.clone());
         self.persist(&next)?;
         self.state = Ok(next);
-        Ok(())
-    }
 
-    /// 写入条目的插件 id：来源 → 落位目录的映射，安装成功后落盘。
-    pub fn set_plugin_id(&mut self, source: &str, id: &str) -> Result<(), StoreError> {
-        self.update_plugins(source, |plugins| {
-            for plugin in plugins.iter_mut() {
-                if plugin.source == source {
-                    plugin.id = Some(id.to_owned());
-                    return true;
-                }
-            }
-            false
-        })
+        Ok(())
     }
 
     /// 删除插件条目，返回被删除的条目（调用方据此删除落位目录）。
@@ -272,28 +243,6 @@ impl Store {
             })
     }
 
-    /// 内置插件条目：每次启动时 upsert（缺省插入 enabled=true）。
-    /// 已有条目原样保留——用户的禁用意图不被启动 upsert 覆盖。
-    pub fn upsert_builtin_plugin(&mut self, source: &str, id: &str) -> Result<(), StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        if config.plugins.iter().any(|p| p.source == source) {
-            return Ok(());
-        }
-        let mut next = config.clone();
-        // 内置条目置于最前，装载顺序上优先。
-        next.plugins.insert(
-            0,
-            PluginEntry {
-                source: source.to_owned(),
-                enabled: true,
-                id: Some(id.to_owned()),
-            },
-        );
-        self.persist(&next)?;
-        self.state = Ok(next);
-        Ok(())
-    }
-
     /// 以 `source` 定位并原位修改 plugins 段；找不到即报错，绝不静默写入。
     fn update_plugins(
         &mut self,
@@ -310,6 +259,19 @@ impl Store {
         self.persist(&next)?;
         self.state = Ok(next);
         Ok(())
+    }
+
+    /// 启用/禁用插件条目。
+    pub fn set_plugin_enabled(&mut self, source: &str, enabled: bool) -> Result<(), StoreError> {
+        self.update_plugins(source, |plugins| {
+            for plugin in plugins.iter_mut() {
+                if plugin.source == source {
+                    plugin.enabled = enabled;
+                    return true;
+                }
+            }
+            false
+        })
     }
 
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
@@ -1154,7 +1116,7 @@ mod tests {
         let plugins = &reopened.get().unwrap().plugins;
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].source, "builtin:pi");
-        assert_eq!(plugins[0].id.as_deref(), Some("pi"));
+        assert_eq!(plugins[0].id.as_str(), "pi");
         assert!(!plugins[0].enabled, "enabled 状态持久化");
     }
 
@@ -1190,7 +1152,7 @@ mod tests {
         let plugins = &reopened.get().unwrap().plugins;
         assert_eq!(plugins.len(), 1, "内置条目幂等 upsert，不产生重复");
         assert!(!plugins[0].enabled, "用户的禁用意图不被启动 upsert 覆盖");
-        assert_eq!(plugins[0].id.as_deref(), Some("pi"));
+        assert_eq!(plugins[0].id, "pi");
     }
 
     #[test]
@@ -1205,10 +1167,13 @@ mod tests {
         assert!(store.upsert_builtin_plugin("builtin:pi", "pi").is_err());
         assert!(
             store
-                .add_plugin("https://example.com/manifest.json")
+                .add_plugin(&PluginEntry {
+                    id: "pi".to_owned(),
+                    source: "https://example.com/manifest.json".to_owned(),
+                    enabled: true,
+                })
                 .is_err()
         );
-        assert!(store.set_plugin_id("builtin:pi", "pi").is_err());
         assert!(store.delete_plugin("builtin:pi").is_err());
     }
 

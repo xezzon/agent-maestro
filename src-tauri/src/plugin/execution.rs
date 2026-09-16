@@ -111,7 +111,8 @@ fn to_wit_provider(
                     slug: slug.to_owned(),
                     protocol,
                     base_url,
-                    api_key: Some(provider.api_key.clone()),
+                    // 空 api_key 由宿主归一化为 none（见 WIT 合同）。
+                    api_key: (!provider.api_key.is_empty()).then(|| provider.api_key.clone()),
                     models: provider.models.iter().map(to_wit_model).collect(),
                 });
             }
@@ -159,7 +160,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        plugin::{Plugin, build_engine, builtin, testutil},
+        plugin::{PlacedPlugin, build_engine, builtin, testutil},
         provider::Endpoints,
     };
 
@@ -183,7 +184,7 @@ mod tests {
             &config_dir.display().to_string(),
             "plugin.wasm",
         );
-        Plugin::new(&config_dir.join("placed"), manifest, wasm)
+        PlacedPlugin::new(&config_dir.join("placed"), manifest, wasm)
             .load()
             .unwrap()
     }

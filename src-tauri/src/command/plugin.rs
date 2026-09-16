@@ -73,7 +73,7 @@ pub fn apply_providers(
         let guard = store.lock()?;
         guard.get()?.providers.clone()
     };
-    Ok(service.apply(&providers))
+    Ok(service.write_providers(&providers))
 }
 
 /// 在阻塞线程池执行含网络下载的安装类操作：下载可能持续数秒，
