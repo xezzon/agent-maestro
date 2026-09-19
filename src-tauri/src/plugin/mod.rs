@@ -258,7 +258,7 @@ impl PluginService {
         let plugin_entries = match store_guard.list_plugins() {
             Ok(plugin_entries) => plugin_entries,
             Err(_) => {
-                eprintln!("");
+                eprintln!("failed to list plugins from store during plugin startup");
                 return;
             }
         };
@@ -287,10 +287,8 @@ impl PluginService {
             plugins.insert(plugin_id, plugin_state);
         }
 
-        let builtin_plugins = vec![(BUILTIN_PI_SOURCE, BUILTIN_PI_ID)];
-
         // 在 plugins 的所有权转移之前，筛选出未写入配置文件的插件
-        let nonexistent: Vec<&str> = builtin_plugins
+        let nonexistent: Vec<&str> = [(BUILTIN_PI_SOURCE, BUILTIN_PI_ID)]
             .iter()
             .filter(|(_, plugin_id)| !plugins.contains_key(plugin_id.to_owned()))
             .map(|(plugin_source, _)| *plugin_source)
@@ -329,9 +327,7 @@ impl PluginService {
                         PluginState::Loaded(loaded_plugin) => {
                             plugin_view(entry, Some(&loaded_plugin.manifest), None)
                         }
-                        PluginState::Disabled(manifest) => {
-                            plugin_view(entry, Some(&manifest), None)
-                        }
+                        PluginState::Disabled(manifest) => plugin_view(entry, Some(manifest), None),
                         PluginState::Error(err) => plugin_view(entry, None, Some(err.to_owned())),
                     },
                     None => plugin_view(entry, None, Some(format!("插件 {} 未加载", entry.id))),
@@ -402,7 +398,7 @@ impl PluginService {
 
     /// 将插件从来源处拷贝加载到内存
     fn download(&self, source: &str) -> Result<PlacedPlugin, String> {
-        let source_kind = SourceKind::from_source(source).ok_or_else(|| "unknown source kind")?;
+        let source_kind = SourceKind::from_source(source).ok_or("unknown source kind")?;
 
         let raw_manifest = match source_kind {
             SourceKind::Https => {
@@ -472,11 +468,11 @@ impl PluginService {
                 entries.insert(entry.id.clone(), PluginState::Loaded(loaded));
             }
             None => {
-                if let Some(state) = entries.get_mut(&entry.id) {
-                    if let PluginState::Loaded(loaded) = state {
-                        let manifest = loaded.manifest.clone();
-                        *state = PluginState::Disabled(manifest);
-                    }
+                if let Some(state) = entries.get_mut(&entry.id)
+                    && let PluginState::Loaded(loaded) = state
+                {
+                    let manifest = loaded.manifest.clone();
+                    *state = PluginState::Disabled(manifest);
                 }
             }
         }
