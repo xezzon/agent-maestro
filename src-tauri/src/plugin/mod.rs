@@ -193,9 +193,7 @@ pub struct PluginView {
 /// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
 #[derive(Debug, Serialize)]
 pub struct PluginApplyReport {
-    pub source: String,
-    pub id: Option<String>,
-    pub name: Option<String>,
+    pub id: String,
     /// `applied` | `failed` | `skipped`（禁用或加载失败时不执行投影）。
     pub status: &'static str,
     /// 已写入文件的路径列表（相对 config_dir，由插件返回）。
@@ -519,11 +517,56 @@ impl PluginService {
         remove_placed_dir(&self.maestro_paths.plugin_dir(&entry.id))
     }
 
+    /// 对注册表中的每个插件执行投影，返回逐插件报告：
+    /// Loaded 实例化组件后调用 `write_provider`；Disabled 与 Error 态不执行投影。
+    /// 单个插件的失败不影响其它插件，失败原因写入该插件的报告。
     pub fn write_providers(
         &self,
         providers: &BTreeMap<String, Provider>,
-    ) -> Vec<PluginApplyReport> {
-        todo!()
+    ) -> Result<Vec<PluginApplyReport>, String> {
+        Ok(self
+            .entries
+            .lock()
+            .map_err(|_| "插件未加载")?
+            .iter()
+            .map(|(id, state)| match state {
+                PluginState::Loaded(loaded_plugin) => {
+                    match loaded_plugin
+                        .instantiate_component(&self.engine)
+                        .and_then(|mut instantiated| instantiated.write_provider(providers))
+                    {
+                        Ok((files, skipped)) => PluginApplyReport {
+                            id: id.clone(),
+                            status: "applied",
+                            files,
+                            skipped,
+                            reason: None,
+                        },
+                        Err(reason) => PluginApplyReport {
+                            id: id.clone(),
+                            status: "failed",
+                            files: Vec::new(),
+                            skipped: Vec::new(),
+                            reason: Some(reason),
+                        },
+                    }
+                }
+                PluginState::Disabled(_) => PluginApplyReport {
+                    id: id.clone(),
+                    status: "skipped",
+                    files: Vec::new(),
+                    skipped: Vec::new(),
+                    reason: Some("插件已禁用".to_owned()),
+                },
+                PluginState::Error(reason) => PluginApplyReport {
+                    id: id.clone(),
+                    status: "skipped",
+                    files: Vec::new(),
+                    skipped: Vec::new(),
+                    reason: Some(reason.clone()),
+                },
+            })
+            .collect())
     }
 
     /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
