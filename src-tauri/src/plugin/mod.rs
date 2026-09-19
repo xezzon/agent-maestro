@@ -23,12 +23,13 @@ use wasmtime::Engine;
 
 use crate::{
     paths::MaestroPaths,
+    plugin::builtin::{BUILTIN_PI_ID, BUILTIN_PI_SOURCE},
     provider::Provider,
     store::{AppStore, StoreError},
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
-use manifest::{Manifest, SourceKind, is_https_url, parse_manifest};
+use manifest::{Manifest, SourceKind, is_https_url};
 
 /// 落位目录中的 manifest 文件名。
 pub const PLACED_MANIFEST: &str = "manifest.json";
@@ -285,9 +286,20 @@ impl PluginService {
             };
             plugins.insert(plugin_id, plugin_state);
         }
+
+        let builtin_plugins = vec![(BUILTIN_PI_SOURCE, BUILTIN_PI_ID)];
+
+        // 在 plugins 的所有权转移之前，筛选出未写入配置文件的插件
+        let nonexistent: Vec<&str> = builtin_plugins
+            .iter()
+            .filter(|(_, plugin_id)| !plugins.contains_key(plugin_id.to_owned()))
+            .map(|(plugin_source, _)| *plugin_source)
+            .collect();
         *self.entries.lock().unwrap() = plugins;
-        // 检查内置插件是否缺失，如有缺失，则添加
-        todo!()
+
+        for builtin_plugin in nonexistent {
+            let _ = self.add_plugin(store, builtin_plugin);
+        }
     }
 
     /// 当前注册表视图。
@@ -420,11 +432,11 @@ impl PluginService {
             fs::read(&entry_path).map_err(|e| format!("读取 {} 失败：{e}", entry_path.display()))?
         };
 
-        Ok(PlacedPlugin {
-            plugin_dir: self.maestro_paths.plugin_dir(&manifest.id),
+        Ok(PlacedPlugin::new(
+            &self.maestro_paths.plugin_dir(&manifest.id),
             raw_manifest,
-            wasm,
-        })
+            &wasm,
+        ))
     }
 
     /// 启用/禁用插件条目。
