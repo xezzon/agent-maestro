@@ -107,14 +107,7 @@ impl PlacedPlugin {
     }
 
     fn uninstall(&self) -> Result<(), String> {
-        match fs::remove_dir_all(&self.plugin_dir) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!(
-                "删除插件目录 {} 失败：{e}",
-                &self.plugin_dir.display()
-            )),
-        }
+        remove_placed_dir(&self.plugin_dir)
     }
 
     pub fn load(self) -> Result<LoadedPlugin, String> {
@@ -152,6 +145,15 @@ fn swap_placed(staging: &Path, target: &Path) -> Result<(), String> {
             let _ = fs::rename(&backup, target);
             Err(format!("替换插件目录失败：{e}"))
         }
+    }
+}
+
+/// 删除落位目录；目录已不存在同样成功（幂等）。
+fn remove_placed_dir(plugin_dir: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(plugin_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("删除插件目录 {} 失败：{e}", plugin_dir.display())),
     }
 }
 
@@ -483,13 +485,38 @@ impl PluginService {
         Ok(())
     }
 
-    /// 移除插件：删落位目录与配置条目；两者都已不存在同样成功（幂等）。
+    /// 移除插件：先从内存注册表卸载，再删配置条目，最后删落位目录；
+    /// 条目已不存在同样成功（幂等）。
     ///
     /// 只删宿主落位的副本，不动用户的插件项目目录；内置插件不可移除。
-    /// 读条目、删落位目录与删条目在同一临界区内：这是配置与磁盘的一次读-改-写，
-    /// 中间不得插入另一次安装（重建注册表则放到锁外）。
+    /// 读条目、卸载内存、删条目与删落位目录在同一临界区内：这是内存、配置与磁盘的
+    /// 一次读-改-写，中间不得插入另一次安装——安装先落位后写条目，删目录若放到锁外，
+    /// 并发安装可能在条目删除后重新落位而被误删。
     pub fn remove_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        todo!()
+        // 内置插件随应用分发、没有宿主落位副本，不可移除（见 ADR 0004）。
+        if matches!(SourceKind::from_source(source), Some(SourceKind::Builtin)) {
+            return Err(format!("内置插件不可移除：{source}"));
+        }
+
+        let mut guard = store.lock()?;
+        let entry = match guard.plugin_by_source(source) {
+            Ok(entry) => entry,
+            // 条目已不存在：上一次移除已连同落位目录一并删除，幂等成功。
+            Err(StoreError::MissingSource { .. }) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+
+        // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
+        self.entries
+            .lock()
+            .map_err(|_| "插件未加载")?
+            .remove(&entry.id);
+
+        // 2. 删配置条目（锁内读-改-写，与读条目同处一个临界区）。
+        guard.delete_plugin(source)?;
+
+        // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
+        remove_placed_dir(&self.maestro_paths.plugin_dir(&entry.id))
     }
 
     pub fn write_providers(
@@ -916,5 +943,72 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("插件条目不存在"), "{err}");
+    }
+
+    #[test]
+    fn remove_plugin_unloads_memory_deletes_entry_then_dir() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+        service.remove_plugin(&store, MANIFEST_URL).unwrap();
+
+        assert!(snapshot(&store).plugins.is_empty(), "配置条目已删除");
+        assert!(!maestro_paths.plugin_dir("pi2").exists(), "落位目录已删除");
+        assert!(
+            service.entries.lock().unwrap().is_empty(),
+            "内存注册表已卸载"
+        );
+        assert!(service.list(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_plugin_is_idempotent_when_the_entry_is_already_gone() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+
+        service
+            .remove_plugin(&store, MANIFEST_URL)
+            .expect("条目不存在同样成功");
+        service
+            .remove_plugin(&store, MANIFEST_URL)
+            .expect("移除两次同样成功");
+    }
+
+    #[test]
+    fn remove_plugin_rejects_builtin_source() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+
+        let err = service
+            .remove_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+            .unwrap_err();
+
+        assert!(err.contains("内置插件不可移除"), "{err}");
+    }
+
+    #[test]
+    fn remove_plugin_keeps_the_user_project_dir_for_file_sources() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        let entry = "target/wasm32-wasip2/release/maestro_plugin_pi.wasm";
+        let (source, manifest) = source_dir("pi2", entry);
+        let source_id = manifest.display().to_string();
+        service.add_plugin(&store, &source_id).unwrap();
+
+        service.remove_plugin(&store, &source_id).unwrap();
+
+        assert!(snapshot(&store).plugins.is_empty());
+        assert!(!maestro_paths.plugin_dir("pi2").exists());
+        assert!(
+            source.path().join(entry).exists(),
+            "只删落位副本，不动用户的插件项目目录"
+        );
     }
 }
