@@ -328,11 +328,6 @@ impl PluginService {
             .collect())
     }
 
-    /// 启用/禁用插件条目。
-    pub fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
-        todo!()
-    }
-
     /// 添加第三方插件：
     /// 1. 先检查来源是否重复。
     /// 2. 随后获取 manifest、校验、id 冲突检查、获取 wasm、落位。
@@ -393,12 +388,6 @@ impl PluginService {
         Ok(())
     }
 
-    /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
-    /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
-    pub fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        todo!()
-    }
-
     /// 将插件从来源处拷贝加载到内存
     fn download(&self, source: &str) -> Result<PlacedPlugin, String> {
         let source_kind = SourceKind::from_source(source).ok_or_else(|| "unknown source kind")?;
@@ -438,6 +427,50 @@ impl PluginService {
         })
     }
 
+    /// 启用/禁用插件条目。
+    ///
+    /// 配置条目是唯一事实来源：先改条目，再同步内存注册表（与 `startup` 的重建
+    /// 语义一致）。禁用仅在内存里换成 Disabled 态，保留 manifest 供列表展示；
+    /// 启用从落位目录重新装载，装载失败即报错且不改配置，修复落位文件后重新启用即可。
+    pub fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
+        let entry = store.lock()?.plugin_by_source(source)?;
+        if entry.enabled == enabled {
+            return Ok(());
+        }
+
+        // 启用先装载再写配置：装载失败不写条目、不动注册表，旧状态保持可用。
+        let loaded = if enabled {
+            let mut loaded =
+                PlacedPlugin::from_plugin_dir(&self.maestro_paths.plugin_dir(&entry.id))?.load()?;
+            // 装载期把 config_dir 展开为宿主内的绝对路径：投影按此预开放目录。
+            loaded.manifest.config_dir = self
+                .resolve_config_dir(&loaded.manifest.config_dir)?
+                .display()
+                .to_string();
+            Some(loaded)
+        } else {
+            None
+        };
+
+        store.lock()?.set_plugin_enabled(source, enabled)?;
+
+        let mut entries = self.entries.lock().map_err(|_| "插件未加载")?;
+        match loaded {
+            Some(loaded) => {
+                entries.insert(entry.id.clone(), PluginState::Loaded(loaded));
+            }
+            None => {
+                if let Some(state) = entries.get_mut(&entry.id) {
+                    if let PluginState::Loaded(loaded) = state {
+                        let manifest = loaded.manifest.clone();
+                        *state = PluginState::Disabled(manifest);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 移除插件：删落位目录与配置条目；两者都已不存在同样成功（幂等）。
     ///
     /// 只删宿主落位的副本，不动用户的插件项目目录；内置插件不可移除。
@@ -451,6 +484,12 @@ impl PluginService {
         &self,
         providers: &BTreeMap<String, Provider>,
     ) -> Vec<PluginApplyReport> {
+        todo!()
+    }
+
+    /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
+    /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
+    pub fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
         todo!()
     }
 
@@ -806,5 +845,64 @@ mod tests {
         service.add_plugin(&store, MANIFEST_URL).unwrap();
 
         assert!(service.list(&store).unwrap()[0].error.is_none());
+    }
+
+    #[test]
+    fn set_enabled_disables_and_re_enables_the_plugin() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+        service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+        assert!(!snapshot(&store).plugins[0].enabled);
+        let view = &service.list(&store).unwrap()[0];
+        assert!(!view.enabled);
+        assert_eq!(view.error, None);
+        assert_eq!(
+            view.name.as_deref(),
+            Some("Pi2"),
+            "禁用保留 manifest 供展示"
+        );
+
+        service.set_enabled(&store, MANIFEST_URL, true).unwrap();
+        assert!(snapshot(&store).plugins[0].enabled);
+        let view = &service.list(&store).unwrap()[0];
+        assert!(view.enabled);
+        assert_eq!(view.error, None);
+        assert_eq!(view.name.as_deref(), Some("Pi2"));
+    }
+
+    #[test]
+    fn set_enabled_enable_fails_without_touching_config_when_placed_files_are_missing() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+        service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+        fs::remove_dir_all(maestro_paths.plugin_dir("pi2")).unwrap();
+
+        let err = service.set_enabled(&store, MANIFEST_URL, true).unwrap_err();
+
+        assert!(err.contains("读取"), "{err}");
+        assert!(
+            !snapshot(&store).plugins[0].enabled,
+            "装载失败不得改配置条目"
+        );
+        assert!(!service.list(&store).unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn set_enabled_unknown_source_is_rejected() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+
+        let err = service
+            .set_enabled(&store, "builtin:ghost", true)
+            .unwrap_err();
+
+        assert!(err.contains("插件条目不存在"), "{err}");
     }
 }
