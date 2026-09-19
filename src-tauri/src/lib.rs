@@ -1,4 +1,5 @@
 mod command;
+mod paths;
 mod plugin;
 mod provider;
 mod store;
@@ -9,29 +10,8 @@ use command::{
 };
 use plugin::PluginService;
 use std::sync::Mutex;
-use store::{STORE_LOCK_POISONED, Store};
+use store::{AppStore, Store};
 use tauri::Manager;
-
-/// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
-struct AppStore {
-    store: Mutex<Store>,
-}
-
-impl AppStore {
-    /// 取配置存储的锁。其它命令持锁期间 panic 会毒化锁，
-    /// 此时报错而非静默继续（读取或写入都不可信）。
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Store>, String> {
-        self.store
-            .lock()
-            .map_err(|_| STORE_LOCK_POISONED.to_owned())
-    }
-
-    /// 配置存储的锁句柄：插件服务的下载、校验与落位必须发生在临界区之外，
-    /// 因此交给它的是互斥体本身，而不是一次长锁（见 `plugin::lock_store`）。
-    fn handle(&self) -> &Mutex<Store> {
-        &self.store
-    }
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -51,16 +31,16 @@ pub fn run() {
         // 添加插件对话框用它选择本机 manifest.json（file 来源）。
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let store = match store::default_path() {
-                Ok(path) => Store::open(path),
-                Err(detail) => Store::unavailable(detail),
-            };
+            let home_path =
+                dirs::home_dir().ok_or_else(|| "无法确定用户主目录（HOME）".to_owned())?;
+            let maestro_paths = paths::MaestroPaths::new(&home_path);
+            let store = Store::new(&maestro_paths);
             app.manage(AppStore {
                 store: Mutex::new(store),
             });
             // 插件服务：`~` 无法确定时服务退化为不可用（命令层报错），
             // 与配置存储的保护状态语义一致。
-            app.manage(PluginService::default());
+            app.manage(PluginService::new(&maestro_paths));
             // 启动时 upsert 内置插件条目并从磁盘重建注册表（不联网，离线可用）。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();

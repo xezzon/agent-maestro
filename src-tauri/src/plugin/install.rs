@@ -4,11 +4,7 @@
 //! 资源）；wasm 内容固定存为 [`PLACED_WASM`]。应用启动只读该目录重建注册表，因此离线
 //! 可用（见 ADR 0006）。
 
-use std::{
-    fs,
-    io::ErrorKind,
-    path::{Path, PathBuf},
-};
+use std::{fs, io::ErrorKind, path::Path};
 
 use super::manifest::{self, Manifest};
 
@@ -16,16 +12,6 @@ use super::manifest::{self, Manifest};
 pub const PLACED_MANIFEST: &str = "manifest.json";
 /// 落位目录中的 wasm 文件名；上游资源内容固定落到该名，装载时只读此名、不解析 `entry`。
 pub const PLACED_WASM: &str = "plugin.wasm";
-
-/// 宿主插件根目录（`~/.maestro/plugins`）。
-pub fn root(home: &Path) -> PathBuf {
-    home.join(".maestro").join("plugins")
-}
-
-/// 指定插件 id 的落位目录。
-pub fn plugin_dir(root: &Path, id: &str) -> PathBuf {
-    root.join(id)
-}
 
 /// 落位读取结果：磁盘 manifest 与 wasm 字节。
 #[derive(Debug)]
@@ -119,6 +105,8 @@ pub fn remove(target: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::paths::MaestroPaths;
+
     use super::*;
 
     fn manifest() -> String {
@@ -138,7 +126,8 @@ mod tests {
     #[test]
     fn place_keeps_upstream_manifest_verbatim() {
         let root = temp_root();
-        let target = plugin_dir(root.path(), "zed");
+        let maestro_paths = MaestroPaths::new(root.path());
+        let target = maestro_paths.plugin_dir("zed");
         let manifest = manifest();
 
         place(&target, &manifest, b"wasm-bytes").unwrap();
@@ -164,7 +153,8 @@ mod tests {
     #[test]
     fn place_replaces_existing_dir_and_drops_backup() {
         let root = temp_root();
-        let target = plugin_dir(root.path(), "zed");
+        let maestro_paths = MaestroPaths::new(root.path());
+        let target = maestro_paths.plugin_dir("zed");
         let manifest = manifest();
         place(&target, &manifest, b"old").unwrap();
 
@@ -188,7 +178,8 @@ mod tests {
     #[test]
     fn remove_is_idempotent() {
         let root = temp_root();
-        let target = plugin_dir(root.path(), "zed");
+        let maestro_paths = MaestroPaths::new(root.path());
+        let target = maestro_paths.plugin_dir("zed");
         place(&target, &manifest(), b"wasm").unwrap();
 
         remove(&target).unwrap();
@@ -199,7 +190,8 @@ mod tests {
     #[test]
     fn read_reports_missing_files() {
         let root = temp_root();
-        let target = plugin_dir(root.path(), "zed");
+        let maestro_paths = MaestroPaths::new(root.path());
+        let target = maestro_paths.plugin_dir("zed");
 
         assert!(read(&target).unwrap_err().contains("manifest.json"));
 
@@ -211,7 +203,8 @@ mod tests {
     #[test]
     fn read_accepts_placed_manifest_whose_entry_escapes_the_plugin_dir() {
         let root = temp_root();
-        let target = plugin_dir(root.path(), "zed");
+        let maestro_paths = MaestroPaths::new(root.path());
+        let target = maestro_paths.plugin_dir("zed");
         // 落位 manifest 是上游原文，entry 已不是本机相对路径：读取时不得再按
         // file 规则拒绝（装载根本不解析 entry，见 ADR 0006）。
         let manifest = crate::plugin::testutil::manifest_json(
