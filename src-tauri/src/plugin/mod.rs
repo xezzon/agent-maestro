@@ -572,7 +572,44 @@ impl PluginService {
     /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
     /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
     pub fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        todo!()
+        // 内置插件的 wasm 内嵌于应用二进制，重新加载无从获取新版本（见 ADR 0004）。
+        if matches!(SourceKind::from_source(source), Some(SourceKind::Builtin)) {
+            return Err(format!("内置插件无需重新加载：{source}"));
+        }
+
+        // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
+        let entry = store.lock()?.plugin_by_source(source)?;
+
+        // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。
+        let mut loaded = self.download(source)?.load()?;
+        // 上游 id 变更报错并保持旧状态：落位目录由条目 id 定位，id 漂移会架空映射。
+        if loaded.manifest.id != entry.id {
+            return Err(format!(
+                "上游 manifest 的插件 id 已从「{}」变更为「{}」，拒绝重新加载",
+                entry.id, loaded.manifest.id
+            ));
+        }
+        // 装载期把 config_dir 展开为宿主内的绝对路径：投影按此预开放目录。
+        loaded.manifest.config_dir = self
+            .resolve_config_dir(&loaded.manifest.config_dir)?
+            .display()
+            .to_string();
+        // 实例化校验先于替换：wasm 不是组件或接口不兼容时旧版本保持可用。
+        loaded.instantiate_component(&self.engine)?;
+        // 替换落位目录：swap_placed 先备份旧版本，替换失败即恢复，旧版本保持可用。
+        loaded.plugin.save()?;
+
+        // 条目（id 与 enabled）不变，仅把内存注册表同步为新装载的版本。
+        let state = if entry.enabled {
+            PluginState::Loaded(loaded)
+        } else {
+            PluginState::Disabled(loaded.manifest)
+        };
+        self.entries
+            .lock()
+            .map_err(|_| "插件未加载")?
+            .insert(entry.id, state);
+        Ok(())
     }
 
     /// id 冲突检查：同一 id 只能由一个来源持有。
@@ -1053,5 +1090,149 @@ mod tests {
             source.path().join(entry).exists(),
             "只删落位副本，不动用户的插件项目目录"
         );
+    }
+
+    #[test]
+    fn reload_plugin_refetches_and_replaces_the_placed_version() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let fetcher = Arc::new(https_stub("pi2", "Pi2"));
+        let service = PluginService::with_fetcher(&MaestroPaths::new(home.path()), fetcher.clone());
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+        // 上游改版：同 id、新名字。
+        fetcher.serve(
+            MANIFEST_URL,
+            manifest_json("pi2", "Pi3", "pi", "~/.pi2", WASM_URL),
+        );
+
+        service.reload_plugin(&store, MANIFEST_URL).unwrap();
+
+        let dir = maestro_paths.plugin_dir("pi2");
+        assert_eq!(
+            fs::read_to_string(dir.join(PLACED_MANIFEST)).unwrap(),
+            manifest_json("pi2", "Pi3", "pi", "~/.pi2", WASM_URL),
+            "落位目录已替换为新版本"
+        );
+        let view = &service.list(&store).unwrap()[0];
+        assert_eq!(view.error, None);
+        assert_eq!(view.name.as_deref(), Some("Pi3"), "注册表同步新 manifest");
+    }
+
+    #[test]
+    fn reload_failure_keeps_the_old_placed_version_usable() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let fetcher = Arc::new(https_stub("pi2", "Pi2"));
+        let service = PluginService::with_fetcher(&MaestroPaths::new(home.path()), fetcher.clone());
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+        fetcher.fail(MANIFEST_URL, "网络不可达");
+
+        let err = service.reload_plugin(&store, MANIFEST_URL).unwrap_err();
+
+        assert!(err.contains("网络不可达"), "{err}");
+        let dir = maestro_paths.plugin_dir("pi2");
+        assert_eq!(
+            fs::read_to_string(dir.join(PLACED_MANIFEST)).unwrap(),
+            manifest_json("pi2", "Pi2", "pi", "~/.pi2", WASM_URL),
+            "获取失败时旧版本保持可用"
+        );
+        let view = &service.list(&store).unwrap()[0];
+        assert_eq!(view.error, None);
+        assert_eq!(view.name.as_deref(), Some("Pi2"), "注册表保持旧版本");
+    }
+
+    #[test]
+    fn reload_plugin_rejects_upstream_id_change_and_keeps_old_state() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let fetcher = Arc::new(https_stub("pi2", "Pi2"));
+        let service = PluginService::with_fetcher(&MaestroPaths::new(home.path()), fetcher.clone());
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+        // 上游把 id 改成了 pi3：落位目录由条目 id 定位，id 漂移会架空映射（见 ADR 0006）。
+        fetcher.serve(
+            MANIFEST_URL,
+            manifest_json("pi3", "Pi2", "pi", "~/.pi2", WASM_URL),
+        );
+
+        let err = service.reload_plugin(&store, MANIFEST_URL).unwrap_err();
+
+        assert!(
+            err.contains("pi2") && err.contains("pi3") && err.contains("拒绝重新加载"),
+            "{err}"
+        );
+        assert_eq!(
+            snapshot(&store).plugins[0].id,
+            "pi2",
+            "拒绝时不得改配置条目"
+        );
+        let dir = maestro_paths.plugin_dir("pi2");
+        assert_eq!(
+            fs::read_to_string(dir.join(PLACED_MANIFEST)).unwrap(),
+            manifest_json("pi2", "Pi2", "pi", "~/.pi2", WASM_URL),
+            "拒绝时旧版本保持可用"
+        );
+        assert_eq!(
+            service.list(&store).unwrap()[0].name.as_deref(),
+            Some("Pi2")
+        );
+        assert!(
+            !maestro_paths.plugin_dir("pi3").exists(),
+            "拒绝时不得落位新目录"
+        );
+    }
+
+    #[test]
+    fn reload_plugin_keeps_the_disabled_state_with_a_fresh_manifest() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let fetcher = Arc::new(https_stub("pi2", "Pi2"));
+        let service = PluginService::with_fetcher(&MaestroPaths::new(home.path()), fetcher.clone());
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+        service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+
+        fetcher.serve(
+            MANIFEST_URL,
+            manifest_json("pi2", "Pi3", "pi", "~/.pi2", WASM_URL),
+        );
+        service.reload_plugin(&store, MANIFEST_URL).unwrap();
+
+        assert!(
+            !snapshot(&store).plugins[0].enabled,
+            "重新加载不改条目的 enabled"
+        );
+        let dir = maestro_paths.plugin_dir("pi2");
+        assert_eq!(
+            fs::read_to_string(dir.join(PLACED_MANIFEST)).unwrap(),
+            manifest_json("pi2", "Pi3", "pi", "~/.pi2", WASM_URL)
+        );
+        let view = &service.list(&store).unwrap()[0];
+        assert!(!view.enabled);
+        assert_eq!(view.error, None);
+        assert_eq!(
+            view.name.as_deref(),
+            Some("Pi3"),
+            "禁用态仍以新 manifest 供展示"
+        );
+    }
+
+    #[test]
+    fn reload_plugin_rejects_builtin_and_unknown_sources() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+
+        let err = service
+            .reload_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+            .unwrap_err();
+        assert!(err.contains("内置插件无需重新加载"), "{err}");
+
+        let err = service.reload_plugin(&store, MANIFEST_URL).unwrap_err();
+        assert!(err.contains("插件条目不存在"), "{err}");
     }
 }
