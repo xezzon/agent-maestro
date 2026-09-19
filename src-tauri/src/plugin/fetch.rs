@@ -28,7 +28,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// 仅接受 https（`https_only`），默认跟随重定向（上限 10 跳）——GitHub Release
 /// 的资产下载会重定向到对象存储域名。
 pub struct HttpFetcher {
-    /// 客户端初始化失败（TLS 后端不可用）时保留原因：插件进错误态即可，
+    /// 客户端初始化失败（TLS 后端不可用）时保留原因：失败只落在本次拉取上，
     /// 不必让整个应用起不来。
     client: Result<Client, String>,
 }

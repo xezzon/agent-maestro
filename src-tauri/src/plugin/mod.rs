@@ -340,7 +340,57 @@ impl PluginService {
     ///
     /// 配置存储只在短读/短写处加锁：下载、校验与落位全程不持锁。
     pub fn add_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        todo!()
+        // 内置插件随应用分发，不经添加流程（见 ADR 0004）。
+        if !matches!(
+            SourceKind::from_source(source),
+            Some(SourceKind::Https | SourceKind::File)
+        ) {
+            return Err(format!(
+                "插件来源仅支持指向 manifest.json 的 https 地址或本机绝对路径：{source}"
+            ));
+        }
+
+        // 1. 来源即条目唯一身份：重复添加在发起下载之前拒绝。
+        let duplicate = store
+            .lock()?
+            .list_plugins()?
+            .iter()
+            .any(|plugin| plugin.source == source);
+        if duplicate {
+            return Err(StoreError::DuplicateSource {
+                source: source.to_owned(),
+            }
+            .into());
+        }
+
+        // 2. 获取 manifest 与 wasm、校验并落位；下载与校验全程不持配置存储锁。
+        let mut loaded = self.download(source)?.load()?;
+        self.check_id_conflict(store, source, &loaded.manifest.id)?;
+        // 装载期即把 config_dir 展开为宿主内的绝对路径：投影按此预开放目录。
+        loaded.manifest.config_dir = self
+            .resolve_config_dir(&loaded.manifest.config_dir)?
+            .display()
+            .to_string();
+        // 实例化校验先于落位：wasm 不是组件或接口不兼容时不落位、不写条目。
+        loaded.instantiate_component(&self.engine)?;
+        loaded.plugin.save()?;
+
+        // 3. 安装成功后写入条目：`id` 是来源到落位目录的唯一映射（见 ADR 0006）。
+        let entry = PluginEntry {
+            source: source.to_owned(),
+            enabled: true,
+            id: loaded.manifest.id.clone(),
+        };
+        if let Err(e) = store.lock()?.add_plugin(&entry) {
+            // 条目写不进去，就不能留下注册表看不见的落位目录。
+            let _ = loaded.plugin.uninstall();
+            return Err(e.into());
+        }
+        self.entries
+            .lock()
+            .map_err(|_| "插件未加载")?
+            .insert(loaded.manifest.id.clone(), PluginState::Loaded(loaded));
+        Ok(())
     }
 
     /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
@@ -351,7 +401,7 @@ impl PluginService {
 
     /// 将插件从来源处拷贝加载到内存
     fn download(&self, source: &str) -> Result<PlacedPlugin, String> {
-        let source_kind = SourceKind::from_source(source).ok_or_else(|| "unknown source kink")?;
+        let source_kind = SourceKind::from_source(source).ok_or_else(|| "unknown source kind")?;
 
         let raw_manifest = match source_kind {
             SourceKind::Https => {
@@ -375,8 +425,10 @@ impl PluginService {
         } else if is_https_url(&manifest.entry) {
             self.fetcher.fetch(&manifest.entry)?
         } else {
-            let entry_path = PathBuf::from(source).join(&manifest.entry);
-            fs::read(&entry_path).map_err(|e| format!("读取 {} 失败: {e}", entry_path.display()))?
+            // `source` 是 manifest.json 的路径，entry 相对其所在目录解析。
+            let source_dir = Path::new(source).parent().unwrap_or(Path::new("."));
+            let entry_path = source_dir.join(&manifest.entry);
+            fs::read(&entry_path).map_err(|e| format!("读取 {} 失败：{e}", entry_path.display()))?
         };
 
         Ok(PlacedPlugin {
@@ -497,5 +549,262 @@ pub(crate) mod testutil {
     /// 测试读取配置快照：走与服务同一套短锁访问。
     pub(crate) fn snapshot(store: &AppStore) -> Config {
         store.lock().unwrap().get().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::{
+        LockProbeFetcher, StubFetcher, manifest_json, snapshot, store_at, stub_service, temp_home,
+        test_service,
+    };
+    use super::*;
+    use crate::paths::MaestroPaths;
+
+    const MANIFEST_URL: &str = "https://example.com/releases/download/v1/manifest.json";
+    const WASM_URL: &str = "https://example.com/releases/download/v1/plugin.wasm";
+
+    /// https 来源的替身：manifest 的 entry 指向 Release 资产，产物用内置 pi wasm 充当
+    /// （内置 pi 即一份符合 WIT 合同的真实组件）。
+    fn https_stub(id: &str, name: &str) -> StubFetcher {
+        let fetcher = StubFetcher::new();
+        fetcher.serve(
+            MANIFEST_URL,
+            manifest_json(id, name, "pi", &format!("~/.{id}"), WASM_URL),
+        );
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        fetcher
+    }
+
+    /// 本机插件项目目录的测试替身：写入 manifest.json 与 entry 指向的产物。
+    fn source_dir(id: &str, entry: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("manifest.json");
+        fs::write(
+            &manifest,
+            manifest_json(id, "Pi2", "pi", &format!("~/.{id}"), entry),
+        )
+        .unwrap();
+        if !is_https_url(entry) {
+            let artifact = dir.path().join(entry);
+            fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+            fs::write(&artifact, builtin::PI_WASM).unwrap();
+        }
+        (dir, manifest)
+    }
+
+    #[test]
+    fn add_https_plugin_writes_entry_places_files_and_loads() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2", "Pi2"));
+
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+        // 条目：id 在安装成功后落盘，是来源到落位目录的唯一映射（见 ADR 0006）。
+        let plugins = snapshot(&store).plugins;
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].source, MANIFEST_URL);
+        assert_eq!(plugins[0].id, "pi2");
+        assert!(plugins[0].enabled);
+
+        // 落位目录：manifest 原样保留上游内容（entry 仍是回源地址）+ 固定名 wasm。
+        let dir = maestro_paths.plugin_dir("pi2");
+        assert_eq!(
+            fs::read_to_string(dir.join(PLACED_MANIFEST)).unwrap(),
+            manifest_json("pi2", "Pi2", "pi", "~/.pi2", WASM_URL)
+        );
+        assert_eq!(
+            fs::read(dir.join(PLACED_WASM)).unwrap(),
+            builtin::PI_WASM.to_vec()
+        );
+
+        let views = service.list(&store).unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].error, None, "{:?}", views[0].error);
+        assert_eq!(views[0].id, "pi2");
+        assert!(!views[0].builtin, "https 来源可重新加载、可移除");
+        assert_eq!(views[0].name.as_deref(), Some("Pi2"));
+        let config_dir = views[0].config_dir.as_deref().unwrap();
+        assert!(
+            Path::new(config_dir).is_absolute() && config_dir.ends_with(".pi2"),
+            "config_dir 已展开为宿主内的绝对路径：{config_dir}"
+        );
+    }
+
+    #[test]
+    fn add_file_plugin_reads_manifest_and_entry_from_the_source_dir() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        let entry = "target/wasm32-wasip2/release/maestro_plugin_pi.wasm";
+        let (source, manifest) = source_dir("pi2", entry);
+        let source_id = manifest.display().to_string();
+
+        service.add_plugin(&store, &source_id).unwrap();
+
+        assert_eq!(snapshot(&store).plugins[0].id, "pi2");
+        let dir = maestro_paths.plugin_dir("pi2");
+        assert_eq!(
+            fs::read_to_string(dir.join(PLACED_MANIFEST)).unwrap(),
+            fs::read_to_string(&manifest).unwrap(),
+            "落位 manifest 为来源原文"
+        );
+        assert_eq!(
+            fs::read(dir.join(PLACED_WASM)).unwrap(),
+            builtin::PI_WASM.to_vec()
+        );
+        assert_eq!(service.list(&store).unwrap()[0].error, None);
+        assert!(
+            source.path().join(entry).exists(),
+            "只删落位副本，不动用户的插件项目目录"
+        );
+    }
+
+    #[test]
+    fn add_plugin_rejects_unrecognized_sources_before_any_io() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+
+        for source in [
+            "http://example.com/manifest.json",
+            "file:///tmp/manifest.json",
+            "git://example.com/x.git",
+            "plugins/pi/manifest.json",
+            builtin::BUILTIN_PI_SOURCE,
+        ] {
+            let err = service.add_plugin(&store, source).unwrap_err();
+            assert!(err.contains("插件来源仅支持"), "{source} 应被拒绝：{err}");
+            assert!(
+                !err.contains("未预置的 URL"),
+                "来源形态的判定必须在发起下载之前：{err}"
+            );
+        }
+        assert!(
+            snapshot(&store).plugins.is_empty(),
+            "被拒绝的来源不得留下条目"
+        );
+    }
+
+    #[test]
+    fn add_plugin_rejects_duplicate_source_before_downloading() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let fetcher = Arc::new(https_stub("pi2", "Pi2"));
+        let service = PluginService::with_fetcher(&MaestroPaths::new(home.path()), fetcher.clone());
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+        // 第二次添加：下载若发生必然失败，据此确认重复检查先于下载。
+        fetcher.fail(MANIFEST_URL, "网络不可达");
+
+        let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+        assert!(err.contains("已存在同一来源"), "{err}");
+        assert_eq!(snapshot(&store).plugins.len(), 1);
+    }
+
+    #[test]
+    fn add_plugin_rejects_id_conflict_without_placing() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+        fs::write(
+            maestro_paths.config_path(),
+            format!(
+                r#"{{"version":1,"providers":{{}},"plugins":[{{"source":"{}","enabled":true,"id":"pi"}}]}}"#,
+                builtin::BUILTIN_PI_SOURCE
+            ),
+        )
+        .unwrap();
+        let store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi", "Pi clone"));
+
+        let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+        assert!(err.contains("已被来源 builtin:pi 占用"), "{err}");
+        assert_eq!(snapshot(&store).plugins.len(), 1, "冲突不得写条目");
+        assert!(!maestro_paths.plugin_dir("pi").exists(), "冲突不得落位");
+    }
+
+    #[test]
+    fn add_plugin_writes_nothing_when_download_fails() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let fetcher = StubFetcher::new();
+        fetcher.fail(MANIFEST_URL, "网络不可达");
+        let service = stub_service(home.path(), fetcher);
+
+        let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+        assert!(
+            err.contains("下载 manifest 失败") && err.contains("网络不可达"),
+            "{err}"
+        );
+        assert!(snapshot(&store).plugins.is_empty(), "安装失败不得写条目");
+        assert!(!maestro_paths.plugins_dir().exists(), "安装失败不得落位");
+    }
+
+    #[test]
+    fn add_plugin_rejects_wasm_that_is_not_a_component() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let fetcher = StubFetcher::new();
+        fetcher.serve(
+            MANIFEST_URL,
+            manifest_json("pi2", "Pi2", "pi", "~/.pi2", WASM_URL),
+        );
+        fetcher.serve(WASM_URL, b"not a wasm component".to_vec());
+        let service = stub_service(home.path(), fetcher);
+
+        let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+        assert!(err.contains("不是有效的 WASM 组件"), "{err}");
+        assert!(snapshot(&store).plugins.is_empty());
+        assert!(
+            !maestro_paths.plugin_dir("pi2").exists(),
+            "校验失败不得落位"
+        );
+    }
+
+    #[test]
+    fn add_plugin_rejects_config_dir_escaping_home() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let fetcher = StubFetcher::new();
+        fetcher.serve(
+            MANIFEST_URL,
+            manifest_json("pi2", "Pi2", "pi", "~/.pi2/../../etc", WASM_URL),
+        );
+        fetcher.serve(WASM_URL, builtin::PI_WASM.to_vec());
+        let service = stub_service(home.path(), fetcher);
+
+        let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+        assert!(err.contains("config_dir"), "{err}");
+        assert!(snapshot(&store).plugins.is_empty());
+        assert!(!maestro_paths.plugin_dir("pi2").exists());
+    }
+
+    /// 下载可能持续数秒：全程不得持有配置存储锁，否则会连锁阻塞所有 Provider / 插件命令。
+    #[test]
+    fn add_plugin_does_not_hold_the_store_lock_while_downloading() {
+        let home = temp_home();
+        let store = Arc::new(store_at(home.path()));
+        let service = PluginService::with_fetcher(
+            &MaestroPaths::new(home.path()),
+            Arc::new(LockProbeFetcher::new(
+                Arc::clone(&store),
+                https_stub("pi2", "Pi2"),
+            )),
+        );
+
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+        assert!(service.list(&store).unwrap()[0].error.is_none());
     }
 }

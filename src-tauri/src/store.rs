@@ -190,8 +190,8 @@ impl Store {
 
     /// 新增插件条目（`source` 即唯一身份，重复添加即拒绝），追加在现有条目之后。
     ///
-    /// `id` 留待安装成功后经 [`Store::set_plugin_id`] 写入：条目先落盘、安装后补全，
-    /// 因此安装失败时条目仍在（错误态），可修复后直接重试（见 ADR 0006）。
+    /// 安装成功后由插件服务调用，`id` 随条目一并给出：它是来源到落位目录的唯一映射
+    /// （见 ADR 0006）。因此安装失败时不会留下条目，重新添加即可。
     pub fn add_plugin(&mut self, plugin_entry: &PluginEntry) -> Result<(), StoreError> {
         let source = plugin_entry.source.clone();
         let config = self.state.as_ref().map_err(Clone::clone)?;

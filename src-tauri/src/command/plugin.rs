@@ -28,10 +28,10 @@ pub fn set_plugin_enabled(
     service.set_enabled(&store, &source, enabled)
 }
 
-/// 添加插件（来源为指向 manifest.json 的 https 地址或本机绝对路径）：写条目后获取、
-/// 校验、落位并装载。
+/// 添加插件（来源为指向 manifest.json 的 https 地址或本机绝对路径）：获取 manifest 与
+/// wasm、校验并落位，成功后才写入条目。
 ///
-/// 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
+/// 失败不写条目、不落位，原因直接返回界面；修复后重新添加即可（见 ADR 0006）。
 #[tauri::command]
 pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
     on_install_pool(app, move |store, service| {
