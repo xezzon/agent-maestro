@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use crate::{paths::MaestroPaths, plugin::PluginEntry, provider::Provider};
@@ -320,15 +320,26 @@ impl Store {
 
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
 pub struct AppStore {
-    pub store: Mutex<Store>,
+    /// 读多写少：list_plugins、plugin_by_source、provider 列表等只读路径在
+    /// 同一 Store 上并发；写操作（add_plugin / set_plugin_enabled /
+    /// create_provider 等）走 `AppStore::write()` 独占。
+    pub store: RwLock<Store>,
 }
 
 impl AppStore {
-    /// 取配置存储的锁。其它命令持锁期间 panic 会毒化锁，
-    /// 此时报错而非静默继续（读取或写入都不可信）。
-    pub fn lock(&self) -> Result<std::sync::MutexGuard<'_, Store>, String> {
+    /// 取只读守卫；调用方仅读取配置时使用。
+    /// 其它命令持写锁期间 panic 会毒化锁，此时报错而非静默继续。
+    pub fn read(&self) -> Result<RwLockReadGuard<'_, Store>, String> {
         self.store
-            .lock()
+            .read()
+            .map_err(|_| STORE_LOCK_POISONED.to_owned())
+    }
+
+    /// 取写守卫；调用方对配置做修改时使用。独占期间所有读守卫与其它写守卫
+    /// 均需等待。锁被毒化同样报错。
+    pub fn write(&self) -> Result<RwLockWriteGuard<'_, Store>, String> {
+        self.store
+            .write()
             .map_err(|_| STORE_LOCK_POISONED.to_owned())
     }
 }

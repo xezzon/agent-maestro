@@ -9,7 +9,7 @@ use command::{
     reload_plugin, remove_plugin, set_plugin_enabled, update_provider,
 };
 use plugin::PluginService;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use store::{AppStore, Store};
 use tauri::Manager;
 
@@ -36,7 +36,7 @@ pub fn run() {
             let maestro_paths = paths::MaestroPaths::new(&home_path);
             let store = Store::new(&maestro_paths);
             app.manage(AppStore {
-                store: Mutex::new(store),
+                store: RwLock::new(store),
             });
             // 插件服务：`~` 无法确定时服务退化为不可用（命令层报错），
             // 与配置存储的保护状态语义一致。

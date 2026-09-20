@@ -72,7 +72,7 @@ pub fn apply_providers(
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
     let providers = {
-        let guard = store.lock()?;
+        let guard = store.read()?;
         guard.get()?.providers.clone()
     };
     service.write_providers(&providers)

@@ -39,7 +39,7 @@ impl From<ProviderRequest> for Provider {
 
 #[tauri::command]
 pub fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provider>, String> {
-    let guard = store.lock()?;
+    let guard = store.read()?;
     let config = guard.get()?;
     Ok(config.providers.clone())
 }
@@ -49,7 +49,7 @@ pub fn create_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
-    let mut guard = store.lock()?;
+    let mut guard = store.write()?;
 
     let slug = provider.slug.clone();
 
@@ -62,7 +62,7 @@ pub fn update_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
-    let mut guard = store.lock()?;
+    let mut guard = store.write()?;
 
     let slug = provider.slug.clone();
 
@@ -72,7 +72,7 @@ pub fn update_provider(
 
 #[tauri::command]
 pub fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
-    let mut guard = store.lock()?;
+    let mut guard = store.write()?;
 
     guard.delete_provider(&slug)?;
     Ok(())

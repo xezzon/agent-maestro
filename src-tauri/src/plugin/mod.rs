@@ -15,7 +15,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -229,7 +229,13 @@ pub struct PluginService {
     /// https 拉取的注入点（生产为同步 reqwest 实现，测试为替身）。
     fetcher: Arc<dyn Fetcher>,
     /// 内存注册表：插件 id（配置条目的 `id`）→ 装载状态。
-    entries: Mutex<HashMap<String, PluginState>>,
+    /// 读多写少：`list` / `write_providers` 的快照读路径在锁内并发；
+    /// 安装/启停/移除/重载写路径走 `entries.write()` 独占。
+    entries: RwLock<HashMap<String, PluginState>>,
+    /// install / reload / remove 共用的独占临界区：把"检查 → 落位 → 写条目 →
+    /// 同步注册表 → 删落位目录"作为一个不可分割的步骤，避免同 id 的并发
+    /// install 各自落位后又被对方的清理逻辑误删。
+    install_lock: Mutex<()>,
 }
 
 /// 引擎配置：启用 fuel 计量（配合 `FUEL_BUDGET` 限制插件执行时长）。
@@ -250,7 +256,8 @@ impl PluginService {
             engine: build_engine(),
             maestro_paths: maestro_paths.clone(),
             fetcher,
-            entries: Mutex::new(HashMap::new()),
+            entries: RwLock::new(HashMap::new()),
+            install_lock: Mutex::new(()),
         }
     }
 
@@ -259,7 +266,7 @@ impl PluginService {
     pub fn startup(&self, store: &AppStore) {
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
         let plugin_entries = {
-            let store_guard = match store.lock() {
+            let store_guard = match store.read() {
                 Ok(guard) => guard,
                 Err(_) => {
                     eprintln!("failed to lock store during plugin startup");
@@ -303,7 +310,7 @@ impl PluginService {
             plugins.insert(plugin_id, plugin_state);
         }
 
-        if let Err(err) = self.entries.lock().map(|mut entries| *entries = plugins) {
+        if let Err(err) = self.entries.write().map(|mut entries| *entries = plugins) {
             eprintln!("failed to lock plugin registry during startup: {err}");
             return;
         }
@@ -324,8 +331,8 @@ impl PluginService {
 
     /// 当前注册表视图。
     pub fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
-        let plugin_entries = store.lock()?.list_plugins().map_err(|_| "配置文件损坏")?;
-        let plugins = self.entries.lock().map_err(|_| "插件注册表不可用")?;
+        let plugin_entries = store.read()?.list_plugins().map_err(|_| "配置文件损坏")?;
+        let plugins = self.entries.read().map_err(|_| "插件注册表不可用")?;
         let plugin_view =
             |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| {
                 let source_kind = SourceKind::from_source(&entry.source);
@@ -367,8 +374,12 @@ impl PluginService {
     /// 不触发组件 init、不预开放真实配置目录。实投影阶段才完整实例化（见
     /// `write_providers`）。
     ///
-    /// 配置存储只在短读/短写处加锁：获取、校验与落位全程不持锁。
+    /// 整个流程在 `install_lock` 内独占：避免两个并发 install 各自落位后又被对方
+    /// 的清理逻辑误删赢家的产物。配置存储只在短读/短写处加锁：获取、校验与落位
+    /// 全程不持锁。
     pub fn add_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
+
         // 来源形态在发起获取之前判定：无法识别的来源直接拒绝。
         if SourceKind::from_source(source).is_none() {
             return Err(format!(
@@ -378,7 +389,7 @@ impl PluginService {
 
         // 1. 来源即条目唯一身份：重复添加在发起下载之前拒绝。
         let duplicate = store
-            .lock()?
+            .read()?
             .list_plugins()?
             .iter()
             .any(|plugin| plugin.source == source);
@@ -407,7 +418,7 @@ impl PluginService {
             enabled: true,
             id: loaded.manifest.id.clone(),
         };
-        if let Err(e) = store.lock()?.add_plugin(&entry) {
+        if let Err(e) = store.write()?.add_plugin(&entry) {
             // 条目写不进去，就不能留下注册表看不见的落位目录。
             // 清理失败时把残留路径一并回报：避免注释承诺与实际行为偏离。
             if let Err(uninstall_err) = loaded.plugin.uninstall() {
@@ -420,10 +431,13 @@ impl PluginService {
             }
             return Err(e.into());
         }
-        self.entries.lock().map_err(|_| "插件注册表不可用")?.insert(
-            loaded.manifest.id.clone(),
-            PluginState::Loaded(Arc::new(loaded)),
-        );
+        self.entries
+            .write()
+            .map_err(|_| "插件注册表不可用")?
+            .insert(
+                loaded.manifest.id.clone(),
+                PluginState::Loaded(Arc::new(loaded)),
+            );
         Ok(())
     }
 
@@ -476,7 +490,7 @@ impl PluginService {
     /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
     /// 两次加锁之间条目可能被移除：写配置前按来源复检，条目已消失即报错。
     pub fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
-        let entry = store.lock()?.plugin_by_source(source)?;
+        let entry = store.read()?.plugin_by_source(source)?;
         if entry.enabled == enabled {
             return Ok(());
         }
@@ -492,7 +506,7 @@ impl PluginService {
         };
 
         let entry = {
-            let mut guard = store.lock()?;
+            let mut guard = store.write()?;
             // 复检：装载期间条目可能已被移除，不得按过期条目继续写。
             let entry = guard.plugin_by_source(source)?;
             if entry.enabled == enabled {
@@ -503,7 +517,7 @@ impl PluginService {
             entry
         };
 
-        let mut entries = self.entries.lock().map_err(|_| "插件注册表不可用")?;
+        let mut entries = self.entries.write().map_err(|_| "插件注册表不可用")?;
         match loaded {
             Some(loaded) => {
                 entries.insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
@@ -524,16 +538,18 @@ impl PluginService {
     /// 条目已不存在同样成功（幂等）。
     ///
     /// 只删宿主落位的副本，不动用户的插件项目目录；内置插件不可移除（随应用
-    /// 分发，见 ADR 0004）。读条目、卸载内存、删条目与删落位目录在同一临界区内：
-    /// 这是内存、配置与磁盘的一次读-改-写，中间不得插入另一次安装——安装先落位后
-    /// 写条目，删目录若放到锁外，并发安装可能在条目删除后重新落位而被误删。
+    /// 分发，见 ADR 0004）。整个流程在 `install_lock` 内独占：读条目、卸载内存、
+    /// 删条目与删落位目录必须连续完成，中间不得插入另一次 install——安装先落位
+    /// 后写条目，删目录若放到锁外，并发安装可能在条目删除后重新落位而被误删。
     pub fn remove_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
+
         // 内置插件随应用分发，不可移除（见 ADR 0004）。
         if matches!(SourceKind::from_source(source), Some(SourceKind::Builtin)) {
             return Err(format!("内置插件不可移除：{source}"));
         }
 
-        let mut guard = store.lock()?;
+        let mut guard = store.write()?;
         let entry = match guard.plugin_by_source(source) {
             Ok(entry) => entry,
             // 条目已不存在：上一次移除已连同落位目录一并删除，幂等成功。
@@ -543,7 +559,7 @@ impl PluginService {
 
         // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
         self.entries
-            .lock()
+            .write()
             .map_err(|_| "插件注册表不可用")?
             .remove(&entry.id);
 
@@ -565,7 +581,7 @@ impl PluginService {
         providers: &BTreeMap<String, Provider>,
     ) -> Result<Vec<PluginApplyReport>, String> {
         let (mut reports, loaded) = {
-            let entries = self.entries.lock().map_err(|_| "插件注册表不可用")?;
+            let entries = self.entries.read().map_err(|_| "插件注册表不可用")?;
             let mut reports = Vec::with_capacity(entries.len());
             let mut loaded = Vec::new();
             for (id, state) in entries.iter() {
@@ -622,9 +638,14 @@ impl PluginService {
     ///
     /// 内置来源的“重新获取”即从内嵌字节重新构造落位副本，用于恢复被改动或
     /// 损坏的宿主副本（无上游新版本可言，但 ID 一致性校验仍执行）。
+    ///
+    /// 整个流程在 `install_lock` 内独占：与 add / remove 共用同一把锁，避免
+    /// reload 写到一半时另一 add 把同一 id 的产物覆盖或被 remove 误删。
     pub fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
+
         // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
-        let entry = store.lock()?.plugin_by_source(source)?;
+        let entry = store.read()?.plugin_by_source(source)?;
 
         // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。
         let mut loaded = self.fetch_placed(source)?.load()?;
@@ -649,7 +670,7 @@ impl PluginService {
             PluginState::Disabled(loaded.manifest)
         };
         self.entries
-            .lock()
+            .write()
             .map_err(|_| "插件注册表不可用")?
             .insert(entry.id, state);
         Ok(())
@@ -657,7 +678,7 @@ impl PluginService {
 
     /// id 冲突检查：同一 id 只能由一个来源持有。
     fn check_id_conflict(&self, store: &AppStore, source: &str, id: &str) -> Result<(), String> {
-        let guard = store.lock()?;
+        let guard = store.read()?;
         let config = guard.get()?;
         match config
             .plugins
@@ -725,7 +746,7 @@ impl PluginService {
 pub(crate) mod testutil {
     use std::{
         path::Path,
-        sync::{Arc, Mutex},
+        sync::{Arc, RwLock},
     };
 
     use super::PluginService;
@@ -753,13 +774,13 @@ pub(crate) mod testutil {
     pub(crate) fn store_at(home: &Path) -> AppStore {
         let maestro_paths = MaestroPaths::new(home);
         AppStore {
-            store: Mutex::new(Store::new(&maestro_paths)),
+            store: RwLock::new(Store::new(&maestro_paths)),
         }
     }
 
     /// 测试读取配置快照：走与服务同一套短锁访问。
     pub(crate) fn snapshot(store: &AppStore) -> Config {
-        store.lock().unwrap().get().unwrap().clone()
+        store.read().unwrap().get().unwrap().clone()
     }
 }
 
@@ -1021,6 +1042,66 @@ mod tests {
         assert!(service.list(&store).unwrap()[0].error.is_none());
     }
 
+    /// 同 id、不同来源的并发 install：install_lock 串行化整个流程，
+    /// 恰好一个成功、另一个失败，赢家的落位目录必须保留。
+    /// 修复前的 race:两个线程都通过预检、各自 save 到同一 plugin_dir(id)、
+    /// 后写入 store.add_plugin 的线程报错后调用 uninstall 误删赢家的文件。
+    #[test]
+    fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
+        use std::thread;
+
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+
+        let source_a = "https://example.com/a/manifest.json";
+        let source_b = "https://example.com/b/manifest.json";
+        let wasm_a = "https://example.com/a/plugin.wasm";
+        let wasm_b = "https://example.com/b/plugin.wasm";
+        let fetcher = StubFetcher::new();
+        fetcher.serve(source_a, manifest_json("pi", "Pi-A", "pi", "~/.pi", wasm_a));
+        fetcher.serve(source_b, manifest_json("pi", "Pi-B", "pi", "~/.pi", wasm_b));
+        fetcher.serve(wasm_a, builtin::PI_WASM.to_vec());
+        fetcher.serve(wasm_b, builtin::PI_WASM.to_vec());
+
+        let store = Arc::new(store_at(home.path()));
+        let service = Arc::new(stub_service(home.path(), fetcher));
+
+        let handles = vec![
+            {
+                let store = Arc::clone(&store);
+                let service = Arc::clone(&service);
+                thread::spawn(move || service.add_plugin(&store, source_a))
+            },
+            {
+                let store = Arc::clone(&store);
+                let service = Arc::clone(&service);
+                thread::spawn(move || service.add_plugin(&store, source_b))
+            },
+        ];
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let failures = results.iter().filter(|r| r.is_err()).count();
+        assert_eq!(successes, 1, "恰好一个 install 成功：{results:?}");
+        assert_eq!(failures, 1, "另一个 install 失败：{results:?}");
+
+        // 配置文件中恰好一条记录，赢家独享。
+        let plugins = snapshot(&store).plugins;
+        assert_eq!(plugins.len(), 1, "只有一个 id 落盘");
+        assert_eq!(plugins[0].id, "pi", "赢家的 id 落盘");
+
+        // 赢家的落位目录与产物必须保留——这是修复的核心不变量。
+        let placed_dir = maestro_paths.plugin_dir("pi");
+        assert!(
+            placed_dir.join(PLACED_MANIFEST).exists(),
+            "赢家的 manifest.json 必须保留"
+        );
+        assert!(
+            placed_dir.join(PLACED_WASM).exists(),
+            "赢家的 plugin.wasm 必须保留"
+        );
+    }
+
     #[test]
     fn set_enabled_disables_and_re_enables_the_plugin() {
         let home = temp_home();
@@ -1093,7 +1174,7 @@ mod tests {
         assert!(snapshot(&store).plugins.is_empty(), "配置条目已删除");
         assert!(!maestro_paths.plugin_dir("pi2").exists(), "落位目录已删除");
         assert!(
-            service.entries.lock().unwrap().is_empty(),
+            service.entries.read().unwrap().is_empty(),
             "内存注册表已卸载"
         );
         assert!(service.list(&store).unwrap().is_empty());
@@ -1382,7 +1463,7 @@ mod tests {
         )
         .load()
         .unwrap();
-        let mut entries = service.entries.lock().unwrap();
+        let mut entries = service.entries.write().unwrap();
         entries.insert("pibad".to_owned(), PluginState::Loaded(Arc::new(bad)));
         entries.insert(
             "pierr".to_owned(),

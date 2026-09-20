@@ -145,7 +145,7 @@ pub mod testutil {
     impl Fetcher for LockProbeFetcher {
         fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
             assert!(
-                self.store.store.try_lock().is_ok(),
+                self.store.store.try_write().is_ok(),
                 "拉取 {url} 期间不得持有配置存储锁"
             );
             self.inner.fetch(url)
