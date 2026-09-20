@@ -75,7 +75,7 @@ function PluginCard({ plugin, onReload }) {
         {plugin.tool && <span>适配工具：{plugin.tool}</span>}
         {plugin.config_dir && <span>写入目录：{plugin.config_dir}</span>}
       </div>
-      {plugin.status === "error" ? (
+      {plugin.error ? (
         <Alert
           className="plugin-error"
           type="error"

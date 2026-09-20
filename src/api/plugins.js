@@ -7,8 +7,7 @@
  * @property {string=} name
  * @property {string=} tool 适配的工具。
  * @property {string=} config_dir 插件被授权写入的目录（`~` 已展开）。
- * @property {'loaded' | 'error'} status
- * @property {string=} error 错误态的原因（如下载/校验失败 / manifest 不合法 / 接口不兼容）。
+ * @property {string=} error 加载/启动失败的原因（如落位文件损坏 / manifest 不合法 / 接口不兼容）。
  */
 /**
  * @typedef {Object} SkippedProvider
