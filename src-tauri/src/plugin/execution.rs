@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use wasmtime::{
-    Engine,
+    Engine, StoreLimits, StoreLimitsBuilder,
     component::{Component, Linker},
 };
 use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
@@ -24,10 +24,33 @@ use crate::provider::{ModelEntry, Provider};
 /// 死循环或超量计算的插件会被中断并走失败路径，不会卡死投影。
 const FUEL_BUDGET: u64 = 1 << 30;
 
+/// 资源限制（防止恶意 memory.grow / table.grow 风暴，CWE-770）：
+/// - 线性内存 64 MiB：覆盖一份 JSON 投影产物的体量上限。
+/// - 表元素 1024：覆盖组件模型对 funcref 的一般需求。
+/// - 单个组件典型会派生 2~4 个内部 core instance（host + component + 内嵌模块），
+///   留出 8 以容纳更深的嵌套同时仍对实例数封顶。
+/// - 单个组件：内存数 1（典型配置）；再小会与现有合法组件冲突。
+const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+const TABLE_ELEMENTS_LIMIT: usize = 1024;
+const MEMORY_COUNT_LIMIT: usize = 1;
+const INSTANCE_LIMIT: usize = 8;
+
+/// 构建资源限制。
+fn build_store_limits() -> StoreLimits {
+    StoreLimitsBuilder::new()
+        .memory_size(MEMORY_LIMIT)
+        .table_elements(TABLE_ELEMENTS_LIMIT)
+        .memories(MEMORY_COUNT_LIMIT)
+        .instances(INSTANCE_LIMIT)
+        .build()
+}
+
 /// WASI 宿主状态：唯一被授权的写入面是预开放的插件配置目录。
 struct HostState {
     table: ResourceTable,
     ctx: WasiCtx,
+    /// 资源限制：注册到 wasmtime Store，约束 wasm 线性内存、表、实例增长。
+    limits: StoreLimits,
 }
 
 impl WasiView for HostState {
@@ -40,6 +63,7 @@ impl WasiView for HostState {
 }
 
 impl HostState {
+    /// 预开放指定配置目录为写入面，配套资源限制；用于实投影阶段。
     fn new(tool_dir: &Path) -> Result<Self, String> {
         let mut builder = WasiCtxBuilder::new();
         builder
@@ -48,6 +72,7 @@ impl HostState {
         Ok(Self {
             table: ResourceTable::new(),
             ctx: builder.build(),
+            limits: build_store_limits(),
         })
     }
 }
@@ -59,11 +84,30 @@ pub struct InstantiatedPlugin {
 }
 
 impl LoadedPlugin {
+    /// 链接期校验：组件字节反序列化、导入/导出类型匹配，不触发组件 init、
+    /// 不预开放真实配置目录。这是安装期使用的入口（见 ADR 0006：fail-fast）。
+    pub fn validate(&self, engine: &Engine) -> Result<(), String> {
+        let component =
+            Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
+        let mut linker: Linker<HostState> = Linker::new(engine);
+        p2::add_to_linker_sync(&mut linker)
+            .map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
+        // 组件模型的 instantiate_pre 不接收 Store：返回 Pre<()> 表示类型检查通过，
+        // 不触发组件 init、不调用 host 函数。这正是安装期校验所需的最小集合。
+        linker
+            .instantiate_pre(&component)
+            .map_err(|e| format!("插件接口不兼容：{e}"))?;
+        Ok(())
+    }
+
+    /// 完整实例化：用于实投影（write_providers）。会预开放真实配置目录、
+    /// 注册资源限制（防止恶意 memory.grow / table.grow 风暴，CWE-770）。
     pub fn instantiate_component(&self, engine: &Engine) -> Result<InstantiatedPlugin, String> {
         let component =
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
         let tool_path = PathBuf::from(self.manifest.config_dir.as_str());
         let mut store = wasmtime::Store::new(engine, HostState::new(&tool_path)?);
+        store.limiter(|s| &mut s.limits);
         store
             .set_fuel(FUEL_BUDGET)
             .map_err(|e| format!("设置插件执行预算失败：{e}"))?;
@@ -269,6 +313,48 @@ mod tests {
         };
 
         assert!(err.contains("不是有效的 WASM 组件"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_bytes_that_are_not_a_component() {
+        let config_dir = tempfile::tempdir().unwrap();
+
+        let Err(err) =
+            loaded_plugin(config_dir.path(), b"not a wasm component").validate(&build_engine())
+        else {
+            panic!("非组件字节不应通过 validate");
+        };
+
+        assert!(err.contains("不是有效的 WASM 组件"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_a_valid_component() {
+        let config_dir = tempfile::tempdir().unwrap();
+
+        loaded_plugin(config_dir.path(), builtin::PI_WASM)
+            .validate(&build_engine())
+            .expect("内置 pi 应通过 validate");
+    }
+
+    /// 关键安全约束：链接期校验不触发组件 init、不预开放真实配置目录。
+    /// 若实现回退到完整实例化，下面的标记文件会被 init 代码读写。
+    #[test]
+    fn validate_does_not_touch_the_real_config_dir() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let marker = config_dir.path().join("marker.txt");
+        let original = "original-content";
+        fs::write(&marker, original).unwrap();
+
+        loaded_plugin(config_dir.path(), builtin::PI_WASM)
+            .validate(&build_engine())
+            .expect("validate 应通过");
+
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            original,
+            "validate 不得触碰真实配置目录"
+        );
     }
 
     #[test]

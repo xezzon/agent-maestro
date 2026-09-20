@@ -74,6 +74,11 @@ impl PlacedPlugin {
         })
     }
 
+    /// 落位目录的绝对路径（暴露给错误信息，便于用户手动清理）。
+    pub fn path(&self) -> &Path {
+        &self.plugin_dir
+    }
+
     fn save(&self) -> Result<(), String> {
         // 插件根目录
         let plugins_dir = self
@@ -355,8 +360,12 @@ impl PluginService {
 
     /// 添加插件（内置、https 与本机路径来源同一流程）：
     /// 1. 先检查来源是否重复。
-    /// 2. 随后获取 manifest 与 wasm、id 冲突检查、实例化校验，全部通过才落位。
+    /// 2. 随后获取 manifest 与 wasm、id 冲突检查、链接期校验，全部通过才落位。
     /// 3. 安装成功后写入配置条目；此前任何一步失败都不写条目、不留落位残留。
+    ///
+    /// 链接期校验（`LoadedPlugin::validate`）只做字节反序列化与导入/导出类型匹配，
+    /// 不触发组件 init、不预开放真实配置目录。实投影阶段才完整实例化（见
+    /// `write_providers`）。
     ///
     /// 配置存储只在短读/短写处加锁：获取、校验与落位全程不持锁。
     pub fn add_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
@@ -384,8 +393,10 @@ impl PluginService {
         let mut loaded = self.fetch_placed(source)?.load()?;
         self.check_id_conflict(store, source, &loaded.manifest.id)?;
         self.expand_config_dir(&mut loaded.manifest)?;
-        // 实例化校验先于落位：wasm 不是组件或接口不兼容时不落位、不写条目。
-        loaded.instantiate_component(&self.engine)?;
+        // 链接期校验先于落位：wasm 不是组件或接口不兼容时不落位、不写条目。
+        // 仅做字节反序列化与类型检查，不触发组件 init、不预开放真实配置目录；
+        // 避免未授权的 init 代码在安装失败时仍写入 plugin config_dir。
+        loaded.validate(&self.engine)?;
         loaded.plugin.save()?;
 
         // 3. 安装成功后写入条目：`id` 是来源到落位目录的唯一映射（见 ADR 0006）。
@@ -398,7 +409,15 @@ impl PluginService {
         };
         if let Err(e) = store.lock()?.add_plugin(&entry) {
             // 条目写不进去，就不能留下注册表看不见的落位目录。
-            let _ = loaded.plugin.uninstall();
+            // 清理失败时把残留路径一并回报：避免注释承诺与实际行为偏离。
+            if let Err(uninstall_err) = loaded.plugin.uninstall() {
+                return Err(format!(
+                    "{}；落位目录清理失败：{}（残留路径：{}）",
+                    String::from(&e),
+                    uninstall_err,
+                    loaded.plugin.path().display()
+                ));
+            }
             return Err(e.into());
         }
         self.entries.lock().map_err(|_| "插件注册表不可用")?.insert(
@@ -617,8 +636,9 @@ impl PluginService {
             ));
         }
         self.expand_config_dir(&mut loaded.manifest)?;
-        // 实例化校验先于替换：wasm 不是组件或接口不兼容时旧版本保持可用。
-        loaded.instantiate_component(&self.engine)?;
+        // 链接期校验先于替换：wasm 不是组件或接口不兼容时旧版本保持可用。
+        // 不触发组件 init、不预开放真实配置目录，避免未授权写入。
+        loaded.validate(&self.engine)?;
         // 替换落位目录：swap_placed 先备份旧版本，替换失败即恢复，旧版本保持可用。
         loaded.plugin.save()?;
 
