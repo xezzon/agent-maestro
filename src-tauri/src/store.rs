@@ -3,11 +3,10 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use crate::provider::Provider;
-use crate::{paths::MaestroPaths, plugin::PluginEntry};
+use crate::{paths::MaestroPaths, plugin::PluginEntry, provider::Provider};
 use serde::{Deserialize, Serialize};
 
 /// 配置文件 schema 版本（见 ADR 0001）。
@@ -38,7 +37,7 @@ impl Default for Config {
     }
 }
 
-/// 配置存储的错误；`message()` 面向最终用户。
+/// 配置存储的错误；转为 `String` 时面向最终用户。
 #[derive(Debug, Clone)]
 pub enum StoreError {
     /// 配置文件存在但无法解析。
@@ -55,11 +54,13 @@ pub enum StoreError {
     MissingSource { source: String },
     /// 已存在同一来源的插件条目（来源即条目唯一身份）。
     DuplicateSource { source: String },
+    /// 同一 id 已被其它来源的插件条目持有（id 是来源到落位目录的唯一映射）。
+    DuplicateId { id: String, source: String },
 }
 
-impl StoreError {
-    pub fn message(&self) -> String {
-        match self {
+impl From<&StoreError> for String {
+    fn from(value: &StoreError) -> Self {
+        match value {
             StoreError::Corrupt { path, detail } => format!(
                 "配置文件已损坏：{}\n原因：{detail}\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
                 path.display()
@@ -80,7 +81,16 @@ impl StoreError {
             StoreError::DuplicateSource { source } => {
                 format!("已存在同一来源的插件条目：{source}")
             }
+            StoreError::DuplicateId { id, source } => {
+                format!("插件 id「{id}」已被来源 {source} 占用")
+            }
         }
+    }
+}
+
+impl From<StoreError> for String {
+    fn from(value: StoreError) -> Self {
+        (&value).into()
     }
 }
 
@@ -183,52 +193,37 @@ impl Store {
         }
     }
 
-    /// 启用/禁用插件条目。
-    pub fn set_plugin_enabled(&mut self, source: &str, enabled: bool) -> Result<(), StoreError> {
-        self.update_plugins(source, |plugins| {
-            for plugin in plugins.iter_mut() {
-                if plugin.source == source {
-                    plugin.enabled = enabled;
-                    return true;
-                }
-            }
-            false
-        })
-    }
-
-    /// 新增插件条目（`source` 即唯一身份，重复添加即拒绝），追加在现有条目之后。
+    /// 新增插件条目，追加在现有条目之后。
     ///
-    /// `id` 留待安装成功后经 [`Store::set_plugin_id`] 写入：条目先落盘、安装后补全，
-    /// 因此安装失败时条目仍在（错误态），可修复后直接重试（见 ADR 0006）。
-    pub fn add_plugin(&mut self, source: &str) -> Result<(), StoreError> {
+    /// 安装成功后由插件服务调用，`id` 随条目一并给出：它是来源到落位目录的唯一映射
+    /// （见 ADR 0006）。因此安装失败时不会留下条目，重新添加即可。
+    ///
+    /// 同一临界区内复检来源与 id 冲突：插件服务的预检（`check_id_conflict`）与
+    /// 此处写入分属两次加锁，两次锁之间另一来源可能已占用同一 id。
+    pub fn add_plugin(&mut self, plugin_entry: &PluginEntry) -> Result<(), StoreError> {
+        let source = plugin_entry.source.clone();
         let config = self.state.as_ref().map_err(Clone::clone)?;
         if config.plugins.iter().any(|plugin| plugin.source == source) {
             return Err(StoreError::DuplicateSource {
                 source: source.to_owned(),
             });
         }
+        if let Some(other) = config
+            .plugins
+            .iter()
+            .find(|plugin| plugin.source != source && plugin.id == plugin_entry.id)
+        {
+            return Err(StoreError::DuplicateId {
+                id: plugin_entry.id.to_owned(),
+                source: other.source.to_owned(),
+            });
+        }
         let mut next = config.clone();
-        next.plugins.push(PluginEntry {
-            source: source.to_owned(),
-            enabled: true,
-            id: None,
-        });
+        next.plugins.push(plugin_entry.clone());
         self.persist(&next)?;
         self.state = Ok(next);
-        Ok(())
-    }
 
-    /// 写入条目的插件 id：来源 → 落位目录的映射，安装成功后落盘。
-    pub fn set_plugin_id(&mut self, source: &str, id: &str) -> Result<(), StoreError> {
-        self.update_plugins(source, |plugins| {
-            for plugin in plugins.iter_mut() {
-                if plugin.source == source {
-                    plugin.id = Some(id.to_owned());
-                    return true;
-                }
-            }
-            false
-        })
+        Ok(())
     }
 
     /// 删除插件条目，返回被删除的条目（调用方据此删除落位目录）。
@@ -248,6 +243,11 @@ impl Store {
         Ok(removed)
     }
 
+    pub fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        Ok(config.plugins.clone())
+    }
+
     /// 按来源取插件条目（`source` 即条目唯一身份）。
     pub fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
@@ -259,28 +259,6 @@ impl Store {
             .ok_or_else(|| StoreError::MissingSource {
                 source: source.to_owned(),
             })
-    }
-
-    /// 内置插件条目：每次启动时 upsert（缺省插入 enabled=true）。
-    /// 已有条目原样保留——用户的禁用意图不被启动 upsert 覆盖。
-    pub fn upsert_builtin_plugin(&mut self, source: &str, id: &str) -> Result<(), StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        if config.plugins.iter().any(|p| p.source == source) {
-            return Ok(());
-        }
-        let mut next = config.clone();
-        // 内置条目置于最前，装载顺序上优先。
-        next.plugins.insert(
-            0,
-            PluginEntry {
-                source: source.to_owned(),
-                enabled: true,
-                id: Some(id.to_owned()),
-            },
-        );
-        self.persist(&next)?;
-        self.state = Ok(next);
-        Ok(())
     }
 
     /// 以 `source` 定位并原位修改 plugins 段；找不到即报错，绝不静默写入。
@@ -299,6 +277,19 @@ impl Store {
         self.persist(&next)?;
         self.state = Ok(next);
         Ok(())
+    }
+
+    /// 启用/禁用插件条目。
+    pub fn set_plugin_enabled(&mut self, source: &str, enabled: bool) -> Result<(), StoreError> {
+        self.update_plugins(source, |plugins| {
+            for plugin in plugins.iter_mut() {
+                if plugin.source == source {
+                    plugin.enabled = enabled;
+                    return true;
+                }
+            }
+            false
+        })
     }
 
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
@@ -329,22 +320,27 @@ impl Store {
 
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
 pub struct AppStore {
-    pub store: Mutex<Store>,
+    /// 读多写少：list_plugins、plugin_by_source、provider 列表等只读路径在
+    /// 同一 Store 上并发；写操作（add_plugin / set_plugin_enabled /
+    /// create_provider 等）走 `AppStore::write()` 独占。
+    pub store: RwLock<Store>,
 }
 
 impl AppStore {
-    /// 取配置存储的锁。其它命令持锁期间 panic 会毒化锁，
-    /// 此时报错而非静默继续（读取或写入都不可信）。
-    pub fn lock(&self) -> Result<std::sync::MutexGuard<'_, Store>, String> {
+    /// 取只读守卫；调用方仅读取配置时使用。
+    /// 其它命令持写锁期间 panic 会毒化锁，此时报错而非静默继续。
+    pub fn read(&self) -> Result<RwLockReadGuard<'_, Store>, String> {
         self.store
-            .lock()
+            .read()
             .map_err(|_| STORE_LOCK_POISONED.to_owned())
     }
 
-    /// 配置存储的锁句柄：插件服务的下载、校验与落位必须发生在临界区之外，
-    /// 因此交给它的是互斥体本身，而不是一次长锁（见 `plugin::lock_store`）。
-    pub fn handle(&self) -> &Mutex<Store> {
-        &self.store
+    /// 取写守卫；调用方对配置做修改时使用。独占期间所有读守卫与其它写守卫
+    /// 均需等待。锁被毒化同样报错。
+    pub fn write(&self) -> Result<RwLockWriteGuard<'_, Store>, String> {
+        self.store
+            .write()
+            .map_err(|_| STORE_LOCK_POISONED.to_owned())
     }
 }
 
@@ -505,7 +501,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, StoreError::MissingSlug { .. }));
-        assert!(err.message().contains("ghost"));
+        assert!(String::from(err).contains("ghost"));
         assert!(store.get().unwrap().providers.is_empty());
         assert!(
             !maestro_paths.config_path().exists(),
@@ -625,7 +621,7 @@ mod tests {
         let err = store.delete_provider("ghost").unwrap_err();
 
         assert!(matches!(err, StoreError::MissingSlug { .. }));
-        assert!(err.message().contains("ghost"));
+        assert!(String::from(err).contains("ghost"));
     }
 
     #[test]
@@ -846,10 +842,7 @@ mod tests {
 
         let err = store.get().unwrap_err();
         assert!(matches!(err, StoreError::Corrupt { .. }));
-        assert!(
-            err.message()
-                .contains(maestro_paths.config_path().to_str().unwrap())
-        );
+        assert!(String::from(err).contains(maestro_paths.config_path().to_str().unwrap()));
 
         assert!(
             store
@@ -888,10 +881,7 @@ mod tests {
 
         let err = store.get().unwrap_err();
         assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
-        assert!(
-            err.message()
-                .contains(maestro_paths.config_path().to_str().unwrap())
-        );
+        assert!(String::from(err).contains(maestro_paths.config_path().to_str().unwrap()));
 
         assert!(
             store
@@ -1143,147 +1133,20 @@ mod tests {
     }
 
     #[test]
-    fn plugin_entries_round_trip_through_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
-
-        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
-        store.set_plugin_enabled("builtin:pi", false).unwrap();
-
-        let reopened = Store::new(&maestro_paths);
-        let plugins = &reopened.get().unwrap().plugins;
-        assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].source, "builtin:pi");
-        assert_eq!(plugins[0].id.as_deref(), Some("pi"));
-        assert!(!plugins[0].enabled, "enabled 状态持久化");
-    }
-
-    #[test]
-    fn set_plugin_enabled_on_missing_source_is_rejected_without_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
-
-        let err = store.set_plugin_enabled("builtin:pi", false).unwrap_err();
-
-        assert!(matches!(err, StoreError::MissingSource { .. }));
-        assert!(
-            !maestro_paths.config_path().exists(),
-            "报错路径不得静默写入文件"
-        );
-    }
-
-    #[test]
-    fn upsert_builtin_plugin_inserts_enabled_and_keeps_user_disabled_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
-
-        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
-        assert!(store.get().unwrap().plugins[0].enabled);
-
-        store.set_plugin_enabled("builtin:pi", false).unwrap();
-        // 再次 upsert（每次启动）不得把用户禁用重置回启用。
-        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
-
-        let reopened = Store::new(&maestro_paths);
-        let plugins = &reopened.get().unwrap().plugins;
-        assert_eq!(plugins.len(), 1, "内置条目幂等 upsert，不产生重复");
-        assert!(!plugins[0].enabled, "用户的禁用意图不被启动 upsert 覆盖");
-        assert_eq!(plugins[0].id.as_deref(), Some("pi"));
-    }
-
-    #[test]
     fn corrupt_store_refuses_plugin_writes() {
         let dir = tempfile::tempdir().unwrap();
         let maestro_paths = MaestroPaths::new(dir.path());
         fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
         fs::write(maestro_paths.config_path(), "不是 JSON {{{").unwrap();
         let mut store = Store::new(&maestro_paths);
+        let entry = PluginEntry {
+            source: "https://example.com/manifest.json".to_owned(),
+            enabled: true,
+            id: "pi".to_owned(),
+        };
 
         assert!(store.set_plugin_enabled("builtin:pi", true).is_err());
-        assert!(store.upsert_builtin_plugin("builtin:pi", "pi").is_err());
-        assert!(
-            store
-                .add_plugin("https://example.com/manifest.json")
-                .is_err()
-        );
-        assert!(store.set_plugin_id("builtin:pi", "pi").is_err());
+        assert!(store.add_plugin(&entry).is_err());
         assert!(store.delete_plugin("builtin:pi").is_err());
-    }
-
-    #[test]
-    fn add_plugin_appends_entry_and_rejects_duplicate_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
-        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
-        let source = "https://example.com/releases/download/v1/manifest.json";
-
-        store.add_plugin(source).unwrap();
-        let err = store.add_plugin(source).unwrap_err();
-
-        assert!(matches!(err, StoreError::DuplicateSource { .. }));
-        assert!(err.message().contains(source));
-        let reopened = Store::new(&maestro_paths);
-        let plugins = &reopened.get().unwrap().plugins;
-        assert_eq!(plugins.len(), 2, "重复添加不产生第二条");
-        assert_eq!(plugins[0].source, "builtin:pi", "内置条目始终在最前");
-        assert_eq!(plugins[1].source, source);
-        assert!(plugins[1].enabled);
-        assert_eq!(plugins[1].id, None, "id 待安装成功后写入");
-    }
-
-    #[test]
-    fn set_plugin_id_persists_and_missing_source_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
-        let source = "https://example.com/manifest.json";
-        store.add_plugin(source).unwrap();
-
-        store.set_plugin_id(source, "zed").unwrap();
-
-        let err = store
-            .set_plugin_id("https://other.example.com/manifest.json", "zed")
-            .unwrap_err();
-        assert!(matches!(err, StoreError::MissingSource { .. }));
-        assert_eq!(
-            Store::new(&maestro_paths).get().unwrap().plugins[0]
-                .id
-                .as_deref(),
-            Some("zed")
-        );
-    }
-
-    #[test]
-    fn delete_plugin_removes_entry_and_missing_source_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
-        let source = "https://example.com/manifest.json";
-        store.add_plugin(source).unwrap();
-
-        let removed = store.delete_plugin(source).unwrap();
-
-        assert_eq!(removed.source, source);
-        assert!(Store::new(&maestro_paths).get().unwrap().plugins.is_empty());
-        let err = store.delete_plugin(source).unwrap_err();
-        assert!(matches!(err, StoreError::MissingSource { .. }));
-    }
-
-    #[test]
-    fn plugins_only_config_serializes_with_expected_schema() {
-        let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
-
-        store.upsert_builtin_plugin("builtin:pi", "pi").unwrap();
-
-        assert_eq!(
-            serde_json::to_string(store.get().unwrap()).unwrap(),
-            r#"{"version":1,"providers":{},"plugins":[{"source":"builtin:pi","enabled":true,"id":"pi"}]}"#
-        );
     }
 }

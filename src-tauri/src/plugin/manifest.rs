@@ -44,6 +44,7 @@ impl SourceKind {
 pub struct Manifest {
     /// 插件 id：`[a-z][a-z0-9-_]*`。
     pub id: String,
+    /// manifest 显示名，仅用于页面展示，不是唯一标识（唯一标识是 `id`）
     pub name: String,
     /// 适配的工具（如 `pi`），仅用于展示。
     pub tool: String,
@@ -54,9 +55,35 @@ pub struct Manifest {
     pub entry: String,
 }
 
+impl TryFrom<&str> for Manifest {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let manifest: Manifest =
+            serde_json::from_str(value).map_err(|e| format!("manifest.json 不合法：{e}"))?;
+        if !is_valid_plugin_id(&manifest.id) {
+            return Err(format!(
+                "manifest.json 不合法：插件 id「{}」需以小写字母开头，仅允许小写字母、数字、连字符和下划线",
+                manifest.id
+            ));
+        }
+        for (field, value) in [
+            ("name", &manifest.name),
+            ("tool", &manifest.tool),
+            ("config_dir", &manifest.config_dir),
+            ("entry", &manifest.entry),
+        ] {
+            if value.is_empty() {
+                return Err(format!("manifest.json 不合法：{field} 不能为空"));
+            }
+        }
+        Ok(manifest)
+    }
+}
+
 /// 解析并校验 manifest 文本；`entry` 的约束按来源种类分列。
 pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> {
-    let manifest = parse_metadata(text)?;
+    let manifest = Manifest::try_from(text)?;
     match kind {
         // wasm 内嵌于二进制，entry 不参与解析。
         SourceKind::Builtin => {}
@@ -91,37 +118,6 @@ pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> 
     Ok(manifest)
 }
 
-/// 解析落位目录中的 manifest 文本。
-///
-/// 落位 manifest 是上游 manifest 原样，`entry` 仍指向上游地址：装载不解析 `entry`
-/// （wasm 固定为 `plugin.wasm`），故这里不加 entry 约束（见 ADR 0006）。
-pub fn parse_placed(text: &str) -> Result<Manifest, String> {
-    parse_metadata(text)
-}
-
-/// 解析并校验 metadata 与必填字段；不含按来源种类分列的 `entry` 约束。
-fn parse_metadata(text: &str) -> Result<Manifest, String> {
-    let manifest: Manifest =
-        serde_json::from_str(text).map_err(|e| format!("manifest.json 不合法：{e}"))?;
-    if !is_valid_plugin_id(&manifest.id) {
-        return Err(format!(
-            "manifest.json 不合法：插件 id「{}」需以小写字母开头，仅允许小写字母、数字、连字符和下划线",
-            manifest.id
-        ));
-    }
-    for (field, value) in [
-        ("name", &manifest.name),
-        ("tool", &manifest.tool),
-        ("config_dir", &manifest.config_dir),
-        ("entry", &manifest.entry),
-    ] {
-        if value.is_empty() {
-            return Err(format!("manifest.json 不合法：{field} 不能为空"));
-        }
-    }
-    Ok(manifest)
-}
-
 /// 是否为绝对 https URL：明文 http、其他 scheme 与空主机一律拒绝。
 pub fn is_https_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
@@ -135,6 +131,28 @@ pub fn is_valid_plugin_id(id: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+#[cfg(test)]
+pub mod testutil {
+    /// 上游 manifest 模板：三个测试模块共用同一份 JSON 形状。
+    pub fn manifest_json(
+        id: &str,
+        name: &str,
+        tool: &str,
+        config_dir: &str,
+        entry: &str,
+    ) -> String {
+        format!(
+            r#"{{
+                    "id": "{id}",
+                    "name": "{name}",
+                    "tool": "{tool}",
+                    "config_dir": "{config_dir}",
+                    "entry": "{entry}"
+                }}"#
+        )
+    }
 }
 
 #[cfg(test)]

@@ -364,7 +364,7 @@ export default function ProvidersPage() {
     // 没有可用插件（已启用且加载成功）时投影按钮禁用（用户故事 24）。
     listPlugins()
       .then((plugins) =>
-        setCanApply(plugins.some((p) => p.enabled && p.status === "loaded")),
+        setCanApply(plugins.some((p) => p.enabled && !p.error)),
       )
       .catch(() => setCanApply(false));
   }, [reload]);

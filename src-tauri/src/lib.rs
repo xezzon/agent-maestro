@@ -9,7 +9,7 @@ use command::{
     reload_plugin, remove_plugin, set_plugin_enabled, update_provider,
 };
 use plugin::PluginService;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use store::{AppStore, Store};
 use tauri::Manager;
 
@@ -36,15 +36,16 @@ pub fn run() {
             let maestro_paths = paths::MaestroPaths::new(&home_path);
             let store = Store::new(&maestro_paths);
             app.manage(AppStore {
-                store: Mutex::new(store),
+                store: RwLock::new(store),
             });
             // 插件服务：`~` 无法确定时服务退化为不可用（命令层报错），
             // 与配置存储的保护状态语义一致。
             app.manage(PluginService::new(&maestro_paths));
-            // 启动时 upsert 内置插件条目并从磁盘重建注册表（不联网，离线可用）。
+            // 启动时从配置条目重建注册表，并补装缺失的内置插件（落位 + 写条目，
+            // 与其余来源同一安装管线；不联网，离线可用）。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
-            service.startup(&app_store.store);
+            service.startup(&app_store);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

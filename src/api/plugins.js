@@ -1,14 +1,13 @@
 /**
  * @typedef {Object} PluginView
  * @property {string} source 插件条目唯一身份（`builtin:<id>`、指向 manifest.json 的 https URL 或本机绝对路径）。
- * @property {boolean} builtin 内置插件可禁用、不可移除、不出现在添加流程。
+ * @property {boolean} builtin 内置插件可禁用、不可移除。
  * @property {boolean} enabled
- * @property {string=} id 插件 id（第三方条目在安装成功后写入）。
+ * @property {string=} id 插件 id（条目在安装成功后写入；内置插件由启动补装）。
  * @property {string=} name
  * @property {string=} tool 适配的工具。
  * @property {string=} config_dir 插件被授权写入的目录（`~` 已展开）。
- * @property {'loaded' | 'error'} status
- * @property {string=} error 错误态的原因（如下载/校验失败 / manifest 不合法 / 接口不兼容）。
+ * @property {string=} error 加载/启动失败的原因（如落位文件损坏 / manifest 不合法 / 接口不兼容）。
  */
 /**
  * @typedef {Object} SkippedProvider
@@ -47,7 +46,7 @@ export async function setPluginEnabled(source, enabled) {
 /**
  * 添加插件：来源为指向 manifest.json 的 https 地址或本机绝对路径（本地调试），
  * 按来源获取 manifest 与 wasm、校验、落位并装载。
- * 条目一旦写入即保留：安装失败进错误态，用「重新加载」重试。
+ * 安装成功才写入条目：失败直接抛出原因，不留下半成品条目。
  * @param {string} source 指向 manifest.json 的 https 地址或本机绝对路径
  */
 export async function addPlugin(source) {

@@ -6,7 +6,6 @@ use tauri::State;
 use crate::{
     AppStore,
     provider::{Endpoints, ModelEntry, Provider},
-    store::StoreError,
 };
 
 /// 创建/更新 Provider 命令的 `provider` 负载；slug 亦随负载传入。
@@ -40,8 +39,8 @@ impl From<ProviderRequest> for Provider {
 
 #[tauri::command]
 pub fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provider>, String> {
-    let guard = store.lock()?;
-    let config = guard.get().map_err(StoreError::message)?;
+    let guard = store.read()?;
+    let config = guard.get()?;
     Ok(config.providers.clone())
 }
 
@@ -50,13 +49,12 @@ pub fn create_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
-    let mut guard = store.lock()?;
+    let mut guard = store.write()?;
 
     let slug = provider.slug.clone();
 
-    guard
-        .create_provider(&slug, provider.into())
-        .map_err(|e| e.message())
+    guard.create_provider(&slug, provider.into())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -64,24 +62,20 @@ pub fn update_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
-    let mut guard = store.lock()?;
+    let mut guard = store.write()?;
 
     let slug = provider.slug.clone();
 
-    guard
-        .update_provider(&slug, provider.into())
-        .map(|_| ())
-        .map_err(|e| e.message())
+    guard.update_provider(&slug, provider.into())?;
+    Ok(())
 }
 
 #[tauri::command]
 pub fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
-    let mut guard = store.lock()?;
+    let mut guard = store.write()?;
 
-    guard
-        .delete_provider(&slug)
-        .map(|_| ())
-        .map_err(|e| e.message())
+    guard.delete_provider(&slug)?;
+    Ok(())
 }
 
 #[cfg(test)]
