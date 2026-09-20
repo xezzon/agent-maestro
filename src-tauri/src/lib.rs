@@ -41,7 +41,8 @@ pub fn run() {
             // 插件服务：`~` 无法确定时服务退化为不可用（命令层报错），
             // 与配置存储的保护状态语义一致。
             app.manage(PluginService::new(&maestro_paths));
-            // 启动时 upsert 内置插件条目并从磁盘重建注册表（不联网，离线可用）。
+            // 启动时从配置条目重建注册表，并补装缺失的内置插件（落位 + 写条目，
+            // 与其余来源同一安装管线；不联网，离线可用）。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
             service.startup(&app_store);

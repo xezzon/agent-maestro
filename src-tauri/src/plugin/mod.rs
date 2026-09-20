@@ -33,7 +33,8 @@ use manifest::{Manifest, SourceKind, is_https_url};
 
 /// 落位目录中的 manifest 文件名。
 pub const PLACED_MANIFEST: &str = "manifest.json";
-/// 落位目录中的 wasm 文件名；上游资源内容固定落到该名，装载时只读此名、不解析 `entry`。
+/// 落位目录中的 wasm 文件名；上游资源内容固定落到该名。装载时 `entry` 仍会被
+/// 反序列化，但其指向的路径不再被解析——落位产物只认这个固定文件名。
 pub const PLACED_WASM: &str = "plugin.wasm";
 
 pub struct PlacedPlugin {
@@ -160,8 +161,9 @@ fn remove_placed_dir(plugin_dir: &Path) -> Result<(), String> {
 /// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
 ///
 /// `source` 是条目唯一身份（内置 `builtin:<id>`、指向 manifest.json 的 https URL
-/// 或本机绝对路径），重复添加在 store 层拒绝；`id` 为插件 id，内置条目在 upsert
-/// 时写入，第三方条目在安装成功后写入——它是来源到落位目录的唯一映射（见 ADR 0006）。
+/// 或本机绝对路径），重复添加在 store 层拒绝；`id` 为插件 id，条目在安装成功后
+/// 写入（内置插件由启动时装载管线补写，与其余来源同一流程）——它是来源到落位
+/// 目录的唯一映射（见 ADR 0006）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginEntry {
     pub source: String,
@@ -179,7 +181,7 @@ fn default_true() -> bool {
 #[derive(Debug, Serialize)]
 pub struct PluginView {
     pub source: String,
-    /// 来源以内置前缀标识；内置插件可禁用、不可移除、不出现在添加流程。
+    /// 来源以内置前缀标识；内置插件可禁用、不可移除。
     pub builtin: bool,
     pub enabled: bool,
     pub id: String,
@@ -208,11 +210,13 @@ enum PluginState {
     Error(String),
     /// 禁用的插件，不加载到内存
     Disabled(Manifest),
-    /// 已落位且文件没有损坏的插件，可以正常加载
-    Loaded(LoadedPlugin),
+    /// 已落位且文件没有损坏的插件，可以正常加载。
+    /// Arc 便于投影前克隆快照、锁外执行 wasm（见 `write_providers`）。
+    Loaded(Arc<LoadedPlugin>),
 }
 
-/// 插件服务：内存注册表随配置/磁盘变更整体重建（`rebuild`）。
+/// 插件服务：内存注册表由 `startup` 与各生命周期方法（安装/启停/移除/重载）
+/// 按配置条目增量维护。
 pub struct PluginService {
     engine: Engine,
     /// 用于展开 manifest 的 `~`；测试可替换为临时主目录。
@@ -245,26 +249,29 @@ impl PluginService {
         }
     }
 
-    /// 应用启动：从配置中获取插件并逐一加载
+    /// 应用启动：从配置条目装载插件注册表（装载失败进错误态，离线可用），
+    /// 并补装配置中缺失的内置插件——与其余来源同一安装管线（落位 + 写条目）。
     pub fn startup(&self, store: &AppStore) {
-        // 从配置文件加载插件
-        let store_guard = match store.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                eprintln!("failed to lock store during plugin startup");
-                return;
+        // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
+        let plugin_entries = {
+            let store_guard = match store.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    eprintln!("failed to lock store during plugin startup");
+                    return;
+                }
+            };
+            match store_guard.list_plugins() {
+                Ok(plugin_entries) => plugin_entries,
+                Err(_) => {
+                    eprintln!("failed to list plugins from store during plugin startup");
+                    return;
+                }
             }
         };
-        let plugin_entries = match store_guard.list_plugins() {
-            Ok(plugin_entries) => plugin_entries,
-            Err(_) => {
-                eprintln!("failed to list plugins from store during plugin startup");
-                return;
-            }
-        };
-        // 将插件加载到内存
+        // 将插件装载进内存
         let mut plugins = HashMap::with_capacity(plugin_entries.len());
-        for entry in plugin_entries {
+        for entry in &plugin_entries {
             let plugin_id = entry.id.clone();
             let plugin_dir = self.maestro_paths.plugin_dir(&plugin_id);
             let placed_plugin = match PlacedPlugin::from_plugin_dir(&plugin_dir) {
@@ -275,9 +282,13 @@ impl PluginService {
                 }
             };
             let plugin_state = match placed_plugin.load() {
-                Ok(loaded_plugin) => {
+                Ok(mut loaded_plugin) => {
+                    if let Err(err) = self.expand_config_dir(&mut loaded_plugin.manifest) {
+                        plugins.insert(plugin_id, PluginState::Error(err));
+                        continue;
+                    }
                     if entry.enabled {
-                        PluginState::Loaded(loaded_plugin)
+                        PluginState::Loaded(Arc::new(loaded_plugin))
                     } else {
                         PluginState::Disabled(loaded_plugin.manifest)
                     }
@@ -287,23 +298,29 @@ impl PluginService {
             plugins.insert(plugin_id, plugin_state);
         }
 
-        // 在 plugins 的所有权转移之前，筛选出未写入配置文件的插件
-        let nonexistent: Vec<&str> = [(BUILTIN_PI_SOURCE, BUILTIN_PI_ID)]
+        if let Err(err) = self.entries.lock().map(|mut entries| *entries = plugins) {
+            eprintln!("failed to lock plugin registry during startup: {err}");
+            return;
+        }
+
+        // 筛选出配置中缺失的内置插件：随后的安装管线会为其落位并补写条目。
+        let missing_builtins: Vec<&str> = [(BUILTIN_PI_SOURCE, BUILTIN_PI_ID)]
             .iter()
-            .filter(|(_, plugin_id)| !plugins.contains_key(plugin_id.to_owned()))
+            .filter(|(_, plugin_id)| !plugin_entries.iter().any(|entry| entry.id == *plugin_id))
             .map(|(plugin_source, _)| *plugin_source)
             .collect();
-        *self.entries.lock().unwrap() = plugins;
 
-        for builtin_plugin in nonexistent {
-            let _ = self.add_plugin(store, builtin_plugin);
+        for builtin_source in missing_builtins {
+            if let Err(err) = self.add_plugin(store, builtin_source) {
+                eprintln!("failed to install builtin plugin {builtin_source}: {err}");
+            }
         }
     }
 
     /// 当前注册表视图。
     pub fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
         let plugin_entries = store.lock()?.list_plugins().map_err(|_| "配置文件损坏")?;
-        let plugins = self.entries.lock().map_err(|_| "插件未加载")?;
+        let plugins = self.entries.lock().map_err(|_| "插件注册表不可用")?;
         let plugin_view =
             |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| {
                 let source_kind = SourceKind::from_source(&entry.source);
@@ -336,20 +353,17 @@ impl PluginService {
             .collect())
     }
 
-    /// 添加第三方插件：
+    /// 添加插件（内置、https 与本机路径来源同一流程）：
     /// 1. 先检查来源是否重复。
-    /// 2. 随后获取 manifest、校验、id 冲突检查、获取 wasm、落位。
-    /// 3. 将插件写入配置条目。（如果之前的步骤失败了，则不写入，而是向前端提示信息）
+    /// 2. 随后获取 manifest 与 wasm、id 冲突检查、实例化校验，全部通过才落位。
+    /// 3. 安装成功后写入配置条目；此前任何一步失败都不写条目、不留落位残留。
     ///
-    /// 配置存储只在短读/短写处加锁：下载、校验与落位全程不持锁。
+    /// 配置存储只在短读/短写处加锁：获取、校验与落位全程不持锁。
     pub fn add_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        // 内置插件随应用分发，不经添加流程（见 ADR 0004）。
-        if !matches!(
-            SourceKind::from_source(source),
-            Some(SourceKind::Https | SourceKind::File)
-        ) {
+        // 来源形态在发起获取之前判定：无法识别的来源直接拒绝。
+        if SourceKind::from_source(source).is_none() {
             return Err(format!(
-                "插件来源仅支持指向 manifest.json 的 https 地址或本机绝对路径：{source}"
+                "无法识别的插件来源：{source}（支持内置 builtin:<id>、指向 manifest.json 的 https 地址或本机绝对路径）"
             ));
         }
 
@@ -366,19 +380,17 @@ impl PluginService {
             .into());
         }
 
-        // 2. 获取 manifest 与 wasm、校验并落位；下载与校验全程不持配置存储锁。
-        let mut loaded = self.download(source)?.load()?;
+        // 2. 获取 manifest 与 wasm、校验并落位；获取与校验全程不持配置存储锁。
+        let mut loaded = self.fetch_placed(source)?.load()?;
         self.check_id_conflict(store, source, &loaded.manifest.id)?;
-        // 装载期即把 config_dir 展开为宿主内的绝对路径：投影按此预开放目录。
-        loaded.manifest.config_dir = self
-            .resolve_config_dir(&loaded.manifest.config_dir)?
-            .display()
-            .to_string();
+        self.expand_config_dir(&mut loaded.manifest)?;
         // 实例化校验先于落位：wasm 不是组件或接口不兼容时不落位、不写条目。
         loaded.instantiate_component(&self.engine)?;
         loaded.plugin.save()?;
 
         // 3. 安装成功后写入条目：`id` 是来源到落位目录的唯一映射（见 ADR 0006）。
+        //    写入临界区内复检 id 冲突：检查（check_id_conflict）与写入之间，
+        //    另一来源可能已占用同一 id。
         let entry = PluginEntry {
             source: source.to_owned(),
             enabled: true,
@@ -389,15 +401,18 @@ impl PluginService {
             let _ = loaded.plugin.uninstall();
             return Err(e.into());
         }
-        self.entries
-            .lock()
-            .map_err(|_| "插件未加载")?
-            .insert(loaded.manifest.id.clone(), PluginState::Loaded(loaded));
+        self.entries.lock().map_err(|_| "插件注册表不可用")?.insert(
+            loaded.manifest.id.clone(),
+            PluginState::Loaded(Arc::new(loaded)),
+        );
         Ok(())
     }
 
-    /// 将插件从来源处拷贝加载到内存
-    fn download(&self, source: &str) -> Result<PlacedPlugin, String> {
+    /// 从来源处获取 manifest 与 wasm，构造待落位的插件。
+    ///
+    /// 名为「获取」而非「下载」：https 来源走网络，file 来源读本机文件，
+    /// 内置来源直接取内嵌字节（见 ADR 0004）。
+    fn fetch_placed(&self, source: &str) -> Result<PlacedPlugin, String> {
         let source_kind = SourceKind::from_source(source).ok_or("unknown source kind")?;
 
         let raw_manifest = match source_kind {
@@ -437,9 +452,10 @@ impl PluginService {
 
     /// 启用/禁用插件条目。
     ///
-    /// 配置条目是唯一事实来源：先改条目，再同步内存注册表（与 `startup` 的重建
-    /// 语义一致）。禁用仅在内存里换成 Disabled 态，保留 manifest 供列表展示；
-    /// 启用从落位目录重新装载，装载失败即报错且不改配置，修复落位文件后重新启用即可。
+    /// 禁用：先改配置条目，再把内存注册表换成 Disabled 态（保留 manifest 供列表展示）。
+    /// 启用：先从落位目录重新装载并展开 config_dir，装载成功才写配置条目并同步注册表
+    /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
+    /// 两次加锁之间条目可能被移除：写配置前按来源复检，条目已消失即报错。
     pub fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
         let entry = store.lock()?.plugin_by_source(source)?;
         if entry.enabled == enabled {
@@ -450,22 +466,28 @@ impl PluginService {
         let loaded = if enabled {
             let mut loaded =
                 PlacedPlugin::from_plugin_dir(&self.maestro_paths.plugin_dir(&entry.id))?.load()?;
-            // 装载期把 config_dir 展开为宿主内的绝对路径：投影按此预开放目录。
-            loaded.manifest.config_dir = self
-                .resolve_config_dir(&loaded.manifest.config_dir)?
-                .display()
-                .to_string();
+            self.expand_config_dir(&mut loaded.manifest)?;
             Some(loaded)
         } else {
             None
         };
 
-        store.lock()?.set_plugin_enabled(source, enabled)?;
+        let entry = {
+            let mut guard = store.lock()?;
+            // 复检：装载期间条目可能已被移除，不得按过期条目继续写。
+            let entry = guard.plugin_by_source(source)?;
+            if entry.enabled == enabled {
+                // 并发方已完成同样的切换：配置与注册表均已同步，直接成功。
+                return Ok(());
+            }
+            guard.set_plugin_enabled(source, enabled)?;
+            entry
+        };
 
-        let mut entries = self.entries.lock().map_err(|_| "插件未加载")?;
+        let mut entries = self.entries.lock().map_err(|_| "插件注册表不可用")?;
         match loaded {
             Some(loaded) => {
-                entries.insert(entry.id.clone(), PluginState::Loaded(loaded));
+                entries.insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
             }
             None => {
                 if let Some(state) = entries.get_mut(&entry.id)
@@ -482,12 +504,12 @@ impl PluginService {
     /// 移除插件：先从内存注册表卸载，再删配置条目，最后删落位目录；
     /// 条目已不存在同样成功（幂等）。
     ///
-    /// 只删宿主落位的副本，不动用户的插件项目目录；内置插件不可移除。
-    /// 读条目、卸载内存、删条目与删落位目录在同一临界区内：这是内存、配置与磁盘的
-    /// 一次读-改-写，中间不得插入另一次安装——安装先落位后写条目，删目录若放到锁外，
-    /// 并发安装可能在条目删除后重新落位而被误删。
+    /// 只删宿主落位的副本，不动用户的插件项目目录；内置插件不可移除（随应用
+    /// 分发，见 ADR 0004）。读条目、卸载内存、删条目与删落位目录在同一临界区内：
+    /// 这是内存、配置与磁盘的一次读-改-写，中间不得插入另一次安装——安装先落位后
+    /// 写条目，删目录若放到锁外，并发安装可能在条目删除后重新落位而被误删。
     pub fn remove_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        // 内置插件随应用分发、没有宿主落位副本，不可移除（见 ADR 0004）。
+        // 内置插件随应用分发，不可移除（见 ADR 0004）。
         if matches!(SourceKind::from_source(source), Some(SourceKind::Builtin)) {
             return Err(format!("内置插件不可移除：{source}"));
         }
@@ -503,7 +525,7 @@ impl PluginService {
         // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
         self.entries
             .lock()
-            .map_err(|_| "插件未加载")?
+            .map_err(|_| "插件注册表不可用")?
             .remove(&entry.id);
 
         // 2. 删配置条目（锁内读-改-写，与读条目同处一个临界区）。
@@ -516,68 +538,77 @@ impl PluginService {
     /// 对注册表中的每个插件执行投影，返回逐插件报告：
     /// Loaded 实例化组件后调用 `write_provider`；Disabled 与 Error 态不执行投影。
     /// 单个插件的失败不影响其它插件，失败原因写入该插件的报告。
+    ///
+    /// 插件执行时长不受应用控制：注册表锁只在快照阶段短暂持有（克隆 Arc 与
+    /// 收集跳过态），wasm 实例化与调用全部在锁外进行，不阻塞其它命令。
     pub fn write_providers(
         &self,
         providers: &BTreeMap<String, Provider>,
     ) -> Result<Vec<PluginApplyReport>, String> {
-        Ok(self
-            .entries
-            .lock()
-            .map_err(|_| "插件未加载")?
-            .iter()
-            .map(|(id, state)| match state {
-                PluginState::Loaded(loaded_plugin) => {
-                    match loaded_plugin
-                        .instantiate_component(&self.engine)
-                        .and_then(|mut instantiated| instantiated.write_provider(providers))
-                    {
-                        Ok((files, skipped)) => PluginApplyReport {
-                            id: id.clone(),
-                            status: "applied",
-                            files,
-                            skipped,
-                            reason: None,
-                        },
-                        Err(reason) => PluginApplyReport {
-                            id: id.clone(),
-                            status: "failed",
-                            files: Vec::new(),
-                            skipped: Vec::new(),
-                            reason: Some(reason),
-                        },
+        let (mut reports, loaded) = {
+            let entries = self.entries.lock().map_err(|_| "插件注册表不可用")?;
+            let mut reports = Vec::with_capacity(entries.len());
+            let mut loaded = Vec::new();
+            for (id, state) in entries.iter() {
+                match state {
+                    PluginState::Loaded(loaded_plugin) => {
+                        loaded.push((id.clone(), Arc::clone(loaded_plugin)));
                     }
+                    PluginState::Disabled(_) => reports.push(PluginApplyReport {
+                        id: id.clone(),
+                        status: "skipped",
+                        files: Vec::new(),
+                        skipped: Vec::new(),
+                        reason: Some("插件已禁用".to_owned()),
+                    }),
+                    PluginState::Error(reason) => reports.push(PluginApplyReport {
+                        id: id.clone(),
+                        status: "skipped",
+                        files: Vec::new(),
+                        skipped: Vec::new(),
+                        reason: Some(reason.clone()),
+                    }),
                 }
-                PluginState::Disabled(_) => PluginApplyReport {
-                    id: id.clone(),
-                    status: "skipped",
+            }
+            (reports, loaded)
+        };
+
+        for (id, loaded_plugin) in loaded {
+            let report = match loaded_plugin
+                .instantiate_component(&self.engine)
+                .and_then(|mut instantiated| instantiated.write_provider(providers))
+            {
+                Ok((files, skipped)) => PluginApplyReport {
+                    id,
+                    status: "applied",
+                    files,
+                    skipped,
+                    reason: None,
+                },
+                Err(reason) => PluginApplyReport {
+                    id,
+                    status: "failed",
                     files: Vec::new(),
                     skipped: Vec::new(),
-                    reason: Some("插件已禁用".to_owned()),
+                    reason: Some(reason),
                 },
-                PluginState::Error(reason) => PluginApplyReport {
-                    id: id.clone(),
-                    status: "skipped",
-                    files: Vec::new(),
-                    skipped: Vec::new(),
-                    reason: Some(reason.clone()),
-                },
-            })
-            .collect())
+            };
+            reports.push(report);
+        }
+        Ok(reports)
     }
 
     /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
     /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
+    ///
+    /// 内置来源的“重新获取”即从内嵌字节重新构造落位副本，用于恢复被改动或
+    /// 损坏的宿主副本（无上游新版本可言，但 ID 一致性校验仍执行）。
     pub fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        // 内置插件的 wasm 内嵌于应用二进制，重新加载无从获取新版本（见 ADR 0004）。
-        if matches!(SourceKind::from_source(source), Some(SourceKind::Builtin)) {
-            return Err(format!("内置插件无需重新加载：{source}"));
-        }
-
         // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
         let entry = store.lock()?.plugin_by_source(source)?;
 
         // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。
-        let mut loaded = self.download(source)?.load()?;
+        let mut loaded = self.fetch_placed(source)?.load()?;
         // 上游 id 变更报错并保持旧状态：落位目录由条目 id 定位，id 漂移会架空映射。
         if loaded.manifest.id != entry.id {
             return Err(format!(
@@ -585,11 +616,7 @@ impl PluginService {
                 entry.id, loaded.manifest.id
             ));
         }
-        // 装载期把 config_dir 展开为宿主内的绝对路径：投影按此预开放目录。
-        loaded.manifest.config_dir = self
-            .resolve_config_dir(&loaded.manifest.config_dir)?
-            .display()
-            .to_string();
+        self.expand_config_dir(&mut loaded.manifest)?;
         // 实例化校验先于替换：wasm 不是组件或接口不兼容时旧版本保持可用。
         loaded.instantiate_component(&self.engine)?;
         // 替换落位目录：swap_placed 先备份旧版本，替换失败即恢复，旧版本保持可用。
@@ -597,13 +624,13 @@ impl PluginService {
 
         // 条目（id 与 enabled）不变，仅把内存注册表同步为新装载的版本。
         let state = if entry.enabled {
-            PluginState::Loaded(loaded)
+            PluginState::Loaded(Arc::new(loaded))
         } else {
             PluginState::Disabled(loaded.manifest)
         };
         self.entries
             .lock()
-            .map_err(|_| "插件未加载")?
+            .map_err(|_| "插件注册表不可用")?
             .insert(entry.id, state);
         Ok(())
     }
@@ -660,6 +687,16 @@ impl PluginService {
             ));
         }
         Ok(canonical)
+    }
+
+    /// 把 manifest 的 `config_dir` 展开为宿主内的绝对路径，原位写回 manifest：
+    /// 投影按该路径预开放目录。展开含目录创建与逃逸校验（见 `resolve_config_dir`）。
+    fn expand_config_dir(&self, manifest: &mut Manifest) -> Result<(), String> {
+        manifest.config_dir = self
+            .resolve_config_dir(&manifest.config_dir)?
+            .display()
+            .to_string();
+        Ok(())
     }
 }
 
@@ -828,10 +865,12 @@ mod tests {
             "file:///tmp/manifest.json",
             "git://example.com/x.git",
             "plugins/pi/manifest.json",
-            builtin::BUILTIN_PI_SOURCE,
         ] {
             let err = service.add_plugin(&store, source).unwrap_err();
-            assert!(err.contains("插件来源仅支持"), "{source} 应被拒绝：{err}");
+            assert!(
+                err.contains("无法识别的插件来源"),
+                "{source} 应被拒绝：{err}"
+            );
             assert!(
                 !err.contains("未预置的 URL"),
                 "来源形态的判定必须在发起下载之前：{err}"
@@ -1218,17 +1257,183 @@ mod tests {
     }
 
     #[test]
-    fn reload_plugin_rejects_builtin_and_unknown_sources() {
+    fn reload_plugin_rejects_unknown_sources() {
         let home = temp_home();
         let store = store_at(home.path());
         let service = test_service(home.path());
 
-        let err = service
-            .reload_plugin(&store, builtin::BUILTIN_PI_SOURCE)
-            .unwrap_err();
-        assert!(err.contains("内置插件无需重新加载"), "{err}");
-
         let err = service.reload_plugin(&store, MANIFEST_URL).unwrap_err();
         assert!(err.contains("插件条目不存在"), "{err}");
+    }
+
+    /// 内置插件的「重新加载」按内嵌字节重建落位副本：损坏的宿主副本可被恢复，
+    /// 配置条目（`enabled` 等）保持不变。
+    #[test]
+    fn reload_builtin_plugin_restores_a_corrupted_placed_copy() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+
+        service.startup(&store);
+        assert_eq!(snapshot(&store).plugins.len(), 1);
+
+        // 故意损坏宿主落位的 wasm：重新加载必须按内嵌字节还原。
+        let placed_wasm = maestro_paths.plugin_dir("pi").join(PLACED_WASM);
+        fs::write(&placed_wasm, b"corrupted").unwrap();
+
+        service
+            .reload_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+            .unwrap();
+
+        assert_eq!(
+            fs::read(&placed_wasm).unwrap(),
+            builtin::PI_WASM.to_vec(),
+            "宿主副本已按内嵌字节恢复"
+        );
+        let view = &service.list(&store).unwrap()[0];
+        assert_eq!(view.error, None);
+        assert_eq!(view.name.as_deref(), Some("Pi"), "注册表重新装载成功");
+        assert!(snapshot(&store).plugins[0].enabled, "配置条目未被改动");
+    }
+
+    /// 全新主目录：内置插件与其余来源同一安装管线（落位 + 写条目），且可重复启动。
+    #[test]
+    fn startup_installs_missing_builtin_plugin_like_any_other_source() {
+        let home = temp_home();
+        let maestro_paths = MaestroPaths::new(home.path());
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+
+        service.startup(&store);
+
+        let plugins = snapshot(&store).plugins;
+        assert_eq!(plugins.len(), 1, "启动时补装缺失的内置插件");
+        assert_eq!(plugins[0].source, builtin::BUILTIN_PI_SOURCE);
+        assert_eq!(plugins[0].id, builtin::BUILTIN_PI_ID);
+        assert!(plugins[0].enabled);
+        assert!(
+            maestro_paths
+                .plugin_dir("pi")
+                .join(PLACED_MANIFEST)
+                .exists()
+                && maestro_paths.plugin_dir("pi").join(PLACED_WASM).exists(),
+            "内置插件与其余来源一样落位到磁盘"
+        );
+
+        let views = service.list(&store).unwrap();
+        assert_eq!(views.len(), 1);
+        assert!(views[0].builtin);
+        assert_eq!(views[0].error, None, "{:?}", views[0].error);
+
+        // 再次启动：条目已存在，不重复安装，注册表照常重建。
+        service.startup(&store);
+        assert_eq!(snapshot(&store).plugins.len(), 1, "重复启动不产生重复条目");
+        assert_eq!(service.list(&store).unwrap()[0].error, None);
+    }
+
+    /// 逐插件报告：applied / failed / skipped 分类，单插件失败不影响其它插件。
+    #[test]
+    fn write_providers_reports_per_plugin_and_isolates_failures() {
+        use crate::provider::Endpoints;
+
+        let home = temp_home();
+        let store = store_at(home.path());
+        let fetcher = https_stub("pi2", "Pi2");
+        fetcher.serve(
+            "https://example.com/pi3/manifest.json",
+            manifest_json("pi3", "Pi3", "pi", "~/.pi3", WASM_URL),
+        );
+        let service = stub_service(home.path(), fetcher);
+
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+        service
+            .add_plugin(&store, "https://example.com/pi3/manifest.json")
+            .unwrap();
+        service
+            .set_enabled(&store, "https://example.com/pi3/manifest.json", false)
+            .unwrap();
+
+        // 直接注入注册表的两种异常态：坏 wasm 的 Loaded 与显式 Error。
+        let bad = PlacedPlugin::new(
+            &home.path().join("pibad"),
+            manifest_json("pibad", "PiBad", "pi", "~/.pibad", "plugin.wasm"),
+            b"not a wasm component",
+        )
+        .load()
+        .unwrap();
+        let mut entries = service.entries.lock().unwrap();
+        entries.insert("pibad".to_owned(), PluginState::Loaded(Arc::new(bad)));
+        entries.insert(
+            "pierr".to_owned(),
+            PluginState::Error("配置已损坏".to_owned()),
+        );
+        drop(entries);
+
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                base_url: Endpoints {
+                    openai_completions: Some("https://api.example.com/v1".to_owned()),
+                    ..Endpoints::default()
+                },
+                ..Provider::default()
+            },
+        )]);
+
+        let reports = service.write_providers(&providers).unwrap();
+
+        let by_id: HashMap<&str, &PluginApplyReport> = reports
+            .iter()
+            .map(|report| (report.id.as_str(), report))
+            .collect();
+        assert_eq!(reports.len(), 4, "每个注册表条目一份报告");
+        let applied = by_id.get("pi2").unwrap();
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.files, vec!["agent/models.json"]);
+        let failed = by_id.get("pibad").unwrap();
+        assert_eq!(failed.status, "failed");
+        assert!(
+            failed
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("不是有效的 WASM 组件"),
+            "{:?}",
+            failed.reason
+        );
+        assert_eq!(by_id.get("pi3").unwrap().status, "skipped", "禁用态跳过");
+        assert_eq!(
+            by_id.get("pi3").unwrap().reason.as_deref(),
+            Some("插件已禁用")
+        );
+        assert_eq!(by_id.get("pierr").unwrap().status, "skipped", "错误态跳过");
+        assert_eq!(
+            by_id.get("pierr").unwrap().reason.as_deref(),
+            Some("配置已损坏")
+        );
+    }
+
+    /// 替换落位目录失败时，旧目录必须从备份恢复原位。
+    #[test]
+    fn swap_placed_restores_the_backup_when_replacement_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("pi");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("marker"), "old").unwrap();
+
+        // staging 不存在：替换必然失败，走备份恢复路径。
+        let err = swap_placed(&dir.path().join("missing-staging"), &target).unwrap_err();
+
+        assert!(err.contains("替换插件目录失败"), "{err}");
+        assert_eq!(
+            fs::read_to_string(target.join("marker")).unwrap(),
+            "old",
+            "替换失败后旧版本恢复原位"
+        );
+        assert!(
+            !target.with_extension("old").exists(),
+            "备份已恢复回目标位置，不残留备份目录"
+        );
     }
 }

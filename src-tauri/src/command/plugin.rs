@@ -6,14 +6,14 @@ use crate::{
 };
 
 /// 列出插件注册表（metadata 与加载状态）。
-/// store 处于保护状态时报错，而非静默返回空列表误导用户。
+/// store 处于保护状态时报错，而非静默返回空列表误导用户；
+/// 该检查由 `service.list` 内部的短锁完成，此处不得再持 store 锁——
+/// 否则与 `list` 内部加锁构成同线程重入，死锁。
 #[tauri::command]
 pub fn list_plugins(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
-    let guard = store.lock()?;
-    guard.get()?;
     service.list(&store)
 }
 
@@ -63,7 +63,8 @@ pub fn remove_plugin(
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，
 /// 返回逐插件结果（写入的文件、跳过的 Provider、失败原因）。
 ///
-/// 投影前先释放 store 锁：插件执行时长不受应用控制，不得阻塞 Provider 命令。
+/// store 锁在读取 providers 后即释放，注册表锁也仅用于快照：
+/// 插件执行时长不受应用控制，执行全程不持锁，不得阻塞其它命令。
 #[tauri::command]
 pub fn apply_providers(
     store: State<'_, AppStore>,

@@ -54,6 +54,8 @@ pub enum StoreError {
     MissingSource { source: String },
     /// 已存在同一来源的插件条目（来源即条目唯一身份）。
     DuplicateSource { source: String },
+    /// 同一 id 已被其它来源的插件条目持有（id 是来源到落位目录的唯一映射）。
+    DuplicateId { id: String, source: String },
 }
 
 impl From<&StoreError> for String {
@@ -78,6 +80,9 @@ impl From<&StoreError> for String {
             StoreError::MissingSource { source } => format!("插件条目不存在：{source}"),
             StoreError::DuplicateSource { source } => {
                 format!("已存在同一来源的插件条目：{source}")
+            }
+            StoreError::DuplicateId { id, source } => {
+                format!("插件 id「{id}」已被来源 {source} 占用")
             }
         }
     }
@@ -188,16 +193,29 @@ impl Store {
         }
     }
 
-    /// 新增插件条目（`source` 即唯一身份，重复添加即拒绝），追加在现有条目之后。
+    /// 新增插件条目，追加在现有条目之后。
     ///
     /// 安装成功后由插件服务调用，`id` 随条目一并给出：它是来源到落位目录的唯一映射
     /// （见 ADR 0006）。因此安装失败时不会留下条目，重新添加即可。
+    ///
+    /// 同一临界区内复检来源与 id 冲突：插件服务的预检（`check_id_conflict`）与
+    /// 此处写入分属两次加锁，两次锁之间另一来源可能已占用同一 id。
     pub fn add_plugin(&mut self, plugin_entry: &PluginEntry) -> Result<(), StoreError> {
         let source = plugin_entry.source.clone();
         let config = self.state.as_ref().map_err(Clone::clone)?;
         if config.plugins.iter().any(|plugin| plugin.source == source) {
             return Err(StoreError::DuplicateSource {
                 source: source.to_owned(),
+            });
+        }
+        if let Some(other) = config
+            .plugins
+            .iter()
+            .find(|plugin| plugin.source != source && plugin.id == plugin_entry.id)
+        {
+            return Err(StoreError::DuplicateId {
+                id: plugin_entry.id.to_owned(),
+                source: other.source.to_owned(),
             });
         }
         let mut next = config.clone();
@@ -1082,5 +1100,42 @@ mod tests {
         assert_eq!(models[0].id, "gpt-4o");
         assert_eq!(models[1].id, "GPT-4O", "大小写敏感：大小写变体可并存");
         assert_eq!(models[2].id, "", "空 ID 同样不被存储层拦截");
+    }
+
+    #[test]
+    fn plugins_section_defaults_to_empty_for_legacy_config_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let maestro_paths = MaestroPaths::new(dir.path());
+        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+        fs::write(
+            maestro_paths.config_path(),
+            r#"{"version":1,"providers":{}}"#,
+        )
+        .unwrap();
+
+        let store = Store::new(&maestro_paths);
+
+        assert!(
+            store.get().unwrap().plugins.is_empty(),
+            "缺 plugins 段的旧配置文件直接可用（纯增量字段，见 issue #34）"
+        );
+    }
+
+    #[test]
+    fn corrupt_store_refuses_plugin_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let maestro_paths = MaestroPaths::new(dir.path());
+        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+        fs::write(maestro_paths.config_path(), "不是 JSON {{{").unwrap();
+        let mut store = Store::new(&maestro_paths);
+        let entry = PluginEntry {
+            source: "https://example.com/manifest.json".to_owned(),
+            enabled: true,
+            id: "pi".to_owned(),
+        };
+
+        assert!(store.set_plugin_enabled("builtin:pi", true).is_err());
+        assert!(store.add_plugin(&entry).is_err());
+        assert!(store.delete_plugin("builtin:pi").is_err());
     }
 }

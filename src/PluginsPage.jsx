@@ -88,16 +88,16 @@ function PluginCard({ plugin, onReload }) {
           <Tag color="success">已加载</Tag>
         </div>
       )}
-      {!plugin.builtin && (
-        <div className="card-actions">
-          <Button
-            disabled={busy}
-            onClick={() =>
-              run(() => reloadPlugin(plugin.source), "已重新加载插件")
-            }
-          >
-            重新加载
-          </Button>
+      <div className="card-actions">
+        <Button
+          disabled={busy}
+          onClick={() =>
+            run(() => reloadPlugin(plugin.source), "已重新加载插件")
+          }
+        >
+          重新加载
+        </Button>
+        {!plugin.builtin && (
           <Popconfirm
             title="移除插件"
             description="将删除该插件的配置条目与已落位的插件文件，确定移除？"
@@ -112,8 +112,8 @@ function PluginCard({ plugin, onReload }) {
               移除
             </Button>
           </Popconfirm>
-        </div>
-      )}
+        )}
+      </div>
     </Card>
   );
 }

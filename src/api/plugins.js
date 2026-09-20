@@ -1,9 +1,9 @@
 /**
  * @typedef {Object} PluginView
  * @property {string} source 插件条目唯一身份（`builtin:<id>`、指向 manifest.json 的 https URL 或本机绝对路径）。
- * @property {boolean} builtin 内置插件可禁用、不可移除、不出现在添加流程。
+ * @property {boolean} builtin 内置插件可禁用、不可移除。
  * @property {boolean} enabled
- * @property {string=} id 插件 id（第三方条目在安装成功后写入）。
+ * @property {string=} id 插件 id（条目在安装成功后写入；内置插件由启动补装）。
  * @property {string=} name
  * @property {string=} tool 适配的工具。
  * @property {string=} config_dir 插件被授权写入的目录（`~` 已展开）。

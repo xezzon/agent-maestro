@@ -44,7 +44,7 @@ impl SourceKind {
 pub struct Manifest {
     /// 插件 id：`[a-z][a-z0-9-_]*`。
     pub id: String,
-    /// 显示在页面上的菜单的名字
+    /// manifest 显示名，仅用于页面展示，不是唯一标识（唯一标识是 `id`）
     pub name: String,
     /// 适配的工具（如 `pi`），仅用于展示。
     pub tool: String,
