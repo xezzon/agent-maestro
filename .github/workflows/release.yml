@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ['v*']
+    # 默认分支的 push 只跑下面的 warmup job：把 release profile 的产物缓存落进默认分支作用域。
+    # tag 运行能恢复默认分支的缓存，但 tag 之间互不可见，矩阵 job 彼此也拿不到对方的缓存。
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -13,6 +16,77 @@ permissions:
   contents: write
 
 jobs:
+  # Release 的矩阵 job 只能读到默认分支作用域的缓存，所以 release profile 的产物先在默认分支
+  # 预热一次：命中缓存时只恢复、不重编；只有 Cargo.lock 或工具链变化（key 变化）才真正编译一轮。
+  warmup:
+    name: Warm cache (${{ matrix.cache-key }})
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      # 平台与槽位须与下方 release 矩阵逐条对应：两边靠同一个 cache-key 算出同一个缓存 key。
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+            cache-key: 'macos-arm64'
+          - platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'
+            cache-key: 'macos-x64'
+          - platform: 'ubuntu-latest'
+            args: ''
+            cache-key: 'linux-x64'
+          - platform: 'ubuntu-24.04-arm'
+            args: ''
+            cache-key: 'linux-arm64'
+          - platform: 'windows-latest'
+            args: ''
+            cache-key: 'windows-x64'
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
+    steps:
+      # 插件 wasm 在宿主构建（build.rs）时编译，会运行插件的 Cargo build scripts，
+      # 不得保留 GITHUB_TOKEN 凭据。
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # 缓存 key 里含 rustc 版本与提交哈希，故先物化 rust-toolchain.toml 指定的工具链再算 key。
+      - name: Output rust version for educational purposes
+        run: |
+          rustc --version
+          cargo --version
+
+      # 仅 Intel mac 产物需要跨编译 target；macos-latest 宿主默认已含 aarch64-apple-darwin。
+      - name: Install Rust target (Intel mac)
+        if: matrix.platform == 'macos-latest' && contains(matrix.args, 'x86_64')
+        run: rustup target add x86_64-apple-darwin
+
+      # 不装 xdg-utils：它只在 AppImage 打包时需要，而预热只编译、不打包。
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      # 与 release job 用同一个槽位 key：两边算出的 key 一致，tag 运行才能命中这份预热产物。
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          shared-key: release-${{ matrix.cache-key }}
+          # 宿主，以及宿主 build.rs 就地编译的内置插件 wasm。
+          workspaces: |
+            src-tauri
+            plugins/pi
+
+      # 只编译不打包：预热要的就是 release profile 的依赖与 build.rs 产物，前端产物不参与，
+      # 因此本 job 既不用装前端依赖，也不会触发 beforeBuildCommand。
+      - name: Build (release)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --release ${{ matrix.args }}
+        working-directory: src-tauri
+
   release:
     name: Release (${{ matrix.platform }})
     strategy:
@@ -21,14 +95,19 @@ jobs:
         include:
           - platform: 'macos-latest' # for Arm based macs (M1 and above).
             args: '--target aarch64-apple-darwin'
+            cache-key: 'macos-arm64'
           - platform: 'macos-latest' # for Intel based macs.
             args: '--target x86_64-apple-darwin'
+            cache-key: 'macos-x64'
           - platform: 'ubuntu-latest'
             args: ''
+            cache-key: 'linux-x64'
           - platform: 'ubuntu-24.04-arm' # Only available in public repos; ARM 没有 ubuntu-latest-arm 滚动标签。
             args: ''
+            cache-key: 'linux-arm64'
           - platform: 'windows-latest'
             args: ''
+            cache-key: 'windows-x64'
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 90
     steps:
@@ -47,6 +126,12 @@ jobs:
         with:
           node-version: lts/*
 
+      # 缓存 key 里含 rustc 版本与提交哈希，故先物化 rust-toolchain.toml 指定的工具链再算 key。
+      - name: Output rust version for educational purposes
+        run: |
+          rustc --version
+          cargo --version
+
       # 仅 Intel mac 产物需要跨编译 target；macos-latest 宿主默认已含 aarch64-apple-darwin。
       - name: Install Rust target (Intel mac)
         if: matrix.platform == 'macos-latest' && contains(matrix.args, 'x86_64')
@@ -59,22 +144,21 @@ jobs:
           # xdg-utils（xdg-open）是 AppImage 打包的必需项；ARM 镜像（ubuntu-24.04-arm）可能未预装。
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
 
-      # key 与 Check 工作流保持一致：tag 触发的运行可读取默认分支作用域的缓存，
-      # 从而直接复用 Check 在 main 上保存的缓存（tag 之间互不可见）。
-      # os/arch 前缀用于区分 matrix 中两个共用 macos-latest 的条目（ARM64 / X64）。
-      # restore-keys 使 Cargo.lock 变化后仍能部分复用旧缓存。
-      - uses: actions/cache@v6
+      # 缓存约定（与 check.yml 一致）：key = <平台>/<架构> + rustc 版本与提交哈希 +
+      # 各 workspace 的 Cargo.toml/Cargo.lock 哈希，故工具链或依赖图变化时才换新 key。
+      # shared-key 的槽位与默认分支上的 warmup job 逐条对齐：tag 运行恢复默认分支作用域的缓存
+      # （tag 之间互不可见，矩阵 job 之间也拿不到对方的缓存），命中即以增量方式重编 release 产物。
+      # 槽位不能省：两个 mac 条目共用 macos-latest，平台/架构相同，只靠 os/arch 会争抢同一份缓存。
+      # save-if: false —— tag 作用域的缓存无法被其它 tag 或默认分支复用，保存它只会占满仓库
+      # 缓存配额、挤掉默认分支上真正有用的条目；预热由 warmup job 负责。
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            src-tauri/target/
-            # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
-            plugins/pi/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+          shared-key: release-${{ matrix.cache-key }}
+          save-if: false
+          # 宿主，以及宿主 build.rs 就地编译的内置插件 wasm。
+          workspaces: |
+            src-tauri
+            plugins/pi
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

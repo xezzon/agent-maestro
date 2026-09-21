@@ -37,8 +37,31 @@ jobs:
       - name: Build
         run: pnpm build
 
+  # fmt 只读源码：不取依赖、不编译、不恢复缓存。独立成轻量 job 后，格式问题十几秒内反馈，
+  # 也不再占用 rust job 的时间。
+  fmt:
+    name: Rust format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      # 与其余 Rust job 保持一致：不把 GITHUB_TOKEN 凭据留在工作区。
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Format
+        run: cargo fmt --check
+
+      # SDK crate 是独立 package（无 workspace 覆盖），单独跑 fmt；作为库 crate 不提交 Cargo.lock。
+      - name: Format (maestro-plugin-sdk)
+        run: cargo fmt --check
+        working-directory: crates/maestro-plugin-sdk
+
   rust:
-    name: Rust (fmt, clippy, test)
+    name: Rust (clippy, test)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -56,29 +79,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      # GitHub 托管的运行器包含最新版本的 Rust 工具链。
+      # 缓存 key 里含 rustc 版本与提交哈希，故先物化 rust-toolchain.toml 指定的工具链再算 key。
+      # GitHub 托管的运行器已预装最新版本的 Rust 工具链。
       - name: Output rust version for educational purposes
         run: |
           rustc --version
           cargo --version
 
-      - uses: actions/cache@v6
+      # 缓存约定（与 release.yml 一致）：
+      # - key 由 rust-cache 组装为 <平台>/<架构> + rustc 版本与提交哈希 + 各 workspace 的
+      #   Cargo.toml/Cargo.lock 哈希，故工具链或依赖图一变就换新 key，旧缓存仍可作为
+      #   restore-keys 前缀命中、增量重编；源码不参与 key——源码变更要复用缓存而不是全量重建。
+      # - Check 只产出 dev profile 产物，因此不与 Release 共用缓存：Release 及其在默认分支上
+      #   的预热 job 用 shared-key: release-<平台槽位>，只缓存 release profile 产物，
+      #   避免两种 profile 互相挤占同一份缓存。
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            src-tauri/target/
-            # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
-            plugins/pi/target/
-          # key 与 Release 工作流保持一致：tag 触发的 Release 运行可读取默认分支
-          # （本工作流 push 到 main 时）保存的缓存。os/arch 前缀区分平台。
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
-
-      - name: Format
-        run: cargo fmt --check
+          # 编译发生在这三处：宿主、宿主 build.rs 就地编译的内置插件 wasm、独立 SDK crate。
+          workspaces: |
+            src-tauri
+            plugins/pi
+            crates/maestro-plugin-sdk
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -86,12 +107,8 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      # SDK crate 是独立 package（无 workspace 覆盖），单独跑 fmt 与 clippy；
+      # SDK crate 是独立 package（无 workspace 覆盖），单独跑 clippy；
       # 作为库 crate 不提交 Cargo.lock，故不用 --locked。
-      - name: Format (maestro-plugin-sdk)
-        run: cargo fmt --check
-        working-directory: crates/maestro-plugin-sdk
-
       - name: Clippy (maestro-plugin-sdk)
         run: cargo clippy --all-targets -- -D warnings
         working-directory: crates/maestro-plugin-sdk
