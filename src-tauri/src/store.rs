@@ -1132,6 +1132,31 @@ mod tests {
         );
     }
 
+    /// L1 红线（ADR 0008）：Config 的派生 Debug 内层调用 Provider 的手工 Debug，
+    /// 嵌套渲染同样不得携带 api_key 明文。
+    #[test]
+    fn config_debug_output_never_contains_the_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let maestro_paths = MaestroPaths::new(dir.path());
+        let mut store = Store::new(&maestro_paths);
+        store
+            .create_provider(
+                "openrouter",
+                Provider {
+                    api_key: "sk-config-canary-4b7e".to_owned(),
+                    ..Provider::default()
+                },
+            )
+            .unwrap();
+
+        let rendered = format!("{:?}", store.get().unwrap());
+
+        assert!(
+            !rendered.contains("sk-config-canary-4b7e"),
+            "Config 的 Debug 输出不得包含 api_key：{rendered}"
+        );
+    }
+
     #[test]
     fn corrupt_store_refuses_plugin_writes() {
         let dir = tempfile::tempdir().unwrap();

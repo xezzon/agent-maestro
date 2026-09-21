@@ -23,7 +23,7 @@ pub struct ModelEntry {
 }
 
 /// 一条 LLM API 接入；以 slug 为 key 存于 providers 之下（见 CONTEXT.md）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provider {
     #[serde(default)]
     pub base_url: Endpoints,
@@ -34,6 +34,26 @@ pub struct Provider {
     /// 保序数组：模型 ID 不做字符集限制，且同一 Provider 内不重复（大小写敏感）。
     #[serde(default)]
     pub models: Vec<ModelEntry>,
+}
+
+/// 手工实现 Debug：api_key 渲染为 `<set>`/`<unset>`，绝不携带明文。
+/// `Config` 的派生 `Debug` 内层调用它，因此嵌套在 Config 中的 Provider 同获保护
+/// （ADR 0008：凭证绝不落盘进日志）。
+impl std::fmt::Debug for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Provider")
+            .field("base_url", &self.base_url)
+            .field(
+                "api_key",
+                &if self.api_key.is_empty() {
+                    "<unset>"
+                } else {
+                    "<set>"
+                },
+            )
+            .field("models", &self.models)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +153,26 @@ mod tests {
         );
         let parsed: Provider = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed.api_key, "");
+    }
+
+    /// L1 红线（ADR 0008）：Debug 渲染绝不携带 api_key 明文，只保留
+    /// 「配没配 key」这一排障高频信息。
+    #[test]
+    fn debug_output_never_contains_the_api_key() {
+        let set = Provider {
+            api_key: "sk-secret-canary-9f3a".to_owned(),
+            ..Provider::default()
+        };
+        let rendered = format!("{set:?}");
+
+        assert!(
+            !rendered.contains("sk-secret-canary-9f3a"),
+            "Debug 输出不得包含 api_key：{rendered}"
+        );
+        assert!(rendered.contains("<set>"), "已配置渲染为 <set>：{rendered}");
+        assert!(
+            format!("{:?}", Provider::default()).contains("<unset>"),
+            "未配置渲染为 <unset>"
+        );
     }
 }

@@ -29,6 +29,7 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 ## 使用须知
 
 - **配置以 Maestro 为准**：请始终在 Maestro 中修改配置后重新投影。直接在 Agent 工具里手动改动的配置不会被 Maestro 读取，下次投影时可能被覆盖。
+- **日志仅存本地**：运行日志写入 `~/.maestro/logs/agent-maestro.log`（按 1 MiB 轮转，保留 15 份归档，总占用约 16 MiB 封顶），报障时可直接提供该目录下的文件；日志中绝不包含 API Key。需要更详细的日志时，以环境变量 `MAESTRO_LOG_LEVEL`（`error|warn|info|debug|trace`，默认 `info`）启动应用。
 - **Skills 以符号链接部署**：安装的 Skills 会通过符号链接出现在各工具的 Skills 目录中（Windows 上使用目录联接 Junction，无需管理员权限），请勿手动删除这些链接。
 - 对各 Agent 工具的适配由内置插件（Plugin）提供，第一期包含 Pi、OpenCode、Zed 三个插件。
 

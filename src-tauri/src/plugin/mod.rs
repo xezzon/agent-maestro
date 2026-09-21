@@ -105,6 +105,7 @@ impl PlacedPlugin {
             Ok(()) => {
                 // 替换成功后 staging 已改名为目标目录，交由 TempDir 的清理逻辑空跑。
                 let _ = staging.keep();
+                log::debug!("placed plugin: {}", self.plugin_dir.display());
                 Ok(())
             }
             // 替换失败：staging 仍留在磁盘上，随 TempDir 一并清理。
@@ -269,14 +270,14 @@ impl PluginService {
             let store_guard = match store.read() {
                 Ok(guard) => guard,
                 Err(_) => {
-                    eprintln!("failed to lock store during plugin startup");
+                    log::error!("failed to lock store during plugin startup");
                     return;
                 }
             };
             match store_guard.list_plugins() {
                 Ok(plugin_entries) => plugin_entries,
                 Err(_) => {
-                    eprintln!("failed to list plugins from store during plugin startup");
+                    log::error!("failed to list plugins from store during plugin startup");
                     return;
                 }
             }
@@ -311,7 +312,7 @@ impl PluginService {
         }
 
         if let Err(err) = self.entries.write().map(|mut entries| *entries = plugins) {
-            eprintln!("failed to lock plugin registry during startup: {err}");
+            log::error!("failed to lock plugin registry during startup: {err}");
             return;
         }
 
@@ -324,7 +325,7 @@ impl PluginService {
 
         for builtin_source in missing_builtins {
             if let Err(err) = self.add_plugin(store, builtin_source) {
-                eprintln!("failed to install builtin plugin {builtin_source}: {err}");
+                log::warn!("failed to install builtin plugin {builtin_source}: {err}");
             }
         }
     }
@@ -447,6 +448,7 @@ impl PluginService {
     /// 内置来源直接取内嵌字节（见 ADR 0004）。
     fn fetch_placed(&self, source: &str) -> Result<PlacedPlugin, String> {
         let source_kind = SourceKind::from_source(source).ok_or("unknown source kind")?;
+        log::debug!("fetching plugin artifacts: source={source}");
 
         let raw_manifest = match source_kind {
             SourceKind::Https => {
@@ -609,6 +611,7 @@ impl PluginService {
         };
 
         for (id, loaded_plugin) in loaded {
+            log::debug!("projecting providers: id={id}");
             let report = match loaded_plugin
                 .instantiate_component(&self.engine)
                 .and_then(|mut instantiated| instantiated.write_provider(providers))
@@ -1512,6 +1515,48 @@ mod tests {
         assert_eq!(
             by_id.get("pierr").unwrap().reason.as_deref(),
             Some("配置已损坏")
+        );
+    }
+
+    /// L2 金丝雀（ADR 0008）：以带唯一 canary key 的 provider 跑真实投影路径
+    /// （内置 pi 组件实例化 + 写投影），安装捕获 logger 断言全部捕获输出不含
+    /// 该值——把「api_key 绝不进日志」变成可执行断言。
+    #[test]
+    fn projection_path_never_logs_the_api_key() {
+        use crate::provider::Endpoints;
+
+        let logs = crate::logging::capture::captured_logs();
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        service.startup(&store);
+
+        let canary = "sk-canary-1eaf9c0b";
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                api_key: canary.to_owned(),
+                base_url: Endpoints {
+                    openai_completions: Some("https://api.example.com/v1".to_owned()),
+                    ..Endpoints::default()
+                },
+                ..Provider::default()
+            },
+        )]);
+
+        let reports = service.write_providers(&providers).unwrap();
+
+        assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+        let logs = logs.lock().unwrap();
+        // 先证捕获 logger 确实覆盖了这条真实投影路径，canary 断言才有意义。
+        assert!(
+            logs.iter()
+                .any(|line| line.ends_with("projecting providers: id=pi")),
+            "捕获输出应包含投影步骤的 DEBUG 行：{logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|line| line.contains(canary)),
+            "api_key 绝不进入日志输出：{logs:?}"
         );
     }
 

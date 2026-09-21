@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use tauri::State;
 
+use super::log_outcome;
 use crate::{
     AppStore,
     provider::{Endpoints, ModelEntry, Provider},
@@ -39,9 +40,13 @@ impl From<ProviderRequest> for Provider {
 
 #[tauri::command]
 pub fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provider>, String> {
-    let guard = store.read()?;
-    let config = guard.get()?;
-    Ok(config.providers.clone())
+    let outcome = (|| -> Result<BTreeMap<String, Provider>, String> {
+        let guard = store.read()?;
+        let config = guard.get()?;
+        Ok(config.providers.clone())
+    })();
+    log_outcome("list_providers", "", &outcome);
+    outcome
 }
 
 #[tauri::command]
@@ -49,12 +54,14 @@ pub fn create_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
-    let mut guard = store.write()?;
-
     let slug = provider.slug.clone();
-
-    guard.create_provider(&slug, provider.into())?;
-    Ok(())
+    let context = format!("slug={slug}");
+    let outcome = (move || {
+        let mut guard = store.write()?;
+        Ok(guard.create_provider(&slug, provider.into())?)
+    })();
+    log_outcome("create_provider", &context, &outcome);
+    outcome
 }
 
 #[tauri::command]
@@ -62,20 +69,26 @@ pub fn update_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
-    let mut guard = store.write()?;
-
     let slug = provider.slug.clone();
-
-    guard.update_provider(&slug, provider.into())?;
-    Ok(())
+    let context = format!("slug={slug}");
+    let outcome = (move || {
+        let mut guard = store.write()?;
+        guard.update_provider(&slug, provider.into())?;
+        Ok(())
+    })();
+    log_outcome("update_provider", &context, &outcome);
+    outcome
 }
 
 #[tauri::command]
 pub fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
-    let mut guard = store.write()?;
-
-    guard.delete_provider(&slug)?;
-    Ok(())
+    let outcome = (|| {
+        let mut guard = store.write()?;
+        guard.delete_provider(&slug)?;
+        Ok(())
+    })();
+    log_outcome("delete_provider", &format!("slug={slug}"), &outcome);
+    outcome
 }
 
 #[cfg(test)]
