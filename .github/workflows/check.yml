@@ -44,6 +44,10 @@ jobs:
     defaults:
       run:
         working-directory: src-tauri
+    env:
+      # CI 不需要增量编译：job 内 clippy 与 test 用不同驱动与参数、互不共享产物，
+      # 跨运行靠缓存。关掉它能省下 target/debug 里那一大块增量数据，恢复与保存都更快。
+      CARGO_INCREMENTAL: "0"
     steps:
       # 插件 wasm 在宿主构建（build.rs）时编译，会运行插件的 Cargo build scripts，
       # 不得保留 GITHUB_TOKEN 凭据。
@@ -62,20 +66,42 @@ jobs:
           rustc --version
           cargo --version
 
-      - uses: actions/cache@v6
+      # 缓存约定（与 Release 工作流的同名字段互补，见 ADR 0009）：
+      # - cargo home 条目跨平台共享，不带 os/arch 前缀：registry 里是 `.crate` 源码包，
+      #   与 rustc 版本和平台都无关；本工作流在 push 到 main 时持续续它的 TTL（7 天不访问即驱逐），
+      #   各平台的 Release 都读它。跨 OS 恢复还须在缓存步骤上开 `enableCrossOsArchive`：
+      #   该输入默认 false、只允许同 OS 恢复归档，不开则 Windows 永远读不到 Linux 写出的条目。
+      # - 产物条目按 profile 分开（本工作流 `cargo-test-`，Release 用 `cargo-release-`）：
+      #   两边的 target 目录内容互不通用，而 actions/cache 在主键精确命中时会跳过保存 ——
+      #   共用一个 key 会让先跑的一方把另一方的产物永久挡在缓存之外。
+      # - 产物 key 里除 Cargo.lock 哈希还有 rust-toolchain.toml 哈希：只升工具链时换新 key，
+      #   避免「恢复旧产物 → 全量重编 → 保存又被跳过」的死循环。
+      # - restore-keys 收窄到本平台本 profile：Cargo.lock 变化后仍能部分复用旧产物。
+      - name: Cache cargo home
+        uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-home-
+          # home 条目按设计跨平台共享，而 actions/cache 默认只恢复同 OS 的归档。
+          enableCrossOsArchive: true
+
+      - name: Cache build artifacts
+        uses: actions/cache@v6
+        with:
+          # 刻意不含 crates/maestro-plugin-sdk/target/：SDK 的 Cargo.lock 未纳入版本控制
+          # （库 crate 不提交 lock），key 里只能放它的 Cargo.toml 哈希 —— 那是依赖范围而非
+          # 解析结果，传递依赖发一个 patch 版就让缓存内容追不上；而 key 不变时保存会被跳过，
+          # 缓存于是长期停留在过期状态。它的冷编代价约 1 分钟，不值得为此加机制。
+          path: |
             src-tauri/target/
             # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
             plugins/pi/target/
-          # key 与 Release 工作流保持一致：tag 触发的 Release 运行可读取默认分支
-          # （本工作流 push 到 main 时）保存的缓存。os/arch 前缀区分平台。
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-test-
 
       - name: Format
         run: cargo fmt --check

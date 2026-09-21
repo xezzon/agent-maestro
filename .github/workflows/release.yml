@@ -1,8 +1,11 @@
 name: Release
 
+# 只保留手动触发：tag 触发的运行写出的缓存属于该 tag 自身，其它 tag 与 main 都读不到，
+# 于是每次发布都要全量冷编。改为从 main 手动触发后，缓存的读写都落在 main 作用域，
+# release profile 的产物才能在两次发布之间复用（理由与取舍见 ADR 0009）。
+# 发布流程：提交版本号（tauri.conf.json）→ 在 main 上手动运行本工作流 →
+# tauri-action 在 main HEAD 建 tag `v__VERSION__` 并挂 draft release → 人工校验产物后 publish。
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 concurrency:
@@ -15,14 +18,17 @@ permissions:
 jobs:
   release:
     name: Release (${{ matrix.platform }})
+    # 分支守卫：本 job 绑定的 `release` 环境在仓库设置里只允许从 main 部署（自定义分支策略），
+    # 且禁用了 admin 绕过。从其它 ref 手动触发会在这一步被拒，不会创建 tag。
+    # 该环境必须先配好再合并本改动：工作流引用不存在的环境时 GitHub 会自动创建它，
+    # 那是一个没有任何规则的裸环境，守卫会静默失效。
+    environment: release
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest' # for Arm based macs (M1 and above).
-            args: '--target aarch64-apple-darwin'
-          - platform: 'macos-latest' # for Intel based macs.
-            args: '--target x86_64-apple-darwin'
+          - platform: 'macos-latest' # Universal binary: Intel + Apple Silicon.
+            args: '--target universal-apple-darwin'
           - platform: 'ubuntu-latest'
             args: ''
           - platform: 'ubuntu-24.04-arm' # Only available in public repos; ARM 没有 ubuntu-latest-arm 滚动标签。
@@ -47,9 +53,9 @@ jobs:
         with:
           node-version: lts/*
 
-      # 仅 Intel mac 产物需要跨编译 target；macos-latest 宿主默认已含 aarch64-apple-darwin。
-      - name: Install Rust target (Intel mac)
-        if: matrix.platform == 'macos-latest' && contains(matrix.args, 'x86_64')
+      # universal 目标要求两个 arch 的 std：宿主（arm64）自带 aarch64-apple-darwin，仅需补 Intel。
+      - name: Install Rust target (macOS universal)
+        if: runner.os == 'macOS'
         run: rustup target add x86_64-apple-darwin
 
       - name: Install Tauri Linux dependencies
@@ -59,22 +65,38 @@ jobs:
           # xdg-utils（xdg-open）是 AppImage 打包的必需项；ARM 镜像（ubuntu-24.04-arm）可能未预装。
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
 
-      # key 与 Check 工作流保持一致：tag 触发的运行可读取默认分支作用域的缓存，
-      # 从而直接复用 Check 在 main 上保存的缓存（tag 之间互不可见）。
-      # os/arch 前缀用于区分 matrix 中两个共用 macos-latest 的条目（ARM64 / X64）。
-      # restore-keys 使 Cargo.lock 变化后仍能部分复用旧缓存。
-      - uses: actions/cache@v6
+      # 缓存约定（与 Check 工作流的同名字段互补，见 ADR 0009）：
+      # - cargo home 条目跨平台共享，不带 os/arch 前缀：registry 里是 `.crate` 源码包，
+      #   与 rustc 版本和平台都无关；Check 在 main 上的推送持续续它的 TTL（7 天不访问即驱逐），
+      #   各平台的 Release 都读它。跨 OS 恢复还须在缓存步骤上开 `enableCrossOsArchive`：
+      #   该输入默认 false、只允许同 OS 恢复归档，不开则 Windows 永远读不到 Linux 写出的条目。
+      # - 产物条目按 profile 分开（本工作流 `cargo-release-`，Check 用 `cargo-test-`）：
+      #   两边的 target 目录内容互不通用，而 actions/cache 在主键精确命中时会跳过保存 ——
+      #   共用一个 key 会让先跑的一方把另一方的产物永久挡在缓存之外。
+      # - 产物 key 里除 Cargo.lock 哈希还有 rust-toolchain.toml 哈希：只升工具链时换新 key，
+      #   避免「恢复旧产物 → 全量重编 → 保存又被跳过」的死循环。
+      # - restore-keys 收窄到本平台本 profile：Cargo.lock 变化后仍能部分复用旧产物。
+      - name: Cache cargo home
+        uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-home-
+          # home 条目按设计跨平台共享，而 actions/cache 默认只恢复同 OS 的归档。
+          enableCrossOsArchive: true
+
+      - name: Cache release artifacts
+        uses: actions/cache@v6
+        with:
+          path: |
             src-tauri/target/
             # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
             plugins/pi/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-release-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
