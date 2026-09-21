@@ -69,7 +69,8 @@ jobs:
       # 缓存约定（与 Release 工作流的同名字段互补，见 ADR 0009）：
       # - cargo home 条目跨平台共享，不带 os/arch 前缀：registry 里是 `.crate` 源码包，
       #   与 rustc 版本和平台都无关；本工作流在 push 到 main 时持续续它的 TTL（7 天不访问即驱逐），
-      #   各平台的 Release 都读它。
+      #   各平台的 Release 都读它。跨 OS 恢复还须在缓存步骤上开 `enableCrossOsArchive`：
+      #   该输入默认 false、只允许同 OS 恢复归档，不开则 Windows 永远读不到 Linux 写出的条目。
       # - 产物条目按 profile 分开（本工作流 `cargo-test-`，Release 用 `cargo-release-`）：
       #   两边的 target 目录内容互不通用，而 actions/cache 在主键精确命中时会跳过保存 ——
       #   共用一个 key 会让先跑的一方把另一方的产物永久挡在缓存之外。
@@ -85,6 +86,8 @@ jobs:
             ~/.cargo/git/db/
           key: cargo-home-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-home-
+          # home 条目按设计跨平台共享，而 actions/cache 默认只恢复同 OS 的归档。
+          enableCrossOsArchive: true
 
       - name: Cache build artifacts
         uses: actions/cache@v6
