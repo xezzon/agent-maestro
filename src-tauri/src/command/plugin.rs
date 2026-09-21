@@ -1,5 +1,6 @@
 use tauri::{AppHandle, Manager, State};
 
+use super::log_outcome;
 use crate::{
     AppStore,
     plugin::{PluginApplyReport, PluginService, PluginView},
@@ -14,7 +15,9 @@ pub fn list_plugins(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
-    service.list(&store)
+    let outcome = service.list(&store);
+    log_outcome("list_plugins", "", &outcome);
+    outcome
 }
 
 /// 启用/禁用插件。
@@ -25,7 +28,13 @@ pub fn set_plugin_enabled(
     source: String,
     enabled: bool,
 ) -> Result<(), String> {
-    service.set_enabled(&store, &source, enabled)
+    let outcome = service.set_enabled(&store, &source, enabled);
+    log_outcome(
+        "set_plugin_enabled",
+        &format!("source={source} enabled={enabled}"),
+        &outcome,
+    );
+    outcome
 }
 
 /// 添加插件（来源为指向 manifest.json 的 https 地址或本机绝对路径）：获取 manifest 与
@@ -35,20 +44,30 @@ pub fn set_plugin_enabled(
 /// 修复后重新添加即可（见 ADR 0006）。
 #[tauri::command]
 pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
-    on_install_pool(app, move |store, service| {
+    // 安装类命令另加进入行：「有进入、无结果」正是定位卡住的证据（如 #46）。
+    log::info!("add_plugin start: source={source}");
+    // 识别参数在闭包 move 前格式化；payload 本身不进日志。
+    let context = format!("source={source}");
+    let outcome = on_install_pool(app, move |store, service| {
         service.add_plugin(store, &source)
     })
-    .await
+    .await;
+    log_outcome("add_plugin", &context, &outcome);
+    outcome
 }
 
 /// 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，成功才替换落位目录
 /// （失败时旧版本保持可用）。
 #[tauri::command]
 pub async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String> {
-    on_install_pool(app, move |store, service| {
+    log::info!("reload_plugin start: source={source}");
+    let context = format!("source={source}");
+    let outcome = on_install_pool(app, move |store, service| {
         service.reload_plugin(store, &source)
     })
-    .await
+    .await;
+    log_outcome("reload_plugin", &context, &outcome);
+    outcome
 }
 
 /// 移除插件：删配置条目与落位目录（幂等），不联网。
@@ -58,7 +77,9 @@ pub fn remove_plugin(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<(), String> {
-    service.remove_plugin(&store, &source)
+    let outcome = service.remove_plugin(&store, &source);
+    log_outcome("remove_plugin", &format!("source={source}"), &outcome);
+    outcome
 }
 
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，
@@ -71,11 +92,26 @@ pub fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
-    let providers = {
-        let guard = store.read()?;
-        guard.get()?.providers.clone()
-    };
-    service.write_providers(&providers)
+    let outcome = (|| -> Result<Vec<PluginApplyReport>, String> {
+        let providers = {
+            let guard = store.read()?;
+            guard.get()?.providers.clone()
+        };
+        service.write_providers(&providers)
+    })();
+    // 结果行携带逐插件状态摘要（id:status），命令 payload 不进日志。
+    match &outcome {
+        Ok(reports) => {
+            let summary = reports
+                .iter()
+                .map(|report| format!("{}:{}", report.id, report.status))
+                .collect::<Vec<_>>()
+                .join(" ");
+            log::info!("apply_providers ok: {summary}");
+        }
+        Err(reason) => log::error!("apply_providers failed: {reason}"),
+    }
+    outcome
 }
 
 /// 在阻塞线程池执行含网络下载的安装类操作：下载可能持续数秒，

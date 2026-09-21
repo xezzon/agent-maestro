@@ -97,6 +97,7 @@ impl LoadedPlugin {
         linker
             .instantiate_pre(&component)
             .map_err(|e| format!("插件接口不兼容：{e}"))?;
+        log::debug!("plugin validated: id={}", self.manifest.id);
         Ok(())
     }
 
