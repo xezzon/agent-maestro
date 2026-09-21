@@ -21,11 +21,13 @@ function formatReason(reason) {
   }
 }
 
+// `error()` 返回 promise：落盘失败必须就地吞掉，否则未处理拒绝会再次进入
+// `unhandledrejection` 监听、反复调用同一个正在失败的 logger。
 window.addEventListener("error", (event) => {
-  logError(formatReason(event.error ?? event.message));
+  void logError(formatReason(event.error ?? event.message)).catch(() => {});
 });
 window.addEventListener("unhandledrejection", (event) => {
-  logError(formatReason(event.reason));
+  void logError(formatReason(event.reason)).catch(() => {});
 });
 
 ReactDOM.createRoot(document.getElementById("root")).render(
