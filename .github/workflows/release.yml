@@ -19,10 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest' # for Arm based macs (M1 and above).
-            args: '--target aarch64-apple-darwin'
-          - platform: 'macos-latest' # for Intel based macs.
-            args: '--target x86_64-apple-darwin'
+          - platform: 'macos-latest' # Universal binary: Intel + Apple Silicon.
+            args: '--target universal-apple-darwin'
           - platform: 'ubuntu-latest'
             args: ''
           - platform: 'ubuntu-24.04-arm' # Only available in public repos; ARM 没有 ubuntu-latest-arm 滚动标签。
@@ -47,9 +45,9 @@ jobs:
         with:
           node-version: lts/*
 
-      # 仅 Intel mac 产物需要跨编译 target；macos-latest 宿主默认已含 aarch64-apple-darwin。
-      - name: Install Rust target (Intel mac)
-        if: matrix.platform == 'macos-latest' && contains(matrix.args, 'x86_64')
+      # universal 目标要求两个 arch 的 std：宿主（arm64）自带 aarch64-apple-darwin，仅需补 Intel。
+      - name: Install Rust target (macOS universal)
+        if: runner.os == 'macOS'
         run: rustup target add x86_64-apple-darwin
 
       - name: Install Tauri Linux dependencies
@@ -61,7 +59,7 @@ jobs:
 
       # key 与 Check 工作流保持一致：tag 触发的运行可读取默认分支作用域的缓存，
       # 从而直接复用 Check 在 main 上保存的缓存（tag 之间互不可见）。
-      # os/arch 前缀用于区分 matrix 中两个共用 macos-latest 的条目（ARM64 / X64）。
+      # os/arch 前缀区分各平台（macOS ARM64、Linux X64/ARM64、Windows X64）。
       # restore-keys 使 Cargo.lock 变化后仍能部分复用旧缓存。
       - uses: actions/cache@v6
         with:
