@@ -14,10 +14,8 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 
 | 字段 | 必填 | 语义 |
 | --- | --- | --- |
-| `id` | 是 | 插件 id，规则与 Provider slug 一致：`[a-z][a-z0-9-_]*`。它是落位目录名、投影报告与 id 冲突检查的依据。 |
-| `name` | 是 | 插件展示名。 |
-| `tool` | 是 | 适配的工具（如 `pi`），仅用于展示。 |
-| `config_dir` | 是 | 插件被授权写入的配置目录，仅接受 `~/…` 形式（见 [config_dir 安全规则](#config_dir-安全规则)）。 |
+| `id` | 是 | 插件 id，规则与 Provider slug 一致：`[a-z][a-z0-9-_]*`。它是落位目录名、投影报告与 id 冲突检查的依据；界面展示也用它，作者应把 id 命名得足以看出适配哪类工具。 |
+| `config_dir` | 是 | 插件被授权写入的配置目录，以**平台变量前缀 + 相对片段**声明（如 `$HOME/.pi`、`$XDG_CONFIG_HOME/zed`），见 [config_dir 声明语法](#config_dir-声明语法)。 |
 | `entry` | 是 | 入口 wasm 的**回源地址**。约束按来源分列（见下）。 |
 
 `entry` 是回源地址：宿主「重新加载」时据此知道从哪里重新获取 wasm。落位时 manifest 原样保存、`entry` 不重写，本地 wasm 固定存为 `plugin.wasm`，装载只认这个固定名、不解析 `entry`。
@@ -41,9 +39,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 ```json
 {
   "id": "pi",
-  "name": "Pi",
-  "tool": "pi",
-  "config_dir": "~/.pi",
+  "config_dir": "$HOME/.pi",
   "entry": "target/wasm32-wasip2/release/maestro_plugin_pi.wasm"
 }
 ```
@@ -53,9 +49,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 ```json
 {
   "id": "pi",
-  "name": "Pi",
-  "tool": "pi",
-  "config_dir": "~/.pi",
+  "config_dir": "$HOME/.pi",
   "entry": "https://github.com/<owner>/<repo>/releases/download/v1.0.0/plugin.wasm"
 }
 ```

@@ -1,7 +1,5 @@
 {
   "id": "pi",
-  "name": "Pi",
-  "tool": "pi",
-  "config_dir": "~/.pi",
+  "config_dir": "$HOME/.pi",
   "entry": "target/wasm32-wasip2/release/maestro_plugin_pi.wasm"
 }
