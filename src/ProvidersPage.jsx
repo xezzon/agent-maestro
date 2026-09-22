@@ -332,6 +332,8 @@ function ApplyResultList({ reports }) {
                     try {
                       await openPath(report.files[0]);
                     } catch (err) {
+                      // opener 是插件命令，失败不经 Rust 命令层，前端自行落盘（ADR 0008）。
+                      console.error(String(err));
                       message.error(String(err));
                     }
                   }}
