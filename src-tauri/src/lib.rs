@@ -82,9 +82,9 @@ pub fn run() {
             app.manage(AppStore {
                 store: RwLock::new(store),
             });
-            // 插件服务：`~` 无法确定时服务退化为不可用（命令层报错），
-            // 与配置存储的保护状态语义一致。
-            app.manage(PluginService::new(&maestro_paths));
+            // 插件服务：平台目录（`~`、配置/数据目录）不可用时让启动失败，
+            // 与上面主目录缺失的处理一致。
+            app.manage(PluginService::new(&maestro_paths)?);
 
             // logger 已随插件 setup attach：补报降级原因与非法级别值。
             if let Some(reason) = logging::degraded_reason() {

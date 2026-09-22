@@ -10,7 +10,7 @@ use bindings::exports::maestro::plugin::plugin::Protocol as WitProtocol;
 use bindings::exports::maestro::plugin::plugin::{Model as WitModel, Provider as WitProvider};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use wasmtime::{
     Engine, StoreLimits, StoreLimitsBuilder,
     component::{Component, Linker},
@@ -106,7 +106,8 @@ impl LoadedPlugin {
     pub fn instantiate_component(&self, engine: &Engine) -> Result<InstantiatedPlugin, String> {
         let component =
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
-        let tool_path = PathBuf::from(self.manifest.config_dir.as_str());
+        // 预开放的写入面是装载时解析出的宿主绝对路径（见 `resolve_config_dir`）。
+        let tool_path = self.manifest.config_dir.clone();
         let mut store = wasmtime::Store::new(engine, HostState::new(&tool_path)?);
         store.limiter(|s| &mut s.limits);
         store
@@ -201,11 +202,11 @@ fn select_endpoint(provider: &Provider) -> Result<(WitProtocol, String), String>
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use super::*;
     use crate::{
-        plugin::{PlacedPlugin, build_engine, builtin, testutil},
+        plugin::{PlacedPlugin, PlatformDirs, build_engine, builtin, testutil},
         provider::Endpoints,
     };
 
@@ -219,19 +220,23 @@ mod tests {
         }
     }
 
-    /// 已装载的插件：宿主装载时先把 manifest 的 `config_dir` 展开为绝对路径，
-    /// 这里直接用临时目录充当该路径。
-    fn loaded_plugin(config_dir: &Path, wasm: &[u8]) -> LoadedPlugin {
-        let manifest = testutil::manifest_json(
-            "pi",
-            "Pi",
-            "pi",
-            &config_dir.display().to_string(),
-            "plugin.wasm",
+    /// 已装载的插件：走真实装载路径（`PlacedPlugin::load` 解析 `config_dir`）。
+    /// manifest 声明 `$HOME/.pi`，平台基准目录全部指向传入的临时目录，解析结果
+    /// 随插件一并返回——断言对着它写，路径不必硬编码两次。
+    fn loaded_plugin(root: &Path, wasm: &[u8]) -> (LoadedPlugin, PathBuf) {
+        let dirs = PlatformDirs::new(
+            root.to_path_buf(),
+            root.to_path_buf(),
+            root.to_path_buf(),
+            root.to_path_buf(),
+            root.to_path_buf(),
         );
-        PlacedPlugin::new(&config_dir.join("placed"), manifest, wasm)
-            .load()
-            .unwrap()
+        let manifest = testutil::manifest_json("pi", "$HOME/.pi", "plugin.wasm");
+        let loaded = PlacedPlugin::new(&root.join("placed"), manifest, wasm)
+            .load(&dirs)
+            .unwrap();
+        let config_dir = loaded.manifest.config_dir.clone();
+        (loaded, config_dir)
     }
 
     #[test]
@@ -305,11 +310,10 @@ mod tests {
 
     #[test]
     fn instantiate_rejects_bytes_that_are_not_a_component() {
-        let config_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
 
-        let Err(err) = loaded_plugin(config_dir.path(), b"not a wasm component")
-            .instantiate_component(&build_engine())
-        else {
+        let (plugin, _) = loaded_plugin(root.path(), b"not a wasm component");
+        let Err(err) = plugin.instantiate_component(&build_engine()) else {
             panic!("非组件字节不应通过实例化校验");
         };
 
@@ -318,11 +322,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_bytes_that_are_not_a_component() {
-        let config_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
 
-        let Err(err) =
-            loaded_plugin(config_dir.path(), b"not a wasm component").validate(&build_engine())
-        else {
+        let (plugin, _) = loaded_plugin(root.path(), b"not a wasm component");
+        let Err(err) = plugin.validate(&build_engine()) else {
             panic!("非组件字节不应通过 validate");
         };
 
@@ -331,9 +334,10 @@ mod tests {
 
     #[test]
     fn validate_accepts_a_valid_component() {
-        let config_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
 
-        loaded_plugin(config_dir.path(), builtin::PI_WASM)
+        let (plugin, _) = loaded_plugin(root.path(), builtin::PI_WASM);
+        plugin
             .validate(&build_engine())
             .expect("内置 pi 应通过 validate");
     }
@@ -342,14 +346,14 @@ mod tests {
     /// 若实现回退到完整实例化，下面的标记文件会被 init 代码读写。
     #[test]
     fn validate_does_not_touch_the_real_config_dir() {
-        let config_dir = tempfile::tempdir().unwrap();
-        let marker = config_dir.path().join("marker.txt");
+        let root = tempfile::tempdir().unwrap();
+        // 标记文件落在装载解析出的 config_dir 内：正是投影时预开放为组件 `/` 的目录。
+        let (plugin, config_dir) = loaded_plugin(root.path(), builtin::PI_WASM);
+        let marker = config_dir.join("marker.txt");
         let original = "original-content";
         fs::write(&marker, original).unwrap();
 
-        loaded_plugin(config_dir.path(), builtin::PI_WASM)
-            .validate(&build_engine())
-            .expect("validate 应通过");
+        plugin.validate(&build_engine()).expect("validate 应通过");
 
         assert_eq!(
             fs::read_to_string(&marker).unwrap(),
@@ -360,7 +364,7 @@ mod tests {
 
     #[test]
     fn write_provider_projects_into_the_preopened_config_dir() {
-        let config_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
@@ -368,15 +372,14 @@ mod tests {
                 ..provider(Some("https://api.example.com/v1"), None)
             },
         )]);
-        let mut plugin = loaded_plugin(config_dir.path(), builtin::PI_WASM)
-            .instantiate_component(&build_engine())
-            .unwrap();
+        let (plugin, config_dir) = loaded_plugin(root.path(), builtin::PI_WASM);
+        let mut plugin = plugin.instantiate_component(&build_engine()).unwrap();
 
         let (files, _) = plugin.write_provider(&providers).unwrap();
 
         assert_eq!(files, vec!["agent/models.json"]);
         let written: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(config_dir.path().join("agent").join("models.json")).unwrap(),
+            &fs::read_to_string(config_dir.join("agent").join("models.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(written["providers"]["gateway"]["api"], "openai-completions");
@@ -389,10 +392,9 @@ mod tests {
 
     #[test]
     fn wasm_call_is_interrupted_when_fuel_exhausted() {
-        let config_dir = tempfile::tempdir().unwrap();
-        let mut plugin = loaded_plugin(config_dir.path(), builtin::PI_WASM)
-            .instantiate_component(&build_engine())
-            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (plugin, _) = loaded_plugin(root.path(), builtin::PI_WASM);
+        let mut plugin = plugin.instantiate_component(&build_engine()).unwrap();
 
         // 预算归零：第一条 guest 指令即触发 fuel 耗尽中断，调用转错误路径。
         plugin.store.set_fuel(0).unwrap();

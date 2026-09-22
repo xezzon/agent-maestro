@@ -22,8 +22,7 @@ mod tests {
         let manifest = parse_manifest(SourceKind::Builtin, PI_MANIFEST_JSON).unwrap();
 
         assert_eq!(manifest.id, BUILTIN_PI_ID);
-        assert_eq!(manifest.tool, "pi");
-        assert_eq!(manifest.config_dir, "~/.pi");
+        assert_eq!(manifest.config_dir, std::path::PathBuf::from("$HOME/.pi"));
         assert_eq!(
             manifest.entry, "target/wasm32-wasip2/release/maestro_plugin_pi.wasm",
             "entry 指向 cargo 原生产物路径：同一份 manifest 兼作 file 来源本地调试的入口"
