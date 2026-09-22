@@ -14,6 +14,29 @@ use std::sync::RwLock;
 use store::{AppStore, Store};
 use tauri::Manager;
 
+/// 撤销 AppImage 启动脚本对 X11 后端的强制指定（issue #46）。
+///
+/// AppImage 的 AppRun 会无条件 `export GDK_BACKEND=x11`（linuxdeploy-plugin-gtk
+/// 注入的 apprun-hooks，其注释说明这是为了绕开 tauri#8541）。在 Wayland 会话下这会把
+/// 应用按 XWayland 跑，X11 后端下 GTK3 又因会话里存在 `XMODIFIERS`（fcitx5 等输入法
+/// 会设置）而默认选用 XIM 输入法模块——而 WebKitGTK 的 XIM 路径一旦有输入框获得焦点
+/// 就停止出帧：窗口不再重绘、键盘无反应，仅缩放窗口还能刷新，表现为整个应用假死。
+/// `tauri dev` 等启动方式没有这层覆盖（走 Wayland 后端与其输入法路径），故无此问题。
+///
+/// 只在 AppImage + Wayland 会话下动手：X11 会话本就该用 x11 后端，其它启动方式也不该
+/// 覆盖用户自己的选择。
+fn drop_appimage_x11_backend() {
+    if std::env::var_os("APPIMAGE").is_none() || std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return;
+    }
+    if std::env::var("GDK_BACKEND").as_deref() != Ok("x11") {
+        return;
+    }
+    // SAFETY: 在 run() 开头、GTK/WebKit 初始化之前调用，进程仍是单线程，没有其它
+    // 线程并发读写环境变量。
+    unsafe { std::env::remove_var("GDK_BACKEND") };
+}
+
 /// 未捕获 panic 记入日志（含 file:line 与消息），并以 `take_hook()` 链式调用
 /// 原 hook 保住 stderr 默认行为。logger attach 之前的 panic 由原 hook 打到
 /// stderr（`log::error!` 此时尚未生效）。命令层 panic 若无此 hook：IPC 调用
@@ -28,6 +51,8 @@ fn install_panic_hook() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 必须早于 GTK/WebKit 初始化（后端在首次打开 GDK 显示时定下）。
+    drop_appimage_x11_backend();
     install_panic_hook();
     let maestro_paths = dirs::home_dir().map(|home| paths::MaestroPaths::new(&home));
 
