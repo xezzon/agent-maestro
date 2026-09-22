@@ -14,8 +14,10 @@ import {
   Spin,
   Switch,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
+import { FolderOpenOutlined } from "@ant-design/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
@@ -85,12 +87,15 @@ function PluginCard({ plugin, onReload }) {
         {plugin.config_dir && (
           <span>
             写入目录：{plugin.config_dir}{" "}
-            <Button
-              size="small"
-              onClick={() => openConfigDir(plugin.config_dir)}
-            >
-              打开文件夹
-            </Button>
+            <Tooltip title="打开文件夹">
+              <Button
+                size="small"
+                shape="circle"
+                aria-label="打开文件夹"
+                icon={<FolderOpenOutlined />}
+                onClick={() => openConfigDir(plugin.config_dir)}
+              />
+            </Tooltip>
           </span>
         )}
       </div>
