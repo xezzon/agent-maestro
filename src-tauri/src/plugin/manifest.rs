@@ -217,29 +217,31 @@ pub fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
     if relative.as_os_str().is_empty() {
         return Err(format!("config_dir「{declared}」缺少相对片段"));
     }
-    // 相对片段必须始终落在基准目录内部：绝对路径（`$HOME//etc`）与 `..` 上跳
-    // 在校验期拒绝，不依赖后面的规范化回退。
+    // 相对片段必须始终落在基准目录内部：绝对路径（`$HOME//etc`）、`..` 上跳与裸 `.
+    // `在同一条路径上拒绝，不依赖后面的规范化回退。裸 `.` 单列是因为它把基准目录整盘交出去。
     if relative.components().any(|component| {
         matches!(
             component,
-            Component::RootDir | Component::Prefix(_) | Component::ParentDir
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir | Component::CurDir
         )
     }) {
         return Err(format!(
-            "config_dir「{declared}」的相对片段不得是绝对路径，也不得包含「..」"
+            "config_dir「{declared}」的相对片段不得是绝对路径，也不得包含「..」或「.」"
         ));
     }
 
     let dir = base.join(relative);
     fs::create_dir_all(&dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
     // 目录可能是符号链接：以规范化后的真实路径确认它仍在基准目录内。
+    // 必须严格子代——相等（裸 `.` 经过上面那个检查已被拒；但以防万一把这一道关补上）
+    // 也视为逃逸，避免把整盘基准目录交出去。
     let canonical_base = base
         .canonicalize()
         .map_err(|e| format!("解析平台基准目录失败：{e}"))?;
     let canonical = dir
         .canonicalize()
         .map_err(|e| format!("解析插件配置目录失败：{e}"))?;
-    if !canonical.starts_with(&canonical_base) {
+    if canonical == canonical_base || !canonical.starts_with(&canonical_base) {
         return Err(format!("config_dir「{declared}」逃逸了基准目录"));
     }
     Ok(canonical)
@@ -472,6 +474,10 @@ mod tests {
             ("$HOME//etc/passwd", "不得是绝对路径"),
             ("$HOME/.x/../../etc", "不得包含「..」"),
             ("$XDG_CONFIG_HOME/../x", "不得包含「..」"),
+            // 裸「.」与「./x」：和 `..` 一起列入拒绝形态。裸 `.` 单独放行会把整盘
+            // 基准目录交出去（`canonical == canonical_base` 也得拒）。
+            ("$HOME/.", "或「.」"),
+            ("$HOME/./x", "或「.」"),
         ] {
             let err = resolve_config_dir(declared).unwrap_err();
             assert!(err.contains(expected), "{declared} 应被拒绝：{err}");
@@ -493,6 +499,23 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), home.join("link")).unwrap();
 
         let err = resolve_config_dir("$HOME/link").unwrap_err();
+
+        assert!(err.contains("逃逸了基准目录"), "{err}");
+    }
+
+    /// 严格子代判定：基准目录内放一个指向基准目录自身的 symlink 即便路径段形态合法
+    /// （不是 `.`、`..`、绝对路径），规范化后仍会落到基准目录本身——必须判逃逸。
+    #[cfg(unix)]
+    #[test]
+    fn config_dir_rejects_a_path_that_canonicalizes_to_the_base_dir_itself() {
+        let (root, _g) = platform_dirs_setup();
+        let home = root.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        // `home/loop` 是指向 `home` 的 symlink。`$HOME/loop` 形态合法但规范化后
+        // 就是基准目录本身——形态校验放行，逃逸校验必须兜住。
+        std::os::unix::fs::symlink(&home, home.join("loop")).unwrap();
+
+        let err = resolve_config_dir("$HOME/loop").unwrap_err();
 
         assert!(err.contains("逃逸了基准目录"), "{err}");
     }

@@ -54,9 +54,6 @@ pub fn run() {
     // 必须早于 GTK/WebKit 初始化（后端在首次打开 GDK 显示时定下）。
     drop_appimage_x11_backend();
     install_panic_hook();
-    if let Some(home) = dirs::home_dir() {
-        paths::MaestroPaths::init(&home);
-    }
 
     let builder = tauri::Builder::default();
     // 单实例运行：配置文件由唯一进程独占，避免多进程读-改-写相互覆盖 Provider。
@@ -78,6 +75,12 @@ pub fn run() {
         // 添加插件对话框用它选择本机 manifest.json（file 来源）。
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            // 主目录是 MaestroPaths 与 PlatformDirs 的共同基底。setup 之前 logger
+            // 已经能优雅地降级到 Stdout（`logging::attach` 看 `try_get`），所以这里
+            // 把 home 解析放到第一次真正消费它的时机：缺失就同 `service.startup`
+            // 一样用 `?` 抛出，让启动以失败退出，而不是悄悄跳过 init 后让下游 panic。
+            let home = dirs::home_dir().ok_or_else(|| "无法解析主目录".to_owned())?;
+            paths::MaestroPaths::init(&home);
             let store = Store::new();
             app.manage(AppStore {
                 store: RwLock::new(store),
