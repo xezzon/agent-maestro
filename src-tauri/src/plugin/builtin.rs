@@ -19,11 +19,22 @@ mod tests {
 
     #[test]
     fn embedded_pi_manifest_is_valid_and_matches_builtin_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = crate::plugin::PlatformDirs::new(
+            root.path().to_path_buf(),
+            root.path().join(".config"),
+            root.path().join(".config"),
+            root.path().join(".local/share"),
+            root.path().join(".local/share"),
+        );
+        let _g = crate::plugin::PlatformDirs::test_guard(dirs);
         let manifest = parse_manifest(SourceKind::Builtin, PI_MANIFEST_JSON).unwrap();
 
         assert_eq!(manifest.id, BUILTIN_PI_ID);
-        assert_eq!(manifest.tool, "pi");
-        assert_eq!(manifest.config_dir, "~/.pi");
+        assert_eq!(
+            manifest.config_dir,
+            root.path().canonicalize().unwrap().join(".pi")
+        );
         assert_eq!(
             manifest.entry, "target/wasm32-wasip2/release/maestro_plugin_pi.wasm",
             "entry 指向 cargo 原生产物路径：同一份 manifest 兼作 file 来源本地调试的入口"

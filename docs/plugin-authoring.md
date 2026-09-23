@@ -14,11 +14,11 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 
 | 字段 | 必填 | 语义 |
 | --- | --- | --- |
-| `id` | 是 | 插件 id，规则与 Provider slug 一致：`[a-z][a-z0-9-_]*`。它是落位目录名、投影报告与 id 冲突检查的依据。 |
-| `name` | 是 | 插件展示名。 |
-| `tool` | 是 | 适配的工具（如 `pi`），仅用于展示。 |
-| `config_dir` | 是 | 插件被授权写入的配置目录，仅接受 `~/…` 形式（见 [config_dir 安全规则](#config_dir-安全规则)）。 |
+| `id` | 是 | 插件 id，规则与 Provider slug 一致：`[a-z][a-z0-9-_]*`。它是落位目录名、投影报告与 id 冲突检查的依据；界面展示也用它，作者应把 id 命名得足以看出适配哪类工具。 |
+| `config_dir` | 是 | 插件被授权写入的配置目录，以**平台变量前缀 + 相对片段**声明（如 `$HOME/.pi`、`$XDG_CONFIG_HOME/zed`），见 [config_dir 声明语法](#config_dir-声明语法)。 |
 | `entry` | 是 | 入口 wasm 的**回源地址**。约束按来源分列（见下）。 |
+
+`config_dir` 是一个**目录**：宿主按当前平台把它解析为绝对路径，并在投影时预开放为组件内的 `/`（插件唯一的写入面）。因此组件里写 `/agent/models.json` 就等于写 `config_dir/agent/models.json`。
 
 `entry` 是回源地址：宿主「重新加载」时据此知道从哪里重新获取 wasm。落位时 manifest 原样保存、`entry` 不重写，本地 wasm 固定存为 `plugin.wasm`，装载只认这个固定名、不解析 `entry`。
 
@@ -41,9 +41,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 ```json
 {
   "id": "pi",
-  "name": "Pi",
-  "tool": "pi",
-  "config_dir": "~/.pi",
+  "config_dir": "$HOME/.pi",
   "entry": "target/wasm32-wasip2/release/maestro_plugin_pi.wasm"
 }
 ```
@@ -53,9 +51,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 ```json
 {
   "id": "pi",
-  "name": "Pi",
-  "tool": "pi",
-  "config_dir": "~/.pi",
+  "config_dir": "$HOME/.pi",
   "entry": "https://github.com/<owner>/<repo>/releases/download/v1.0.0/plugin.wasm"
 }
 ```
@@ -110,12 +106,25 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 
 ## 安全规则与沙箱
 
-### config_dir 安全规则
+### config_dir 声明语法
 
-- 只接受 `~/` 开头的相对路径（展开为主目录下的路径），且 `~` 后不能为空。
-- 禁止 `..`。
-- 目录不存在时宿主先创建；创建后按规范化的真实路径确认仍在主目录内，借符号链接逃逸同样被拒。
+`config_dir` = **平台变量前缀** + `/` + **相对片段**。变量按当前平台解析为该变量对应的基准目录，相对片段拼在其后——同一份声明因此在各平台各得其所（`$XDG_CONFIG_HOME/zed` 在 Linux 是 `~/.config/zed`、在 macOS 是 `~/Library/Application Support/zed`、在 Windows 是 `%APPDATA%\zed`）：
+
+| 变量 | 含义 |
+| --- | --- |
+| `$HOME`（或 `~`，同义） | 主目录 |
+| `$XDG_CONFIG_HOME` | 平台配置目录（Linux 遵循 XDG 环境变量，默认 `~/.config`；macOS `~/Library/Application Support`；Windows `%APPDATA%`） |
+| `$LOCAL_APP_CONFIG` | 同上的「本地」变体（Windows `%LOCALAPPDATA%`，其余平台同上） |
+| `$XDG_DATA_HOME` | 平台数据目录（Linux `~/.local/share`；macOS `~/Library/Application Support`；Windows `%APPDATA%`） |
+| `$LOCAL_APP_DATA` | 同上的「本地」变体（Windows `%LOCALAPPDATA%`，其余平台同上） |
+
+规则与拒绝项：
+
+- 变量必须在最前、且是上表之一；变量之后必须有非空的相对片段（只写 `$HOME` 不算）。
+- 相对片段不得是绝对路径、不得含 `..`、不得含裸 `.`（`$HOME/.`、`$HOME/./x` 这类与基准目录重合的写法被拒——把整盘 `$HOME` 交出去不在合同范围内）。
+- 目录不存在时宿主先创建；创建后按规范化的真实路径确认仍**严格落**在该变量对应的基准目录内（与基准目录相等同样视为逃逸），借符号链接逃逸也在这道关里被拒。
 - 违规即 manifest 校验失败：不落位、不写配置条目，界面直接显示原因。
+- 不提供 cache 目录变量（当前没有工具需要写缓存）。
 
 ### 沙箱边界
 

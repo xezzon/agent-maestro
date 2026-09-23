@@ -2,7 +2,7 @@
 //!
 //! 只依赖 `maestro-plugin-sdk`（`maestro:plugin` 合同的类型化绑定，见 issue #41），
 //! 实现 SDK re-export 的 `Guest` trait；本插件兼作 SDK 的常驻契约验证与插件作者的
-//! 参考实现。宿主把 manifest 声明的 config_dir（pi 即 `~/.pi`）预开放为 "/"，
+//! 参考实现。宿主把 manifest 声明的 config_dir（pi 即 `$HOME/.pi`）预开放为 "/"，
 //! 插件以相对路径写入文件，整文件重写，保证已删除的 Provider 不残留。
 
 use std::fs;

@@ -14,9 +14,12 @@ import {
   Spin,
   Switch,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
+import { FolderOpenOutlined } from "@ant-design/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import {
   addPlugin,
   listPlugins,
@@ -48,9 +51,20 @@ function PluginCard({ plugin, onReload }) {
     }
   }
 
+  /** 打开插件的写入目录：交给系统文件管理器，失败只提示不改页面状态。 */
+  async function openConfigDir(path) {
+    try {
+      await openPath(path);
+    } catch (err) {
+      // opener 是插件命令，失败不经 Rust 命令层，前端自行落盘（ADR 0008）。
+      console.error(String(err));
+      message.error(String(err));
+    }
+  }
+
   const title = (
     <Flex justify="space-between" align="center">
-      <Typography.Text strong>{plugin.name || plugin.source}</Typography.Text>
+      <Typography.Text strong>{plugin.id || plugin.source}</Typography.Text>
       <Switch
         checked={plugin.enabled}
         checkedChildren="启用"
@@ -72,8 +86,20 @@ function PluginCard({ plugin, onReload }) {
             {plugin.source}
           </Typography.Text>
         </span>
-        {plugin.tool && <span>适配工具：{plugin.tool}</span>}
-        {plugin.config_dir && <span>写入目录：{plugin.config_dir}</span>}
+        {plugin.config_dir && (
+          <span>
+            写入目录：{plugin.config_dir}{" "}
+            <Tooltip title="打开文件夹">
+              <Button
+                size="small"
+                shape="circle"
+                aria-label="打开文件夹"
+                icon={<FolderOpenOutlined />}
+                onClick={() => openConfigDir(plugin.config_dir)}
+              />
+            </Tooltip>
+          </span>
+        )}
       </div>
       {plugin.error ? (
         <Alert
