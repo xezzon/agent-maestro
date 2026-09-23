@@ -54,7 +54,9 @@ pub fn run() {
     // 必须早于 GTK/WebKit 初始化（后端在首次打开 GDK 显示时定下）。
     drop_appimage_x11_backend();
     install_panic_hook();
-    let maestro_paths = dirs::home_dir().map(|home| paths::MaestroPaths::new(&home));
+    if let Some(home) = dirs::home_dir() {
+        paths::MaestroPaths::init(&home);
+    }
 
     let builder = tauri::Builder::default();
     // 单实例运行：配置文件由唯一进程独占，避免多进程读-改-写相互覆盖 Provider。
@@ -69,22 +71,18 @@ pub fn run() {
     }));
     // 日志设施（ADR 0008）：注册前对日志目录写探测，文件目标不可用时只装
     // Stdout，写不出日志绝不阻断启动。
-    let builder = logging::attach(builder, maestro_paths.as_ref());
+    let builder = logging::attach(builder);
 
     builder
         .plugin(tauri_plugin_opener::init())
         // 添加插件对话框用它选择本机 manifest.json（file 来源）。
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            let maestro_paths =
-                maestro_paths.ok_or_else(|| "无法确定用户主目录（HOME）".to_owned())?;
-            let store = Store::new(&maestro_paths);
+            let store = Store::new();
             app.manage(AppStore {
                 store: RwLock::new(store),
             });
-            // 插件服务：平台目录（`~`、配置/数据目录）不可用时让启动失败，
-            // 与上面主目录缺失的处理一致。
-            app.manage(PluginService::new(&maestro_paths)?);
+            app.manage(PluginService::new());
 
             // logger 已随插件 setup attach：补报降级原因与非法级别值。
             if let Some(reason) = logging::degraded_reason() {
@@ -95,10 +93,11 @@ pub fn run() {
             }
 
             // 启动时从配置条目重建注册表，并补装缺失的内置插件（落位 + 写条目，
-            // 与其余来源同一安装管线；不联网，离线可用）。
+            // 与其余来源同一安装管线；不联网，离线可用）。平台目录不可用时让
+            // 启动失败，与主目录缺失的处理一致。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
-            service.startup(&app_store);
+            service.startup(&app_store)?;
             match app_store.read() {
                 Ok(guard) => match guard.get() {
                     Ok(config) => log::info!(

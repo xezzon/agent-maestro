@@ -104,10 +104,10 @@ pub struct Store {
 }
 
 impl Store {
-    /// 从 `maestro_paths` 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
+    /// 从全局 [`MaestroPaths`] 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
     /// 损坏则进入保护状态。
-    pub fn new(maestro_paths: &MaestroPaths) -> Self {
-        let config_path = maestro_paths.config_path();
+    pub fn new() -> Self {
+        let config_path = MaestroPaths::get().config_path();
         let state = match fs::read_to_string(&config_path) {
             Ok(text) => Self::parse(&config_path, &text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -399,8 +399,8 @@ mod tests {
     #[test]
     fn missing_file_opens_as_empty_config() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let store = Store::new();
 
         assert_eq!(store.get().unwrap(), &Config::default());
         assert!(store.get().unwrap().providers.is_empty());
@@ -409,8 +409,8 @@ mod tests {
     #[test]
     fn create_provider_persists_and_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         store
             .create_provider(
@@ -426,7 +426,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         let provider = &reopened.get().unwrap().providers["ollama"];
         assert_eq!(
             provider.base_url.openai_completions,
@@ -440,8 +440,8 @@ mod tests {
     #[test]
     fn update_provider_persists_and_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
         store
             .create_provider(
                 "ollama",
@@ -470,7 +470,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         let provider = &reopened.get().unwrap().providers["ollama"];
         assert_eq!(
             provider.base_url.openai_completions,
@@ -484,8 +484,8 @@ mod tests {
     #[test]
     fn update_provider_missing_slug_is_rejected_without_upsert() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         let err = store
             .update_provider(
@@ -504,7 +504,7 @@ mod tests {
         assert!(String::from(err).contains("ghost"));
         assert!(store.get().unwrap().providers.is_empty());
         assert!(
-            !maestro_paths.config_path().exists(),
+            !MaestroPaths::get().config_path().exists(),
             "报错路径不得静默写入文件"
         );
     }
@@ -512,8 +512,8 @@ mod tests {
     #[test]
     fn update_provider_replaces_api_key_with_whole_record() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
         store
             .create_provider(
                 "ollama",
@@ -573,17 +573,17 @@ mod tests {
             "api_key 为空串即清除凭证"
         );
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         assert_eq!(reopened.get().unwrap().providers["ollama"].api_key, "");
     }
 
     #[test]
     fn delete_provider_removes_record_with_models_and_api_key() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
         fs::write(
-            maestro_paths.config_path(),
+            MaestroPaths::get().config_path(),
             r#"{
                 "version": 1,
                 "providers": {
@@ -601,11 +601,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let mut store = Store::new(&maestro_paths);
+        let mut store = Store::new();
 
         store.delete_provider("openrouter").unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         assert!(
             reopened.get().unwrap().providers.is_empty(),
             "删除后不留孤儿数据：端点、模型与 API Key 随记录一并移除"
@@ -615,8 +615,8 @@ mod tests {
     #[test]
     fn delete_provider_missing_slug_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         let err = store.delete_provider("ghost").unwrap_err();
 
@@ -627,8 +627,8 @@ mod tests {
     #[test]
     fn deleted_slug_can_be_recreated() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
         store
             .create_provider(
                 "ollama",
@@ -658,7 +658,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         let provider = &reopened.get().unwrap().providers["ollama"];
         assert_eq!(
             provider.base_url.anthropic_messages,
@@ -671,8 +671,8 @@ mod tests {
     #[test]
     fn persisted_file_omits_unconfigured_protocol_slots() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         store
             .create_provider(
@@ -688,7 +688,7 @@ mod tests {
             )
             .unwrap();
 
-        let text = fs::read_to_string(maestro_paths.config_path()).unwrap();
+        let text = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
         assert!(text.contains(r#""openai-completions""#));
         assert!(
             !text.contains(r#""anthropic-messages""#),
@@ -699,8 +699,8 @@ mod tests {
     #[test]
     fn providers_are_written_sorted_by_slug() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         for slug in ["zeta", "alpha", "midway"] {
             store
@@ -718,7 +718,7 @@ mod tests {
                 .unwrap();
         }
 
-        let text = fs::read_to_string(maestro_paths.config_path()).unwrap();
+        let text = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
         let alpha = text.find("\"alpha\"").unwrap();
         let midway = text.find("\"midway\"").unwrap();
         let zeta = text.find("\"zeta\"").unwrap();
@@ -728,8 +728,8 @@ mod tests {
     #[test]
     fn multiple_providers_round_trip_through_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         store
             .create_provider(
@@ -760,7 +760,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         let config = reopened.get().unwrap();
         assert_eq!(config.providers.len(), 2);
         assert_eq!(
@@ -776,10 +776,10 @@ mod tests {
     #[test]
     fn create_provider_preserves_other_providers_models_and_endpoints() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
         fs::write(
-            maestro_paths.config_path(),
+            MaestroPaths::get().config_path(),
             r#"{
                 "version": 1,
                 "providers": {
@@ -798,7 +798,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let mut store = Store::new(&maestro_paths);
+        let mut store = Store::new();
 
         store
             .create_provider(
@@ -814,7 +814,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         let openrouter = &reopened.get().unwrap().providers["openrouter"];
         assert_eq!(openrouter.api_key, "sk-live");
         assert_eq!(openrouter.models.len(), 2);
@@ -833,16 +833,16 @@ mod tests {
     #[test]
     fn corrupt_file_reports_error_with_path_and_refuses_writes() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
-        fs::write(maestro_paths.config_path(), "不是 JSON {{{").unwrap();
-        let original = fs::read_to_string(maestro_paths.config_path()).unwrap();
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+        fs::write(MaestroPaths::get().config_path(), "不是 JSON {{{").unwrap();
+        let original = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
 
-        let mut store = Store::new(&maestro_paths);
+        let mut store = Store::new();
 
         let err = store.get().unwrap_err();
         assert!(matches!(err, StoreError::Corrupt { .. }));
-        assert!(String::from(err).contains(maestro_paths.config_path().to_str().unwrap()));
+        assert!(String::from(err).contains(MaestroPaths::get().config_path().to_str().unwrap()));
 
         assert!(
             store
@@ -860,7 +860,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            fs::read_to_string(maestro_paths.config_path()).unwrap(),
+            fs::read_to_string(MaestroPaths::get().config_path()).unwrap(),
             original
         );
     }
@@ -868,20 +868,20 @@ mod tests {
     #[test]
     fn unsupported_version_reports_error_with_path_and_refuses_writes() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
         fs::write(
-            maestro_paths.config_path(),
+            MaestroPaths::get().config_path(),
             r#"{"version":99,"providers":{}}"#,
         )
         .unwrap();
-        let original = fs::read_to_string(maestro_paths.config_path()).unwrap();
+        let original = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
 
-        let mut store = Store::new(&maestro_paths);
+        let mut store = Store::new();
 
         let err = store.get().unwrap_err();
         assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
-        assert!(String::from(err).contains(maestro_paths.config_path().to_str().unwrap()));
+        assert!(String::from(err).contains(MaestroPaths::get().config_path().to_str().unwrap()));
 
         assert!(
             store
@@ -899,7 +899,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            fs::read_to_string(maestro_paths.config_path()).unwrap(),
+            fs::read_to_string(MaestroPaths::get().config_path()).unwrap(),
             original
         );
     }
@@ -907,8 +907,8 @@ mod tests {
     #[test]
     fn duplicate_slug_is_rejected_and_original_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         store
             .create_provider(
@@ -951,8 +951,8 @@ mod tests {
     #[test]
     fn create_provider_creates_missing_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         store
             .create_provider(
@@ -968,14 +968,14 @@ mod tests {
             )
             .unwrap();
 
-        assert!(maestro_paths.config_path().exists());
+        assert!(MaestroPaths::get().config_path().exists());
     }
 
     #[test]
     fn provider_with_models_round_trips_through_disk_order_preserved() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
         let models = vec![
             ModelEntry {
                 id: "accounts/fireworks/models/llama3.1".to_owned(),
@@ -1005,7 +1005,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         let provider = &reopened.get().unwrap().providers["openrouter"];
         assert_eq!(
             provider.models, models,
@@ -1016,8 +1016,8 @@ mod tests {
     #[test]
     fn same_model_id_can_exist_in_different_providers() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
         let gpt_4o = || ModelEntry {
             id: "gpt-4o".to_owned(),
             display_name: Option::None,
@@ -1056,7 +1056,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         let config = reopened.get().unwrap();
         assert_eq!(config.providers["openai"].models, vec![gpt_4o()]);
         assert_eq!(
@@ -1075,8 +1075,8 @@ mod tests {
     fn store_does_not_validate_model_ids() {
         // 业务校验（非空、Provider 内唯一）由前端内联完成；存储层原样保存，不拦不补。
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
 
         store
             .create_provider(
@@ -1105,7 +1105,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = Store::new(&maestro_paths);
+        let reopened = Store::new();
         let models = &reopened.get().unwrap().providers["foo"].models;
         assert_eq!(models.len(), 3);
         assert_eq!(models[0].id, "gpt-4o");
@@ -1116,15 +1116,15 @@ mod tests {
     #[test]
     fn plugins_section_defaults_to_empty_for_legacy_config_files() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
         fs::write(
-            maestro_paths.config_path(),
+            MaestroPaths::get().config_path(),
             r#"{"version":1,"providers":{}}"#,
         )
         .unwrap();
 
-        let store = Store::new(&maestro_paths);
+        let store = Store::new();
 
         assert!(
             store.get().unwrap().plugins.is_empty(),
@@ -1137,8 +1137,8 @@ mod tests {
     #[test]
     fn config_debug_output_never_contains_the_api_key() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
         store
             .create_provider(
                 "openrouter",
@@ -1160,10 +1160,10 @@ mod tests {
     #[test]
     fn corrupt_store_refuses_plugin_writes() {
         let dir = tempfile::tempdir().unwrap();
-        let maestro_paths = MaestroPaths::new(dir.path());
-        fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
-        fs::write(maestro_paths.config_path(), "不是 JSON {{{").unwrap();
-        let mut store = Store::new(&maestro_paths);
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+        fs::write(MaestroPaths::get().config_path(), "不是 JSON {{{").unwrap();
+        let mut store = Store::new();
         let entry = PluginEntry {
             source: "https://example.com/manifest.json".to_owned(),
             enabled: true,

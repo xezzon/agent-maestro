@@ -231,9 +231,10 @@ mod tests {
             root.to_path_buf(),
             root.to_path_buf(),
         );
+        PlatformDirs::init_test(dirs);
         let manifest = testutil::manifest_json("pi", "$HOME/.pi", "plugin.wasm");
         let loaded = PlacedPlugin::new(&root.join("placed"), manifest, wasm)
-            .load(&dirs)
+            .load()
             .unwrap();
         let config_dir = loaded.manifest.config_dir.clone();
         (loaded, config_dir)

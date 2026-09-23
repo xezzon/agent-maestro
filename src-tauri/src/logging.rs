@@ -71,10 +71,7 @@ fn probe_log_dir(paths: &MaestroPaths) -> Result<(), String> {
 /// 非法值忽略并在 logger 就绪后补 WARN（不写入 `config.json`）。
 ///
 /// 必须在单实例插件之后调用（该插件须先于其他插件注册）。
-pub fn attach(
-    builder: tauri::Builder<tauri::Wry>,
-    maestro_paths: Option<&MaestroPaths>,
-) -> tauri::Builder<tauri::Wry> {
+pub fn attach(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     let (level, invalid) = match std::env::var("MAESTRO_LOG_LEVEL") {
         Ok(raw) => match parse_level(&raw) {
             Some(level) => (level, None),
@@ -87,8 +84,8 @@ pub fn attach(
     }
 
     let mut targets = vec![Target::new(TargetKind::Stdout)];
-    match maestro_paths {
-        Some(paths) => match probe_log_dir(paths) {
+    match MaestroPaths::try_get() {
+        Some(paths) => match probe_log_dir(&paths) {
             Ok(()) => targets.push(Target::new(TargetKind::Folder {
                 path: paths.logs_dir(),
                 file_name: Some(LOG_FILE_NAME.to_owned()),
