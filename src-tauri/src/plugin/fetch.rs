@@ -37,7 +37,7 @@ impl HttpFetcher {
     pub fn new() -> Self {
         let client = Client::builder()
             .https_only(true)
-            .user_agent(concat!("agent-maestro/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("agent-maestro/", env!("AGENT_MAESTRO_APP_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(READ_TIMEOUT)
             .build()

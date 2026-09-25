@@ -5,8 +5,27 @@ use std::{
 };
 
 fn main() {
+    inject_app_version();
     build_builtin_plugin_wasm();
     tauri_build::build()
+}
+
+/// 应用版本号的唯一来源是 tauri.conf.json（Cargo.toml 已省略 version，见 ADR 0012）：
+/// 读出来注入 rustc 环境变量，供 fetch.rs 的 User-Agent 使用——Cargo 自带的
+/// CARGO_PKG_VERSION 随 `[package] version` 的省略而恒为 0.0.0。
+///
+/// 缺 version 字段即构建失败，而不是让 UA 静默退化成 0.0.0。
+fn inject_app_version() {
+    // tauri-build 对配置文件也会发这条指令，此处不依赖它的实现细节。
+    println!("cargo::rerun-if-changed=tauri.conf.json");
+    let raw = fs::read_to_string("tauri.conf.json").expect("tauri.conf.json 读取失败");
+    let version = serde_json::from_str::<serde_json::Value>(&raw)
+        .expect("tauri.conf.json 不是合法 JSON")
+        .get("version")
+        .and_then(|value| value.as_str())
+        .expect("tauri.conf.json 缺少 version 字段")
+        .to_owned();
+    println!("cargo::rustc-env=AGENT_MAESTRO_APP_VERSION={version}");
 }
 
 /// 内置 pi 插件的 WASM 产物在构建宿主时自动编译，不入库（ADR 0005）：

@@ -1,12 +1,24 @@
 name: Release
+# run-name 在任何 step 之前求值、读不到仓库文件，版本号只能来自 dispatch 输入：
+# 不带它时所有运行在 Actions 列表里都叫「Release」，分不清发布的是哪个版本。
+# 输入不再需要与文件比对：bump job 就是拿它去改写 tauri.conf.json 的（见下）。
+run-name: Release v${{ inputs.version }}
 
 # 只保留手动触发：tag 触发的运行写出的缓存属于该 tag 自身，其它 tag 与 main 都读不到，
 # 于是每次发布都要全量冷编。改为从 main 手动触发后，缓存的读写都落在 main 作用域，
-# release profile 的产物才能在两次发布之间复用（理由与取舍见 ADR 0009）。
-# 发布流程：提交版本号（tauri.conf.json）→ 在 main 上手动运行本工作流 →
-# tauri-action 在 main HEAD 建 tag `v__VERSION__` 并挂 draft release → 人工校验产物后 publish。
+# release profile 的产物才能在两次发布之间复用（理由与取舍见 ADR 0009）。这一条在版本号
+# 移出 Cargo.lock 之前只是部分成立：当时每次 bump 都要同步 lock，主键随之轮换（ADR 0012）；
+# 现在 bump 只改 tauri.conf.json，lock 不动，主键才真的跨发布稳定。
+# 发布流程：在 main 上手动运行本工作流（填入版本号）→ bump job 把该版本号写进
+# src-tauri/tauri.conf.json（版本号的唯一来源）并推送到 main → release job 在该提交上构建，
+# tauri-action 以它为落点建 tag `v__VERSION__` 并挂 draft release → 人工校验产物后 publish。
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号（不含 v 前缀）；bump job 会把它写入 src-tauri/tauri.conf.json 并推送到 main'
+        required: true
+        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -16,8 +28,81 @@ permissions:
   contents: write
 
 jobs:
+  # 版本号由工作流自己写入并推送：dispatch 的 `version` 输入就是权威值，因此不再需要
+  # 「输入与文件比对」的校验 step（原来的 Verify dispatch version matches …）。
+  # 单独成一个 job 而不是塞进下面的矩阵：矩阵有 4 份，各自提交推送会重复提交、互相顶掉。
+  bump:
+    name: Bump version to ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # 与 release job 同因：这里的写操作同样要受 `release` 环境的分支守卫约束，
+    # 否则从非 main 的 ref 触发时，这一步会抢在前面把版本号推到 main 上。
+    environment: release
+    # 三个步骤都要用同一个版本号，放在 job 级；凭据不放这里，只给 push 那一步（最小暴露）。
+    env:
+      VERSION: ${{ inputs.version }}
+    outputs:
+      # 要构建的那个提交：bump 提交（有改动时）或 dispatch 时的提交（版本已经一致时）。
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      # 本 job 不运行仓库里的任何构建脚本，但仍不把凭据留在 .git/config：push 那一步显式带上
+      # token（见下），这样「本工作流不持久化凭据」这条约束对每个 checkout 都成立。
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # 推送身份是一个自建的 GitHub App，而不是内置的 GITHUB_TOKEN：main 上生效的
+      # `require-pr` 规则集要求经 PR 推送，而 GitHub Actions app 进不了它的 bypass
+      # （PUT 返回 422 must be part of the ruleset source or owner organization —— 本仓库属
+      # 个人账号），自建的、装在本仓库上的 app 才可以。app 权限只需 Contents: Read and write。
+      # 该 action 默认在 job 结束时吊销换来的 token；owner/repositories 默认即当前仓库。
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      # 输入格式守卫：写错的版本号会被提交进 main，而 tauri-codegen 要到构建期才因 semver
+      # 解析失败报错（四个平台各报一次），那时 main 上已经躺着一个非法值。
+      - name: Validate version input
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::version must be a bare semver like 0.5.0 (no leading v): got '$VERSION'"
+            exit 1
+          fi
+
+      # 只改这一处。JSON.stringify 的缩进与原文件一致（2 空格），diff 恰好一行。
+      - name: Write version into tauri.conf.json
+        run: |
+          node -e 'const fs=require("fs"),p="src-tauri/tauri.conf.json",c=JSON.parse(fs.readFileSync(p,"utf8"));c.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n")' "$VERSION"
+
+      - name: Commit and push to main
+        id: commit
+        env:
+          # 用 app 换来的 installation token：默认的 GITHUB_TOKEN 不在 require-pr 的 bypass 里。
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          if git diff --quiet HEAD -- src-tauri/tauri.conf.json; then
+            # 幂等：main 上已经是这个版本（有人手工 bump 过，或上一次发布在这步之后失败后重跑）。
+            echo "src-tauri/tauri.conf.json already at $VERSION; nothing to push."
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add src-tauri/tauri.conf.json
+            git commit -m "chore(release): bump version to $VERSION"
+            # 用显式 URL 而不是 origin：checkout 没有持久化凭据，origin 上没有可用的认证。
+            # 不加 --force：非快进时失败，好过覆盖 main 上别人的提交。
+            # 失败依然发生在任何写入之前：push 被规则集拒时 main 不会被改动。
+            # 另注：这样推的提交不会再触发其它工作流（GitHub 的既有行为），所以这个 bump 提交
+            # 不会跑 Check —— 它紧接着就在下面的 release job 里被构建。
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          fi
+
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   release:
     name: Release (${{ matrix.platform }})
+    needs: bump
     # 分支守卫：本 job 绑定的 `release` 环境在仓库设置里只允许从 main 部署（自定义分支策略），
     # 且禁用了 admin 绕过。从其它 ref 手动触发会在这一步被拒，不会创建 tag。
     # 该环境必须先配好再合并本改动：工作流引用不存在的环境时 GitHub 会自动创建它，
@@ -38,10 +123,12 @@ jobs:
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 90
     steps:
+      # 检出 bump job 推上去的那个提交（而不是 dispatch 时的提交）：新版本号就在它里面。
       # 插件 wasm 在宿主构建（build.rs）时编译，会运行插件的 Cargo build scripts，
       # 不得保留 GITHUB_TOKEN 凭据。
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.bump.outputs.sha }}
           persist-credentials: false
 
       - uses: pnpm/action-setup@v6
@@ -76,6 +163,8 @@ jobs:
       # - 产物 key 里除 Cargo.lock 哈希还有 rust-toolchain.toml 哈希：只升工具链时换新 key，
       #   避免「恢复旧产物 → 全量重编 → 保存又被跳过」的死循环。
       # - restore-keys 收窄到本平台本 profile：Cargo.lock 变化后仍能部分复用旧产物。
+      # - key 里的 Cargo.lock 哈希不随发版变动：应用版本号不在 lock 里（ADR 0012），
+      #   否则每次 bump 都会换一个主键，上面「两次发布之间复用」的意图就落空了。
       - name: Cache cargo home
         uses: actions/cache@v6
         with:
@@ -101,7 +190,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # 版本号取自 tauri.conf.json，产物附加到同名的 Draft Release，人工确认后发布。
+      # 版本号取自 tauri.conf.json 里 bump job 刚写入的那个值，产物附加到同名的 Draft Release，
+      # 人工确认后发布。
       # static json（latest.json，updater 的静态端点）由此 step 生成：自动合并
       # matrix 各平台条目后上传到 Release。
       # tauri.conf.json 已启用 createUpdaterArtifacts：构建时用 TAURI_SIGNING_PRIVATE_KEY
@@ -116,6 +206,9 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'Agent Maestro v__VERSION__'
+          # tag 的落点：bump job 推上去的那个提交。默认是 dispatch 时的提交，那里面还是旧版本号。
+          # （tag 已存在时该输入被忽略，即「重跑同一版本」的情形。）
+          releaseCommitish: ${{ needs.bump.outputs.sha }}
           releaseDraft: true
           prerelease: false
           # 生成 latest.json（默认已开，显式声明以示用途）。

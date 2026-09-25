@@ -1,6 +1,7 @@
 [package]
 name = "agent-maestro"
-version = "0.4.0"
+# 不写 version：应用版本号唯一来源是 tauri.conf.json（Cargo 省略该字段时按 0.0.0 处理，
+# 于是 Cargo.lock 不再随发版变动、CI 缓存 key 也不再轮换，见 ADR 0012）。
 description = "An APP for managing agents profile unified."
 authors = ["xezzon <agent-maestro@xezzon.xyz>"]
 edition = "2024"
@@ -19,6 +20,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# build.rs 读 tauri.conf.json 的 version 注入 AGENT_MAESTRO_APP_VERSION（ADR 0012）。
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }
