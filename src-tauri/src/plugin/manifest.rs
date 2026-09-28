@@ -47,8 +47,9 @@ impl SourceKind {
 pub struct Manifest {
     /// 插件 id：`[a-z][a-z0-9-_]*`。
     pub id: String,
-    /// 插件被授权写入的配置目录，以平台变量前缀声明（`$HOME/.pi`、
-    /// `$XDG_CONFIG_HOME/zed`…）；反序列化时即由 [`resolve_config_dir`] 解析为
+    /// 插件被授权写入的配置目录：字符串形式以平台变量前缀声明（`$HOME/.pi`、
+    /// `$XDG_CONFIG_HOME/zed`…），对象形式按平台键各声明一条（键固定为
+    /// `linux`、`macos`、`windows`）；反序列化时即由 [`resolve_config_dir`] 解析为
     /// 宿主绝对路径，构造出的 `Manifest` 只持有绝对路径。
     #[serde(deserialize_with = "deserialize_config_dir")]
     pub config_dir: PathBuf,
@@ -249,14 +250,66 @@ pub fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
 
 /// `config_dir` 字段的反序列化：声明经 [`resolve_config_dir`] 立即解析为宿主绝对路径。
 ///
+/// 两种声明形式：字符串（单一声明，各平台共用）或对象（键固定为 `linux`、`macos`、
+/// `windows`，宿主取当前平台的键解析，见 [`platform_declaration`]）。
+///
 /// 解析收在反序列化里，`Manifest` 一经构造 `config_dir` 就是可用的绝对路径，不存在
 /// 「已解析 / 未解析」两种状态。使用全局 [`PlatformDirs`]，反序列化前需先初始化。
 fn deserialize_config_dir<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let declared = String::deserialize(deserializer)?;
+    let declared = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(declared) => declared,
+        serde_json::Value::Object(map) => {
+            platform_declaration(&map, current_platform_key()).map_err(serde::de::Error::custom)?
+        }
+        _ => {
+            return Err(serde::de::Error::custom(
+                "config_dir 必须是字符串或按平台键声明的对象",
+            ));
+        }
+    };
     resolve_config_dir(&declared).map_err(serde::de::Error::custom)
+}
+
+/// config_dir 对象形式允许的平台键（错误信息里列给用户）。
+const SUPPORTED_PLATFORM_KEYS: &str = "linux、macos、windows";
+
+/// 当前平台在 config_dir 对象形式里对应的键；其余 Unix 平台沿用 `linux` 键。
+fn current_platform_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+/// 从 config_dir 对象声明里取 `platform` 平台的声明。
+///
+/// 键固定为 [`SUPPORTED_PLATFORM_KEYS`] 列出的三个平台名，未知键与非字符串值一律拒绝；
+/// 取出的值交给 [`resolve_config_dir`] 走与字符串形式同一套变量语法。`platform` 由
+/// 反序列化传入 [`current_platform_key`]，独立成参数以便测试覆盖三个平台的选取。
+fn platform_declaration(
+    map: &serde_json::Map<String, serde_json::Value>,
+    platform: &str,
+) -> Result<String, String> {
+    for (key, value) in map {
+        if !matches!(key.as_str(), "linux" | "macos" | "windows") {
+            return Err(format!(
+                "config_dir 对象使用了不支持的平台键「{key}」（支持：{SUPPORTED_PLATFORM_KEYS}）"
+            ));
+        }
+        if !value.is_string() {
+            return Err(format!("config_dir 对象的平台键「{key}」的值必须是字符串"));
+        }
+    }
+    map.get(platform)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("config_dir 对象缺少平台「{platform}」的声明"))
 }
 
 /// 解析并校验落位 manifest；插件 id 与 `entry` 由这里把关，`config_dir` 已在
@@ -457,6 +510,99 @@ mod tests {
         assert_eq!(
             resolve_config_dir("~/.x").unwrap(),
             resolve_config_dir("$HOME/.x").unwrap()
+        );
+    }
+
+    /// 对象形式：宿主按当前平台取键，取出的值仍走同一套变量语法。
+    /// 三个键都给上、各指不同基准目录，断言随运行平台分派。
+    #[test]
+    fn config_dir_object_picks_the_current_platform_declaration() {
+        let (root, _g) = platform_dirs_setup();
+        let text = r#"{
+            "id": "zed",
+            "config_dir": {
+                "linux": "$XDG_CONFIG_HOME/zed",
+                "macos": "$HOME/.config/zed",
+                "windows": "$LOCAL_APP_CONFIG/Zed"
+            },
+            "entry": "plugin.wasm"
+        }"#;
+
+        let manifest = parse_manifest(SourceKind::File, text).unwrap();
+
+        let canonical_root = root.path().canonicalize().unwrap();
+        let expected = match std::env::consts::OS {
+            "macos" => canonical_root.join("home/.config/zed"),
+            "windows" => canonical_root.join("config-local/Zed"),
+            _ => canonical_root.join("config/zed"),
+        };
+        assert_eq!(manifest.config_dir, expected);
+    }
+
+    /// 平台选取独立成 [`platform_declaration`] 的参数：三个平台的键都能在任意
+    /// 平台上测试，不必真跑在对应操作系统上。
+    #[test]
+    fn platform_declaration_selects_the_requested_platform() {
+        let map = serde_json::json!({
+            "linux": "$XDG_CONFIG_HOME/zed",
+            "macos": "$HOME/.config/zed"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        assert_eq!(
+            platform_declaration(&map, "linux").unwrap(),
+            "$XDG_CONFIG_HOME/zed"
+        );
+        assert_eq!(
+            platform_declaration(&map, "macos").unwrap(),
+            "$HOME/.config/zed"
+        );
+        // 对象里没有的键：缺声明即失败，不静默回退到其他平台。
+        let err = platform_declaration(&map, "windows").unwrap_err();
+        assert!(err.contains("缺少平台"), "{err}");
+        // 空对象同样缺声明。
+        let err = platform_declaration(&serde_json::Map::new(), "linux").unwrap_err();
+        assert!(err.contains("缺少平台"), "{err}");
+    }
+
+    #[test]
+    fn config_dir_object_rejects_unknown_keys_non_string_values_and_non_object_shapes() {
+        let (root, _g) = platform_dirs_setup();
+
+        for (config_dir, expected) in [
+            // 键固定为三个平台名，未知键拒绝。
+            (r#"{"freebsd": "$HOME/.x"}"#, "不支持的平台键"),
+            (
+                r#"{"linux": "$HOME/.x", "Linux": "$HOME/.y"}"#,
+                "不支持的平台键",
+            ),
+            // 值必须是字符串：拿到的声明要交给 resolve_config_dir 走变量语法。
+            (r#"{"linux": 1}"#, "必须是字符串"),
+            // 既不是字符串也不是对象。
+            ("1", "必须是字符串或按平台键声明的对象"),
+        ] {
+            let text =
+                format!(r#"{{ "id": "zed", "config_dir": {config_dir}, "entry": "p.wasm" }}"#);
+            let err = parse_manifest(SourceKind::File, &text).unwrap_err();
+            assert!(
+                err.contains(expected),
+                "config_dir {config_dir} 应被拒绝：{err}"
+            );
+        }
+
+        // 当前平台缺声明即失败，其余平台的键不能充当回退：排除当前平台键构造对象。
+        let others: serde_json::Map<String, serde_json::Value> = ["linux", "macos", "windows"]
+            .into_iter()
+            .filter(|key| *key != current_platform_key())
+            .map(|key| (key.to_owned(), serde_json::json!("$HOME/.x")))
+            .collect();
+        let err = platform_declaration(&others, current_platform_key()).unwrap_err();
+        assert!(err.contains("缺少平台"), "{err}");
+        assert!(
+            !root.path().join("home").exists() && !root.path().join("config").exists(),
+            "被拒绝的声明不得产生任何目录"
         );
     }
 
