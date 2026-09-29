@@ -45,12 +45,27 @@ fn build_store_limits() -> StoreLimits {
         .build()
 }
 
-/// WASI 宿主状态：唯一被授权的写入面是预开放的插件配置目录。
+/// WASI 宿主状态：文件系统上唯一被授权的写入面是预开放的插件配置目录。
 struct HostState {
     table: ResourceTable,
     ctx: WasiCtx,
     /// 资源限制：注册到 wasmtime Store，约束 wasm 线性内存、表、实例增长。
     limits: StoreLimits,
+    /// manifest 声明的凭证适配器 namespace（见 ADR 0013）；未声明即 `None`，
+    /// 该插件的 keychain 桥接调用一律被拒。
+    keychain_namespace: Option<String>,
+}
+
+/// `keychain` 桥接的宿主实现：仅把调用转发给凭证适配器，按 namespace 分发与拒绝
+/// 都在 `crate::keychain` 里（见 ADR 0013）。
+impl bindings::maestro::plugin::keychain::Host for HostState {
+    fn write(&mut self, key: String, secret: String) -> Result<(), String> {
+        crate::keychain::write(self.keychain_namespace.as_deref(), &key, &secret)
+    }
+
+    fn delete(&mut self, key: String) -> Result<(), String> {
+        crate::keychain::delete(self.keychain_namespace.as_deref(), &key)
+    }
 }
 
 impl WasiView for HostState {
@@ -64,7 +79,8 @@ impl WasiView for HostState {
 
 impl HostState {
     /// 预开放指定配置目录为写入面，配套资源限制；用于实投影阶段。
-    fn new(tool_dir: &Path) -> Result<Self, String> {
+    /// `keychain_namespace` 即 manifest 声明的凭证适配器（未声明为 `None`）。
+    fn new(tool_dir: &Path, keychain_namespace: Option<String>) -> Result<Self, String> {
         let mut builder = WasiCtxBuilder::new();
         builder
             .preopened_dir(tool_dir, "/", FsPerms::ReadWrite)
@@ -73,6 +89,7 @@ impl HostState {
             table: ResourceTable::new(),
             ctx: builder.build(),
             limits: build_store_limits(),
+            keychain_namespace,
         })
     }
 }
@@ -117,9 +134,13 @@ impl LoadedPlugin {
     pub fn instantiate_component(&self, engine: &Engine) -> Result<InstantiatedPlugin, String> {
         let component =
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
-        // 预开放的写入面是装载时解析出的宿主绝对路径（见 `resolve_config_dir`）。
+        // 预开放的写入面是装载时解析出的宿主绝对路径（见 `resolve_config_dir`）；
+        // 凭证适配器 namespace 随 manifest 一并进入宿主状态（见 ADR 0013）。
         let tool_path = self.manifest.config_dir.clone();
-        let mut store = wasmtime::Store::new(engine, HostState::new(&tool_path)?);
+        let mut store = wasmtime::Store::new(
+            engine,
+            HostState::new(&tool_path, self.manifest.keychain_namespace.clone())?,
+        );
         store.limiter(|s| &mut s.limits);
         store
             .set_fuel(FUEL_BUDGET)
@@ -213,6 +234,7 @@ fn select_endpoint(provider: &Provider) -> Result<(WitProtocol, String), String>
 mod tests {
     use std::{fs, path::PathBuf};
 
+    use super::bindings::maestro::plugin::keychain::Host as KeychainHost;
     use super::*;
     use crate::{
         plugin::{PlacedPlugin, PlatformDirs, build_engine, builtin, testutil},
@@ -233,6 +255,20 @@ mod tests {
     /// manifest 声明 `$HOME/.pi`，平台基准目录全部指向传入的临时目录，解析结果
     /// 随插件一并返回——断言对着它写，路径不必硬编码两次。
     fn loaded_plugin(root: &Path, wasm: &[u8]) -> (LoadedPlugin, PathBuf) {
+        loaded_plugin_with(
+            root,
+            testutil::manifest_json("pi", "$HOME/.pi", "plugin.wasm"),
+            wasm,
+        )
+    }
+
+    /// 同上，但 manifest 原文可定制：`keychain_namespace` 声明与否正是凭证桥接的
+    /// 权限闸门（见 ADR 0013）。
+    fn loaded_plugin_with(
+        root: &Path,
+        raw_manifest: String,
+        wasm: &[u8],
+    ) -> (LoadedPlugin, PathBuf) {
         let dirs = PlatformDirs::new(
             root.to_path_buf(),
             root.to_path_buf(),
@@ -241,8 +277,7 @@ mod tests {
             root.to_path_buf(),
         );
         PlatformDirs::init_test(dirs);
-        let manifest = testutil::manifest_json("pi", "$HOME/.pi", "plugin.wasm");
-        let loaded = PlacedPlugin::new(&root.join("placed"), manifest, wasm)
+        let loaded = PlacedPlugin::new(&root.join("placed"), raw_manifest, wasm)
             .load()
             .unwrap();
         let config_dir = loaded.manifest.config_dir.clone();
@@ -398,6 +433,57 @@ mod tests {
             "https://api.example.com/v1"
         );
         assert_eq!(written["providers"]["gateway"]["apiKey"], "sk-plain");
+    }
+
+    /// 未声明 `keychain_namespace` 的插件调用凭证桥接一律被拒：声明本身是权限闸门，
+    /// 而闸门关在调用时——插件的装载与配置投影不受影响（见 ADR 0013）。
+    #[test]
+    fn keychain_call_is_rejected_without_a_declared_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let (plugin, _) = loaded_plugin(root.path(), builtin::PI_WASM);
+        let mut plugin = plugin.instantiate_component(&build_engine()).unwrap();
+
+        assert_eq!(plugin.store.data().keychain_namespace, None);
+        let err = KeychainHost::write(
+            plugin.store.data_mut(),
+            "api_url".to_owned(),
+            "sk-projected".to_owned(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("未声明 keychain_namespace"), "{err}");
+    }
+
+    /// 声明了宿主不认识的 namespace：插件照样装载、配置投影照常，只有凭证桥接的
+    /// 调用被拒——未知 namespace 不是装载期的错误（见 ADR 0013）。
+    #[test]
+    fn unknown_keychain_namespace_only_fails_the_keychain_call() {
+        let root = tempfile::tempdir().unwrap();
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                api_key: "sk-plain".to_owned(),
+                ..provider(Some("https://api.example.com/v1"), None)
+            },
+        )]);
+        let (plugin, _) = loaded_plugin_with(
+            root.path(),
+            testutil::manifest_json_with_keychain("pi", "$HOME/.pi", "plugin.wasm", "zed"),
+            builtin::PI_WASM,
+        );
+        let mut plugin = plugin.instantiate_component(&build_engine()).unwrap();
+
+        assert_eq!(
+            plugin.store.data().keychain_namespace.as_deref(),
+            Some("zed"),
+            "声明的 namespace 随装载进入宿主状态"
+        );
+        let (files, _) = plugin.write_provider(&providers).unwrap();
+        assert_eq!(files, vec!["agent/models.json"], "配置文件投影照常");
+
+        let err = KeychainHost::delete(plugin.store.data_mut(), "api_url".to_owned()).unwrap_err();
+
+        assert!(err.contains("不认识的 keychain_namespace「zed」"), "{err}");
     }
 
     #[test]

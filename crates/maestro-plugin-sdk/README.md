@@ -33,6 +33,19 @@ export!(MyPlugin);
 
 `Provider` 每条只带一个协议的端点（见 ADR 0003）。写入应落在 manifest 声明的 `config_dir`——宿主把它预开放为 "/"，是插件唯一可写面；建议 tmp + rename 原子写。
 
+## 凭证桥接
+
+目标工具只从系统凭证库读凭证、不写进自己的配置文件时，把 API Key 交给宿主投影进该工具自己的钥匙串条目：manifest 声明 `keychain_namespace`，代码调用 re-export 的 `keychain` 模块。
+
+```rust
+use maestro_plugin_sdk::keychain;
+
+keychain::write("https://api.example.com/v1", "sk-...")?;  // 同 key 重复写入为覆盖
+keychain::delete("https://api.example.com/v1")?;           // 幂等
+```
+
+`key` 是目标工具的索引键（不是 Provider slug），条目的其余字段由宿主的适配器补齐；manifest 未声明 `keychain_namespace`、或声明了宿主不认识的 namespace 时调用报错（错误返回给插件，不影响配置文件投影）。
+
 ## 构建
 
 - 需要 Rust stable（`rust-version = 1.85.0`）与 target `wasm32-wasip2`。
@@ -41,5 +54,5 @@ export!(MyPlugin);
 ## 参考
 
 - 内置 pi 插件（`plugins/pi`）是参考实现，兼作本 crate 的常驻契约回归。
-- 面向插件作者的完整指南（manifest 语义、发布流、调试回路、安全规则）：[`docs/plugin-authoring.md`](../../docs/plugin-authoring.md)。
+- 面向插件作者的完整指南（manifest 语义、凭证投影、发布流、调试回路、安全规则）：[`docs/plugin-authoring.md`](../../docs/plugin-authoring.md)。
 - WIT 合同随本 crate 分发（`wit/maestro-plugin.wit`），构建时内嵌生成绑定（`build.rs`）；版本约定见 crate 文档（`src/lib.rs`）。

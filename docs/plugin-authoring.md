@@ -1,6 +1,6 @@
 # 插件作者指南
 
-本指南面向第三方插件作者，覆盖 manifest 字段语义、https 发布流、本地调试回路，以及 `config_dir` 安全规则、沙箱边界、fuel 预算与原子写建议。
+本指南面向第三方插件作者，覆盖 manifest 字段语义、https 发布流、本地调试回路，以及凭证投影（keychain 桥接）、`config_dir` 安全规则、沙箱边界、fuel 预算与原子写建议。
 
 术语以 [`CONTEXT.md`](../CONTEXT.md) 为准；架构取舍见 [ADR 0004](adr/0004-wasm-component-plugins.md)（WASM 组件插件）、[ADR 0006](adr/0006-plugin-sources-https-and-local-path.md)（来源与发布）、[ADR 0007](adr/0007-plugin-sdk-distributed-via-git-tag.md)（SDK 分发）。
 
@@ -17,6 +17,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 | `id` | 是 | 插件 id，规则与 Provider slug 一致：`[a-z][a-z0-9-_]*`。它是落位目录名、投影报告与 id 冲突检查的依据；界面展示也用它，作者应把 id 命名得足以看出适配哪类工具。 |
 | `config_dir` | 是 | 插件被授权写入的配置目录，以**平台变量前缀 + 相对片段**声明（如 `$HOME/.pi`、`$XDG_CONFIG_HOME/zed`），见 [config_dir 声明语法](#config_dir-声明语法)。 |
 | `entry` | 是 | 入口 wasm 的**回源地址**。约束按来源分列（见下）。 |
+| `keychain_namespace` | 否 | 声明插件使用哪个凭证适配器（见 [凭证投影](#凭证投影keychain-桥接)）。声明后插件才允许调用 `keychain` import；未声明即调用报错。 |
 
 `config_dir` 是一个**目录**：宿主按当前平台把它解析为绝对路径，并在投影时预开放为组件内的 `/`（插件唯一的写入面）。因此组件里写 `/agent/models.json` 就等于写 `config_dir/agent/models.json`。
 
@@ -55,6 +56,29 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
   "entry": "https://github.com/<owner>/<repo>/releases/download/v1.0.0/plugin.wasm"
 }
 ```
+
+## 凭证投影（keychain 桥接）
+
+有些工具不把 API Key 写进自己的配置文件，只从**系统凭证库**读取（macOS Keychain / Windows Credential Manager / Linux Secret Service），条目按该工具自己的索引键存放。插件跑在沙箱里、够不到凭证库，因此这类凭证由宿主桥接：宿主把凭证库做成 WIT import，插件把 `(key, secret)` 交给宿主，由宿主按 manifest 声明的 `keychain_namespace` 落到目标工具自己的条目上。
+
+```rust
+use maestro_plugin_sdk::keychain;
+
+// 有 key 就写、没有就删；key 是该工具侧的索引键，不是 Provider slug。
+keychain::write("https://api.example.com/v1", "sk-...")?;
+keychain::delete("https://api.example.com/v1")?;
+```
+
+约定与语义：
+
+- **`key` 是目标工具的索引键**，含义由宿主的适配器决定（例如某工具按 API 端点 URL 精确匹配条目）。条目的其余字段（服务名、用户名、标签）由适配器补齐——插件不指定，也无从指定。
+- **`keychain_namespace` 声明是权限闸门**：manifest 未声明该字段时调用 `write` / `delete` 一律报错；声明了宿主不认识的 namespace 同样在**调用时**报错（错误随返回值回到插件，可写进投影报告）。报错不影响插件的装载与配置文件投影。可用的 namespace 随宿主版本增加；宿主内置适配器当前为空，各工具的适配器随对应插件另立 issue 落地。
+- `delete` 对不存在的 `key` 视为成功（幂等）；同 `key` 重复写入为覆盖（按适配器自身语义）。
+- 凭证明文经 WIT 调用传入宿主，**不落磁盘明文**（宿主只把它交给系统凭证库；日志只记 namespace 与索引键）。错误消息里不要回显 `secret`——它会进投影报告与日志。
+
+推荐的消费方式与配置文件投影一致地「逐条容错」：按宿主传入顺序遍历 Provider，有 `api_key` 的 `write`、没有的 `delete`；**单条失败即跳过该条**，继续处理其余条目与配置文件投影，并让失败原因随 `write-providers` 的返回值可见。索引键重复时后者覆盖前者。
+
+已知限制：插件无状态，在 Maestro 里删除 Provider 后，其在目标工具钥匙串里的条目成为**孤儿**，不会自动清理——请在给用户的说明里提示到目标工具中手动重置该凭证。
 
 ## 发布流（https 来源）
 
@@ -128,11 +152,11 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 
 ### 沙箱边界
 
-- 插件在 wasmtime 宿主的 WASI 0.2 沙箱里运行，**唯一预开放目录是 manifest 声明的 `config_dir`（挂载为组件内的 `/`，读写权限）**。这是插件唯一的写入面；`config_dir` 之外的文件系统访问被沙箱拒绝。
+- 插件在 wasmtime 宿主的 WASI 0.2 沙箱里运行，**唯一预开放目录是 manifest 声明的 `config_dir`（挂载为组件内的 `/`，读写权限）**。这是插件唯一的**文件系统**写入面；`config_dir` 之外的文件系统访问被沙箱拒绝。预开放目录之外，插件还能影响的状态只有经宿主桥接的目标工具系统凭证库（见 [凭证投影](#凭证投影keychain-桥接)），且以 manifest 声明的 `keychain_namespace` 为限。
 - 宿主不代写文件：写入由插件在沙箱内经 WASI 直接落盘（因此 TOML、JSON、SQLite 等非纯文件配置天然可支持）；代价是宿主对写入内容零可见。
 - 宿主与第三方插件使用完全一致的校验与沙箱（manifest 校验、`config_dir` 规则、实例化校验、id 冲突检查），不因来源放松。
 - 信任模型是**安装即信任**，与自行安装 npm 包同级：沙箱隔离能力滥用，宿主不审查插件内容。
-- 组件只导出 `write-providers`。
+- 组件只导出 `write-providers`；宿主侧 import 只有 WASI 与 `keychain`（后者未声明 `keychain_namespace` 时调用即报错）。
 
 ### fuel 预算
 
