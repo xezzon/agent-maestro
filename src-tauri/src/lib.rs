@@ -1,4 +1,5 @@
 mod command;
+mod keychain;
 mod logging;
 mod paths;
 mod plugin;

@@ -54,6 +54,12 @@ pub struct Manifest {
     pub config_dir: PathBuf,
     /// 入口 wasm 的回源地址（约束按来源种类分列，见 ADR 0006）。
     pub entry: String,
+    /// 插件声明使用的宿主凭证适配器（可选，见 issue #81）。声明后插件才允许调用
+    /// `keychain` import——它既是权限闸门（未声明即报错），也是跨工具事故的隔离带
+    /// （插件只能落成所声明适配器格式的条目）。不进入 key 本身：目标工具按自己的
+    /// 索引键（如 zed 按 api_url）动态精确匹配，key 前缀或 keychain service 层隔离
+    /// 都会让目标工具读不到条目。宿主不认识的 namespace 同样在调用时报错。
+    pub keychain_namespace: Option<String>,
 }
 
 #[cfg(not(test))]
@@ -275,6 +281,11 @@ pub fn parse_placed(value: &str) -> Result<Manifest, String> {
     if manifest.entry.is_empty() {
         return Err("manifest.json 不合法：entry 不能为空".to_owned());
     }
+    if let Some(namespace) = &manifest.keychain_namespace
+        && namespace.is_empty()
+    {
+        return Err("manifest.json 不合法：keychain_namespace 声明后不能为空".to_owned());
+    }
     Ok(manifest)
 }
 
@@ -341,6 +352,22 @@ pub mod testutil {
                     "entry": "{entry}"
                 }}"#
         )
+    }
+
+    /// 同上，另带 `keychain_namespace` 声明（见 ADR 0013）。
+    pub fn manifest_json_with_keychain(
+        id: &str,
+        config_dir: &str,
+        entry: &str,
+        namespace: &str,
+    ) -> String {
+        serde_json::json!({
+            "id": id,
+            "config_dir": config_dir,
+            "entry": entry,
+            "keychain_namespace": namespace,
+        })
+        .to_string()
     }
 }
 
@@ -518,6 +545,31 @@ mod tests {
         let err = resolve_config_dir("$HOME/loop").unwrap_err();
 
         assert!(err.contains("逃逸了基准目录"), "{err}");
+    }
+
+    #[test]
+    fn keychain_namespace_is_optional_but_must_not_be_empty() {
+        let (_root, _g) = platform_dirs_setup();
+
+        let without = r#"{"id": "pi", "config_dir": "$HOME/.pi", "entry": "p.wasm"}"#;
+        assert_eq!(
+            parse_manifest(SourceKind::File, without)
+                .unwrap()
+                .keychain_namespace,
+            None
+        );
+
+        let with = r#"{"id": "pi", "config_dir": "$HOME/.pi", "entry": "p.wasm", "keychain_namespace": "zed"}"#;
+        assert_eq!(
+            parse_manifest(SourceKind::File, with)
+                .unwrap()
+                .keychain_namespace,
+            Some("zed".to_owned())
+        );
+
+        let empty = r#"{"id": "pi", "config_dir": "$HOME/.pi", "entry": "p.wasm", "keychain_namespace": ""}"#;
+        let err = parse_manifest(SourceKind::File, empty).unwrap_err();
+        assert!(err.contains("keychain_namespace"), "{err}");
     }
 
     #[test]

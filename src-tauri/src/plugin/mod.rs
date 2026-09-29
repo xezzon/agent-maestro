@@ -740,7 +740,7 @@ pub(crate) mod testutil {
     };
 
     pub use super::fetch::testutil::{LockProbeFetcher, StubFetcher};
-    pub use super::manifest::testutil::manifest_json;
+    pub use super::manifest::testutil::{manifest_json, manifest_json_with_keychain};
     use super::{Fetcher, PluginService};
     use crate::{
         paths::MaestroPaths,

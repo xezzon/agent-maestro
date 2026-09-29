@@ -1,6 +1,20 @@
 // Maestro 插件接口合同（单一来源：宿主 bindgen! 与插件 crate 共用，见 issue #34）。
 // Provider 领域模型焊进接口版本：加字段/加协议 = 升级包版本 + 插件重编译。
-package maestro:plugin@1.0.0;
+package maestro:plugin@1.1.0;
+
+/// 宿主桥接目标工具的系统凭证库。
+///
+/// 插件经此把凭证写入目标工具自己的钥匙串条目（格式与索引键由宿主 adapter 决定，
+/// 按 manifest 的 `keychain_namespace` 分发）。插件自身声明 `keychain_namespace`
+/// 才允许调用；未声明或声明了宿主不认识的 namespace 时调用即报错。
+interface keychain {
+    /// 写入一条凭证；key 是工具侧索引键（如 Zed 按 API 端点 URL 精确匹配条目），
+    /// 同 key 重复写入为覆盖，不做冲突报错。
+    write: func(key: string, secret: string) -> result<_, string>;
+
+    /// 删除一条凭证；key 不存在视为成功（幂等）。
+    delete: func(key: string) -> result<_, string>;
+}
 
 interface plugin {
     /// 把一批单协议 Provider 投影进工具配置目录。
@@ -32,6 +46,8 @@ interface plugin {
 
 /// 插件组件导出的世界：插件在 WASI 0.2 下运行，
 /// 宿主把 manifest 声明的 config_dir 预开放为 "/"，插件经 WASI 直接落盘。
+/// 凭证桥接经 `keychain` import 走宿主（沙箱无法访问系统凭证库）。
 world plugin-world {
+    import keychain;
     export plugin;
 }

@@ -45,3 +45,12 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 ///
 /// 类型与合同 v1 一一对应：加字段/加协议 = 合同升包版本 + 插件重编译。
 pub use exports::maestro::plugin::plugin::{Guest, Model, Protocol, Provider};
+
+/// `maestro:plugin` v1.1.0 起新增的凭证桥接 import（见 issue #81）。
+///
+/// 宿主把目标工具的系统凭证库桥接为 [`keychain`] 的 `write` / `delete`：插件把
+/// API Key 投影进目标工具自己的钥匙串条目，格式与索引键由宿主按 manifest 的
+/// `keychain_namespace` 分发的适配器决定。**manifest 未声明 `keychain_namespace`、
+/// 或声明了宿主不认识的 namespace 时，调用即报错**——声明本身是权限闸门。
+/// `delete` 对不存在的 key 视为成功（幂等）；同 key 重复写入为覆盖。
+pub use maestro::plugin::keychain;
