@@ -15,7 +15,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 | 字段 | 必填 | 语义 |
 | --- | --- | --- |
 | `id` | 是 | 插件 id，规则与 Provider slug 一致：`[a-z][a-z0-9-_]*`。它是落位目录名、投影报告与 id 冲突检查的依据；界面展示也用它，作者应把 id 命名得足以看出适配哪类工具。 |
-| `config_dir` | 是 | 插件被授权写入的配置目录，以**平台变量前缀 + 相对片段**声明（如 `$HOME/.pi`、`$XDG_CONFIG_HOME/zed`），见 [config_dir 声明语法](#config_dir-声明语法)。 |
+| `config_dir` | 是 | 插件被授权写入的配置目录，声明为**单一字符串**（平台变量前缀 + 相对片段，如 `$HOME/.pi`）或**按平台对象**（键固定为 `linux`、`macos`、`windows`），见 [config_dir 声明语法](#config_dir-声明语法)。 |
 | `entry` | 是 | 入口 wasm 的**回源地址**。约束按来源分列（见下）。 |
 
 `config_dir` 是一个**目录**：宿主按当前平台把它解析为绝对路径，并在投影时预开放为组件内的 `/`（插件唯一的写入面）。因此组件里写 `/agent/models.json` 就等于写 `config_dir/agent/models.json`。
@@ -118,8 +118,21 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 | `$XDG_DATA_HOME` | 平台数据目录（Linux `~/.local/share`；macOS `~/Library/Application Support`；Windows `%APPDATA%`） |
 | `$LOCAL_APP_DATA` | 同上的「本地」变体（Windows `%LOCALAPPDATA%`，其余平台同上） |
 
+除单一字符串外，`config_dir` 也可以声明为**按平台对象**：键固定为 `linux`、`macos`、`windows`，每个键的值是上文的同一条「变量前缀 + 相对片段」语法，宿主只取当前平台对应的键解析。适用于目标工具在部分平台上不遵循平台变量的对应关系——例如 Zed 在 macOS 实际读取 `~/.config/zed`，而 `$XDG_CONFIG_HOME` 在 macOS 解析为 `~/Library/Application Support`，单一字符串声明表达不了这种偏差，只能按平台各给一条：
+
+```json
+{
+  "config_dir": {
+    "linux": "$XDG_CONFIG_HOME/zed",
+    "macos": "$HOME/.config/zed",
+    "windows": "$LOCAL_APP_CONFIG/Zed"
+  }
+}
+```
+
 规则与拒绝项：
 
+- 对象的键只接受上列三个平台名（其余 Unix 平台沿用 `linux` 键），未知键与字符串以外的值一律拒绝；对象里必须有当前平台的键，缺声明即失败，不回退到其他平台的键。字符串形式与对象形式可按插件自由选择，同一 manifest 只用其一。
 - 变量必须在最前、且是上表之一；变量之后必须有非空的相对片段（只写 `$HOME` 不算）。
 - 相对片段不得是绝对路径、不得含 `..`、不得含裸 `.`（`$HOME/.`、`$HOME/./x` 这类与基准目录重合的写法被拒——把整盘 `$HOME` 交出去不在合同范围内）。
 - 目录不存在时宿主先创建；创建后按规范化的真实路径确认仍**严格落**在该变量对应的基准目录内（与基准目录相等同样视为逃逸），借符号链接逃逸也在这道关里被拒。
