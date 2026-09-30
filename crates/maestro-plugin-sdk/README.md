@@ -33,6 +33,16 @@ export!(MyPlugin);
 
 `Provider` 每条只带一个协议的端点（见 ADR 0003）。写入应落在 manifest 声明的 `config_dir`——宿主把它预开放为 "/"，是插件唯一可写面；建议 tmp + rename 原子写。
 
+投影期间的非致命事件可经 `logger` import（v1.1.0 起）上报应用日志：
+
+```rust
+use maestro_plugin_sdk::{log, Level};
+
+log(Level::Warning, "模型 x 已弃用，仍继续投影");
+```
+
+消息按 level 落应用日志、不进投影结果界面；**不得携带 API Key 等凭证**（宿主不做内容审查，见 ADR 0008/0013 与插件作者指南）。
+
 ## 构建
 
 - 需要 Rust stable（`rust-version = 1.85.0`）与 target `wasm32-wasip2`。

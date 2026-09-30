@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use wasmtime::{
     Engine, StoreLimits, StoreLimitsBuilder,
-    component::{Component, Linker},
+    component::{Component, HasSelf, Linker},
 };
 use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
 
@@ -51,6 +51,8 @@ struct HostState {
     ctx: WasiCtx,
     /// 资源限制：注册到 wasmtime Store，约束 wasm 线性内存、表、实例增长。
     limits: StoreLimits,
+    /// 插件 id：应用日志行的归属标识（`log` import 无法从调用方推断）。
+    plugin_id: String,
 }
 
 impl WasiView for HostState {
@@ -62,9 +64,20 @@ impl WasiView for HostState {
     }
 }
 
+/// logger import（issue #82 / ADR 0013）：每条消息按 level 写入应用日志，
+/// debug 默认不落盘由全局级别旋钮（ADR 0008）承担。日志是诊断通道，
+/// 只写不拦：绝不因记录失败让投影报错。
+impl bindings::maestro::plugin::logger::Host for HostState {
+    fn log(&mut self, level: bindings::maestro::plugin::logger::Level, message: String) {
+        let log_level = map_plugin_level(level);
+        // 前缀为宿主书写的英文标识；message 是插件的用户可见文案，保持原样。
+        log::log!(log_level, "[plugin {} log] {message}", self.plugin_id);
+    }
+}
+
 impl HostState {
     /// 预开放指定配置目录为写入面，配套资源限制；用于实投影阶段。
-    fn new(tool_dir: &Path) -> Result<Self, String> {
+    fn new(tool_dir: &Path, plugin_id: String) -> Result<Self, String> {
         let mut builder = WasiCtxBuilder::new();
         builder
             .preopened_dir(tool_dir, "/", FsPerms::ReadWrite)
@@ -73,14 +86,16 @@ impl HostState {
             table: ResourceTable::new(),
             ctx: builder.build(),
             limits: build_store_limits(),
+            plugin_id,
         })
     }
 }
 
 /// 宿主侧链接器：WASI 环境 + 本合同的 import。
 ///
-/// `log` 恒定提供（见 ADR 0013）：组件不引用该 import 即不受影响，因此老插件
-/// 无需重编译；校验期与实投影期共用同一份配置，避免两条路径的 import 集合漂移。
+/// `log` 恒定提供（见 ADR 0013）：组件不引用该 import 即不受影响；但 WIT 包
+/// 版本升级后宿主只注册当前版本，按旧版合同编译的组件仍需重编译。
+/// 校验期与实投影期共用同一份配置，避免两条路径的 import 集合漂移。
 fn build_linker(engine: &Engine) -> Result<Linker<HostState>, String> {
     let mut linker: Linker<HostState> = Linker::new(engine);
     p2::add_to_linker_sync(&mut linker).map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
@@ -118,7 +133,10 @@ impl LoadedPlugin {
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
         // 预开放的写入面是装载时解析出的宿主绝对路径（见 `resolve_config_dir`）。
         let tool_path = self.manifest.config_dir.clone();
-        let mut store = wasmtime::Store::new(engine, HostState::new(&tool_path)?);
+        let mut store = wasmtime::Store::new(
+            engine,
+            HostState::new(&tool_path, self.manifest.id.clone())?,
+        );
         store.limiter(|s| &mut s.limits);
         store
             .set_fuel(FUEL_BUDGET)
@@ -151,6 +169,19 @@ impl InstantiatedPlugin {
 pub struct SkippedProvider {
     pub slug: String,
     pub reason: String,
+}
+
+/// logger level → (应用日志 level, 标签) 的映射（ADR 0013）：error→ERROR、
+/// warning→WARN、info→INFO、debug→DEBUG；debug 默认不落盘由全局级别旋钮
+/// （ADR 0008）承担，这里只负责映射。
+fn map_plugin_level(level: bindings::maestro::plugin::logger::Level) -> log::Level {
+    use bindings::maestro::plugin::logger::Level as WitLevel;
+    match level {
+        WitLevel::Error => log::Level::Error,
+        WitLevel::Warning => log::Level::Warn,
+        WitLevel::Info => log::Level::Info,
+        WitLevel::Debug => log::Level::Debug,
+    }
 }
 
 fn to_wit_provider(
@@ -412,5 +443,21 @@ mod tests {
             .call_write_providers(&mut plugin.store, &[])
             .expect_err("fuel 耗尽应中断 wasm 调用");
         assert!(format!("{err:#}").contains("fuel"), "实际错误：{err:#}");
+    }
+
+    /// logger level → (应用日志 level, 标签) 的映射（error→ERROR、warning→WARN、
+    /// info→INFO、debug→DEBUG）；debug 默认不落盘由全局级别旋钮（ADR 0008）承担。
+    #[test]
+    fn map_plugin_level_maps_all_logger_levels() {
+        use bindings::maestro::plugin::logger::Level as WitLevel;
+
+        let level = map_plugin_level(WitLevel::Error);
+        assert!(matches!(level, log::Level::Error));
+        let level = map_plugin_level(WitLevel::Warning);
+        assert!(matches!(level, log::Level::Warn));
+        let level = map_plugin_level(WitLevel::Info);
+        assert!(matches!(level, log::Level::Info));
+        let level = map_plugin_level(WitLevel::Debug);
+        assert!(matches!(level, log::Level::Debug));
     }
 }

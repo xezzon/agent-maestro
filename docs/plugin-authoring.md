@@ -1,6 +1,6 @@
 # 插件作者指南
 
-本指南面向第三方插件作者，覆盖 manifest 字段语义、https 发布流、本地调试回路，以及 `config_dir` 安全规则、沙箱边界、fuel 预算与原子写建议。
+本指南面向第三方插件作者，覆盖 manifest 字段语义、https 发布流、本地调试回路，以及 `config_dir` 安全规则、沙箱边界、fuel 预算、过程性日志与原子写建议。
 
 术语以 [`CONTEXT.md`](../CONTEXT.md) 为准；架构取舍见 [ADR 0004](adr/0004-wasm-component-plugins.md)（WASM 组件插件）、[ADR 0006](adr/0006-plugin-sources-https-and-local-path.md)（来源与发布）、[ADR 0007](adr/0007-plugin-sdk-distributed-via-git-tag.md)（SDK 分发）。
 
@@ -154,6 +154,23 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 ### 原子写建议
 
 落盘建议 **tmp + rename**：先写临时文件、成功后改名替换目标文件，这样 I/O 失败不会留下半截配置文件。参考实现 [`plugins/pi/src/lib.rs`](../plugins/pi/src/lib.rs) 就是整文件重写：先写 `agent/models.json.tmp`，再 rename 为 `agent/models.json`，保证已删除的 Provider 不残留。
+
+## 过程性日志（logger import）
+
+`maestro:plugin` 1.1.0 起提供 `logger` import（见 [ADR 0013](adr/0013-plugin-logger-import.md)），投影期间需要外显的非致命事件（逐条容错跳过、降级提示等）经 SDK 一行上报：
+
+```rust
+use maestro_plugin_sdk::{log, Level};
+
+log(Level::Warning, "模型 x 已弃用，仍继续投影");
+```
+
+语义要点：
+
+- 宿主把每条消息按 level 写入应用日志（error→ERROR、warning→WARN、info→INFO、debug→DEBUG），行前缀携带插件 id；消息**不进投影结果界面**。
+- 应用日志默认级别 INFO：debug 消息默认不落盘，`MAESTRO_LOG_LEVEL=debug` 时展开；日志按大小轮转（ADR 0008），不要用日志刷屏。
+- **message 不得携带 API Key 等凭证**——宿主不做内容审查，上报即落盘进日志文件（该文件定位是「发给维护者」的现场证据）。
+- 插件不调用 `log` 时行为与 1.0.0 合同完全一致；宿主恒定提供该 import，但 WIT 包版本升级（1.0.0 → 1.1.0）后宿主只注册当前版本，按旧合同编译的组件需以新版 SDK 重编译。
 
 ## 参考实现
 

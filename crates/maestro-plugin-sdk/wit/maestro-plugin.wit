@@ -1,6 +1,18 @@
 // Maestro 插件接口合同（单一来源：宿主 bindgen! 与插件 crate 共用，见 issue #34）。
 // Provider 领域模型焊进接口版本：加字段/加协议 = 升级包版本 + 插件重编译。
-package maestro:plugin@1.0.0;
+package maestro:plugin@1.1.0;
+
+/// 插件过程性日志（issue #82）：投影期间插件可向用户外显非致命事件
+/// （逐条容错跳过、降级提示等）。宿主把每条消息按 level 写入应用日志
+/// （error→ERROR、warning→WARN、info→INFO、debug→DEBUG），不进投影结果；
+/// level 只决定消息在应用日志中的严重级。
+interface logger {
+    enum level { error, warning, info, debug }
+
+    /// 记录一条插件日志。message 仅供应用日志记录，不得携带
+    /// API Key 等凭证（宿主不做内容审查，约束见插件作者指南）。
+    log: func(level: level, message: string);
+}
 
 interface plugin {
     /// 把一批单协议 Provider 投影进工具配置目录。
@@ -32,6 +44,11 @@ interface plugin {
 
 /// 插件组件导出的世界：插件在 WASI 0.2 下运行，
 /// 宿主把 manifest 声明的 config_dir 预开放为 "/"，插件经 WASI 直接落盘。
+///
+/// logger 是宿主恒定提供的 import（见 ADR 0013）：组件不引用即不受影响。
+/// WIT 包版本升级（如 1.0.0 → 1.1.0）要求插件以新版 SDK 重编译——宿主只注册
+/// 当前版本的导出，不同时兼容旧版合同的组件。
 world plugin-world {
+    import logger;
     export plugin;
 }
