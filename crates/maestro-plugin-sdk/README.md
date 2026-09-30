@@ -44,7 +44,7 @@ keychain::write("https://api.example.com/v1", "sk-...")?;  // 同 key 重复写�
 keychain::delete("https://api.example.com/v1")?;           // 幂等
 ```
 
-`key` 是目标工具的索引键（不是 Provider slug），条目的其余字段由宿主的适配器补齐；manifest 未声明 `keychain_namespace`、或声明了宿主不认识的 namespace 时调用报错（错误返回给插件，不影响配置文件投影）。
+`key` 是目标工具的索引键（不是 Provider slug），条目落在 manifest 声明的 `keychain_namespace`（目标工具自己的 service 名）下；manifest 未声明 `keychain_namespace` 时调用报错（错误返回给插件，不影响配置文件投影）。
 
 ## 构建
 

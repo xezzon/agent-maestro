@@ -17,7 +17,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 | `id` | 是 | 插件 id，规则与 Provider slug 一致：`[a-z][a-z0-9-_]*`。它是落位目录名、投影报告与 id 冲突检查的依据；界面展示也用它，作者应把 id 命名得足以看出适配哪类工具。 |
 | `config_dir` | 是 | 插件被授权写入的配置目录，以**平台变量前缀 + 相对片段**声明（如 `$HOME/.pi`、`$XDG_CONFIG_HOME/zed`），见 [config_dir 声明语法](#config_dir-声明语法)。 |
 | `entry` | 是 | 入口 wasm 的**回源地址**。约束按来源分列（见下）。 |
-| `keychain_namespace` | 否 | 声明插件使用哪个凭证适配器（见 [凭证投影](#凭证投影keychain-桥接)）。声明后插件才允许调用 `keychain` import；未声明即调用报错。 |
+| `keychain_namespace` | 否 | 声明插件写入的凭证库 namespace：目标工具在系统凭证库里的条目 service 名（见 [凭证投影](#凭证投影keychain-桥接)）。声明后插件才允许调用 `keychain` import；未声明即调用报错。 |
 
 `config_dir` 是一个**目录**：宿主按当前平台把它解析为绝对路径，并在投影时预开放为组件内的 `/`（插件唯一的写入面）。因此组件里写 `/agent/models.json` 就等于写 `config_dir/agent/models.json`。
 
@@ -71,8 +71,8 @@ keychain::delete("https://api.example.com/v1")?;
 
 约定与语义：
 
-- **`key` 是目标工具的索引键**，含义由宿主的适配器决定（例如某工具按 API 端点 URL 精确匹配条目）。条目的其余字段（服务名、用户名、标签）由适配器补齐——插件不指定，也无从指定。
-- **`keychain_namespace` 声明是权限闸门**：manifest 未声明该字段时调用 `write` / `delete` 一律报错；声明了宿主不认识的 namespace 同样在**调用时**报错（错误随返回值回到插件，可写进投影报告）。报错不影响插件的装载与配置文件投影。可用的 namespace 随宿主版本增加；宿主内置适配器当前为空，各工具的适配器随对应插件另立 issue 落地。
+- **`key` 是目标工具的索引键**，不是 Provider slug（例如某工具按 API 端点 URL 精确匹配条目）。条目落在 manifest 声明的 `keychain_namespace` 下：`service` 就是声明的那个名字，`account` 取 `key`、秘密取 `secret`——插件不指定 service，但认错了名字（多加了前缀、认错了工具）目标工具就读不到条目。
+- **`keychain_namespace` 声明是权限闸门**：manifest 未声明该字段时调用 `write` / `delete` 一律报错（错误随返回值回到插件，可写进投影报告）。宿主不预置工具表，声明值就是条目身份——写错名字不会当场报错，而是「目标工具读不到这条凭证」的静默失效。报错不影响插件的装载与配置文件投影。
 - `delete` 对不存在的 `key` 视为成功（幂等）；同 `key` 重复写入为覆盖（按适配器自身语义）。
 - 凭证明文经 WIT 调用传入宿主，**不落磁盘明文**（宿主只把它交给系统凭证库；日志只记 namespace 与索引键）。错误消息里不要回显 `secret`——它会进投影报告与日志。
 

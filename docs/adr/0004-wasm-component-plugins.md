@@ -12,4 +12,4 @@
 
 修订（2026-09-22）：manifest 删除 `name` 与 `tool`（展示与「适配哪类工具」都改由 `id` 承担），`config_dir` 保留在 manifest，但声明形式改为平台变量前缀（`$HOME/.pi`、`$XDG_CONFIG_HOME/zed`），解析函数移入 `plugin/manifest.rs`（见 ADR 0011）。本 ADR 中「插件以 manifest 描述自身（`id`/`name`/`tool`/`config_dir`/`entry`）」的字段表随之失效；预开放模型（预开放目录即唯一写入面、宿主不代写文件、写入内容对宿主零可见）不变。
 
-修订（2026-09-29）：插件在预开放目录之外另获一个宿主能力——`keychain` 桥接 import（`maestro:plugin` 升 v1.1.0，见 ADR 0013）：插件把 `(key, secret)` 交给宿主，宿主按 manifest 新增的 `keychain_namespace` 选中适配器，落成目标工具自己的系统凭证库条目。本 ADR「预开放目录即唯一写入面」的表述随之限于**文件系统**；宿主不代写配置文件、插件写什么内容对宿主零可见这两条都不变。
+修订（2026-09-29）：插件在预开放目录之外另获一个宿主能力——`keychain` 桥接 import（`maestro:plugin` 升 v1.1.0，见 ADR 0013）：插件把 `(key, secret)` 交给宿主，宿主按 manifest 新增的 `keychain_namespace`（目标工具自己的条目 namespace）落成目标工具自己的系统凭证库条目。本 ADR「预开放目录即唯一写入面」的表述随之限于**文件系统**；宿主不代写配置文件、插件写什么内容对宿主零可见这两条都不变。

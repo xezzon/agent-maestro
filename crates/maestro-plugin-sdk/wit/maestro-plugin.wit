@@ -4,9 +4,10 @@ package maestro:plugin@1.1.0;
 
 /// 宿主桥接目标工具的系统凭证库。
 ///
-/// 插件经此把凭证写入目标工具自己的钥匙串条目（格式与索引键由宿主 adapter 决定，
-/// 按 manifest 的 `keychain_namespace` 分发）。插件自身声明 `keychain_namespace`
-/// 才允许调用；未声明或声明了宿主不认识的 namespace 时调用即报错。
+/// 插件经此把凭证写入目标工具自己的钥匙串条目：条目落在 manifest 声明的
+/// `keychain_namespace`（目标工具自己的 service 名）下，`key` 是工具侧索引键、
+/// `secret` 是凭证明文。插件自身声明 `keychain_namespace` 才允许调用；未声明时
+/// 调用即报错。
 interface keychain {
     /// 写入一条凭证；key 是工具侧索引键（如 Zed 按 API 端点 URL 精确匹配条目），
     /// 同 key 重复写入为覆盖，不做冲突报错。

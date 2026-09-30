@@ -54,11 +54,12 @@ pub struct Manifest {
     pub config_dir: PathBuf,
     /// 入口 wasm 的回源地址（约束按来源种类分列，见 ADR 0006）。
     pub entry: String,
-    /// 插件声明使用的宿主凭证适配器（可选，见 issue #81）。声明后插件才允许调用
-    /// `keychain` import——它既是权限闸门（未声明即报错），也是跨工具事故的隔离带
-    /// （插件只能落成所声明适配器格式的条目）。不进入 key 本身：目标工具按自己的
-    /// 索引键（如 zed 按 api_url）动态精确匹配，key 前缀或 keychain service 层隔离
-    /// 都会让目标工具读不到条目。宿主不认识的 namespace 同样在调用时报错。
+    /// 插件声明使用的凭证库 namespace（可选，见 issue #81）：目标工具在系统凭证库里的
+    /// 条目 service 名。声明后插件才允许调用 `keychain` import——声明是权限闸门（未
+    /// 声明即报错），声明值就是条目身份，宿主在调用时按它落条目（不预置工具表）。不进入
+    /// key 本身：目标工具按自己的索引键（如 zed 按 api_url）动态精确匹配，key 前缀或
+    /// keychain service 层隔离都会让目标工具读不到条目；名字认错（多了前缀、认错了工具）
+    /// 同样是静默失效。
     pub keychain_namespace: Option<String>,
 }
 
