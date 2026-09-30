@@ -124,7 +124,8 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 {
   "config_dir": {
     "linux": "$XDG_CONFIG_HOME/zed",
-    "macos": "$HOME/.config/zed"
+    "macos": "$HOME/.config/zed",
+    "windows": "$LOCAL_APP_CONFIG/Zed"
   }
 }
 ```
