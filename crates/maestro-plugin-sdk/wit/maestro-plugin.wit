@@ -10,7 +10,7 @@ interface logger {
     enum level { error, warning, info, debug }
 
     /// 记录一条插件日志。message 仅供应用日志记录，不得携带
-    /// API Key 等凭证（宿主不做内容审查，约束见插件作者指南）。
+    /// API Key 等凭证（宿主不做内容审查，约束见本 crate 的 README）。
     log: func(level: level, message: string);
 }
 
