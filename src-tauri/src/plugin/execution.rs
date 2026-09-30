@@ -77,6 +77,18 @@ impl HostState {
     }
 }
 
+/// 宿主侧链接器：WASI 环境 + 本合同的 import。
+///
+/// `log` 恒定提供（见 ADR 0013）：组件不引用该 import 即不受影响，因此老插件
+/// 无需重编译；校验期与实投影期共用同一份配置，避免两条路径的 import 集合漂移。
+fn build_linker(engine: &Engine) -> Result<Linker<HostState>, String> {
+    let mut linker: Linker<HostState> = Linker::new(engine);
+    p2::add_to_linker_sync(&mut linker).map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
+    bindings::PluginWorld::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |state| state)
+        .map_err(|e| format!("初始化插件日志 import 失败：{e}"))?;
+    Ok(linker)
+}
+
 /// 已实例化的插件：实例化验证与实际调用共用同一管线。
 pub struct InstantiatedPlugin {
     store: wasmtime::Store<HostState>,
@@ -89,9 +101,7 @@ impl LoadedPlugin {
     pub fn validate(&self, engine: &Engine) -> Result<(), String> {
         let component =
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
-        let mut linker: Linker<HostState> = Linker::new(engine);
-        p2::add_to_linker_sync(&mut linker)
-            .map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
+        let linker = build_linker(engine)?;
         // 组件模型的 instantiate_pre 不接收 Store：返回 Pre<()> 表示类型检查通过，
         // 不触发组件 init、不调用 host 函数。这正是安装期校验所需的最小集合。
         linker
@@ -113,9 +123,7 @@ impl LoadedPlugin {
         store
             .set_fuel(FUEL_BUDGET)
             .map_err(|e| format!("设置插件执行预算失败：{e}"))?;
-        let mut linker = Linker::new(engine);
-        p2::add_to_linker_sync(&mut linker)
-            .map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
+        let linker = build_linker(engine)?;
         let world = bindings::PluginWorld::instantiate(&mut store, &component, &linker)
             .map_err(|e| format!("插件接口不兼容：{e}"))?;
         Ok(InstantiatedPlugin { store, world })
