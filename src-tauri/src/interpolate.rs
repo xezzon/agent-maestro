@@ -26,9 +26,10 @@ pub(crate) fn interpolate_slot(
         .transpose()
 }
 
-/// 对全部 Provider 插值，返回替换后的字面值副本。
+/// 对传入的每个 Provider 插值，返回替换后的字面值副本。
 ///
-/// 作用域＝Provider 中除 `api_key` 与模型 `id` 外的字符串值（ADR 0015）；
+/// 作用域＝Provider 中除 `api_key` 与模型 `id` 外的字符串值（ADR 0015）。
+/// 是否参与投影由调用方决定：本函数不感知 `enabled`，对传入的每一项都插值；
 /// 任一字段失败即整体失败，原因含 slug + 字段名 + 库报错，不含值与密钥。
 pub fn interpolate_providers(
     providers: &BTreeMap<String, Provider>,
@@ -154,6 +155,7 @@ mod tests {
         providers.insert(
             "gateway".to_owned(),
             Provider {
+                enabled: true,
                 base_url: Endpoints {
                     openai_completions: Some("https://${HOST}/v1".to_owned()),
                     ..Endpoints::default()

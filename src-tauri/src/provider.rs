@@ -27,8 +27,11 @@ pub(crate) struct ModelEntry {
 }
 
 /// 一条 LLM API 接入；以 slug 为 key 存于 providers 之下（见 CONTEXT.md）。
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Provider {
+    /// 是否参与投影：默认启用，旧配置缺该字段同样视为启用（向后兼容）。
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) base_url: Endpoints,
     /// 凭证以明文随配置文件落盘：空串即未设置（第一期不做密钥链，
@@ -40,12 +43,33 @@ pub(crate) struct Provider {
     pub(crate) models: Vec<ModelEntry>,
 }
 
+/// `Provider::enabled` 的 serde 缺省值：启用（旧配置缺字段时向后兼容）。
+/// `pub(crate)` 供 `command::provider` 的负载复用同一份缺省语义。
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+/// 手工实现 `Default`：`enabled` 默认启用。测试夹具大量使用
+/// `..Provider::default()`，派生的 `Default`（`enabled: false`）会让它们
+/// 悄悄变成「不投影」，故必须显式给出启用态。
+impl Default for Provider {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: Endpoints::default(),
+            api_key: String::new(),
+            models: Vec::new(),
+        }
+    }
+}
+
 /// 手工实现 Debug：api_key 渲染为 `<set>`/`<unset>`，绝不携带明文。
 /// `Config` 的派生 `Debug` 内层调用它，因此嵌套在 Config 中的 Provider 同获保护
 /// （ADR 0008：凭证绝不落盘进日志）。
 impl std::fmt::Debug for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Provider")
+            .field("enabled", &self.enabled)
             .field("base_url", &self.base_url)
             .field(
                 "api_key",
@@ -73,6 +97,7 @@ impl Provider {
     /// 作用域＝除 `api_key` 与模型 `id` 外的一切字符串值（ADR 0015）：字符串
     /// 字段穷举构造、不带
     /// `..Default`，给结构体新增字段时在此处编译失败，提示把新字段纳入插值。
+    /// `enabled` 是布尔状态而非字符串值，原样透传、不参与插值。
     pub(crate) fn interpolate(
         &self,
         variables: &BTreeMap<String, String>,
@@ -103,6 +128,8 @@ impl Provider {
             });
         }
         Ok(Provider {
+            // enabled 是状态而非配置值：原样透传，不参与插值。
+            enabled: self.enabled,
             base_url: Endpoints {
                 openai_completions,
                 anthropic_messages,
@@ -141,6 +168,36 @@ mod tests {
         assert_eq!(parsed.base_url.openai_completions, None);
         assert_eq!(parsed.api_key, "");
         assert!(parsed.models.is_empty());
+        assert!(
+            parsed.enabled,
+            "旧配置缺 enabled 字段时视为启用（向后兼容）"
+        );
+    }
+
+    /// 启用/禁用随记录落盘：`enabled` 恒被序列化，禁用态 round-trip 不丢。
+    #[test]
+    fn provider_round_trips_disabled_state() {
+        let disabled = Provider {
+            enabled: false,
+            ..Provider::default()
+        };
+
+        let text = serde_json::to_string(&disabled).unwrap();
+        assert!(
+            text.contains(r#""enabled":false"#),
+            "启用态是记录的一部分，必须显式落盘：{text}"
+        );
+        let parsed: Provider = serde_json::from_str(&text).unwrap();
+        assert!(!parsed.enabled, "禁用态 round-trip 后仍是禁用");
+    }
+
+    /// 手工 `Default` 的契约：新建的 Provider 默认启用。
+    #[test]
+    fn default_provider_is_enabled() {
+        assert!(
+            Provider::default().enabled,
+            "默认启用：新建与旧配置读入都不该落进禁用态"
+        );
     }
 
     #[test]
@@ -183,6 +240,7 @@ mod tests {
     #[test]
     fn provider_round_trips_dual_endpoints_plaintext_api_key_and_models() {
         let provider = Provider {
+            enabled: true,
             base_url: Endpoints {
                 openai_completions: Some("https://api.example.com/v1".to_owned()),
                 anthropic_messages: Some("https://anthropic.example.com/v1".to_owned()),
@@ -245,6 +303,7 @@ mod tests {
     #[test]
     fn interpolate_replaces_strings_field_by_field_and_keeps_the_original() {
         let provider = Provider {
+            enabled: true,
             base_url: Endpoints {
                 openai_completions: Some("https://${HOST}/v1".to_owned()),
                 anthropic_messages: None,

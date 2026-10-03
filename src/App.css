@@ -63,6 +63,11 @@ body {
   margin-top: 4px;
 }
 
+/* 禁用的 Provider 卡片整体弱化（src/ProvidersPage.jsx，issue #94） */
+.provider-disabled .ant-card-body {
+  opacity: 0.6;
+}
+
 .card-actions {
   display: flex;
   justify-content: flex-end;
