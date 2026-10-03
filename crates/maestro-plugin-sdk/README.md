@@ -6,6 +6,8 @@ Maestro 插件接口合同 `maestro:plugin` 的类型化 Rust 绑定，同时是
 
 第三方插件以两种来源安装：**https 来源**（指向 manifest.json 的 https URL，面向正式发布）与**file 来源**（指向本机 manifest.json 绝对路径，面向本地调试）。两种来源在装载、校验与沙箱上完全同构。
 
+术语以 [`CONTEXT.md`](../../CONTEXT.md) 为准；架构取舍见 [ADR 0004](../../docs/adr/0004-wasm-component-plugins.md)（WASM 组件插件）、[ADR 0006](../../docs/adr/0006-plugin-sources-https-and-local-path.md)（来源与发布）、[ADR 0007](../../docs/adr/0007-plugin-sdk-distributed-via-git-tag.md)（SDK 分发）、[ADR 0013](../../docs/adr/0013-plugin-logger-import.md)（logger import）。
+
 ## 依赖方式
 
 本 crate 不发布到 crates.io。以 git 依赖引用本仓库中的 `crates/maestro-plugin-sdk`，并锁定 Maestro 的发布 tag——tag 与宿主版本一致，随 tag 固化插件与宿主的兼容组合：
@@ -48,7 +50,6 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 | `id` | 是 | 插件 id，规则与 Provider slug 一致：`[a-z][a-z0-9-_]*`。它是落位目录名、投影报告与 id 冲突检查的依据；界面展示也用它，作者应把 id 命名得足以看出适配哪类工具。 |
 | `config_dir` | 是 | 插件被授权写入的配置目录，声明为**单一字符串**（平台变量前缀 + 相对片段，如 `$HOME/.pi`）或**按平台对象**（键固定为 `linux`、`macos`、`windows`），见 [config_dir 声明语法](#config_dir-声明语法)。 |
 | `entry` | 是 | 入口 wasm 的**回源地址**。约束按来源分列（见下）。 |
-| `settings_schema` | 否 | 该插件私有配置（**表单**）的 JSON Schema（draft 2020-12），内联在 manifest 里。缺省即该插件没有要用户填写的配置项；宿主不校验表单内容，前端据它渲染表单（见 [插件配置（get-config import）](#插件配置get-config-import)）。 |
 
 `config_dir` 是一个**目录**：宿主按当前平台把它解析为绝对路径，并在投影时预开放为组件内的 `/`（插件唯一的写入面）。因此组件里写 `/agent/models.json` 就等于写 `config_dir/agent/models.json`。
 
@@ -128,8 +129,8 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 
 语义要点：
 
-- file 来源与 https 来源同构：添加与重新加载都会按 `entry` 取 wasm（相对路径读来源目录内文件，https URL 联网获取），一并落位 `~/.maestro/plugins/<id>/`（`manifest.json` 原文 + `plugin.wasm`）；该目录还承载**插件配置** `config.json`（见 [插件配置（get-config import）](#插件配置get-config-import)），它不属于落位产物、由宿主单独读写。
-- 「重新加载」按来源重取后**逐文件覆盖**落位目录里的 `manifest.json` 与 `plugin.wasm`，**不动** `config.json`（见 ADR 0017）。由于不再是整目录替换，替换中途失败可能留下「新 manifest + 旧 wasm」的混合态，恢复手段是再次「重新加载」；上游 manifest 的 id 变更会报错并保持旧状态。
+- file 来源与 https 来源同构：添加与重新加载都会按 `entry` 取 wasm（相对路径读来源目录内文件，https URL 联网获取），一并落位 `~/.maestro/plugins/<id>/`（`manifest.json` 原文 + `plugin.wasm`）。
+- 「重新加载」成功才替换落位目录，失败时旧版本保持可用；上游 manifest 的 id 变更会报错并保持旧状态。
 - **没有单独的「更新」操作**：重新加载就是按来源重新获取，每次只作用于一个来源。
 - 应用启动只读落位目录、不联网、不读来源目录，因此 file 来源的插件离线也可装载。
 - 「移除」只删配置条目与落位副本、幂等，**不动你的插件项目目录与构建产物**。
@@ -177,7 +178,7 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 - 宿主不代写文件：写入由插件在沙箱内经 WASI 直接落盘（因此 TOML、JSON、SQLite 等非纯文件配置天然可支持）；代价是宿主对写入内容零可见。
 - 宿主与第三方插件使用完全一致的校验与沙箱（manifest 校验、`config_dir` 规则、实例化校验、id 冲突检查），不因来源放松。
 - 信任模型是**安装即信任**，与自行安装 npm 包同级：沙箱隔离能力滥用，宿主不审查插件内容。
-- 组件只导出 `write-providers`；宿主另**恒定提供** `logger`（ADR 0013）与 `get-config`（ADR 0017）两个 import，组件不引用即不受影响。
+- 组件只导出 `write-providers`。
 
 ### fuel 预算
 
@@ -204,20 +205,12 @@ log(Level::Warning, "模型 x 已弃用，仍继续投影");
 - **message 不得携带 API Key 等凭证**——宿主不做内容审查，上报即落盘进日志文件（该文件定位是「发给维护者」的现场证据）。
 - 插件不调用 `log` 时行为与 1.0.0 合同完全一致；宿主恒定提供该 import，但 WIT 包版本升级（1.0.0 → 1.1.0）后宿主只注册当前版本，按旧合同编译的组件需以新版 SDK 重编译。
 
-## 插件配置（get-config import）
+## 配置值的插值（ADR 0014 / ADR 0015）
 
-有些插件需要用户选择工具专有的配置项（例如选定单一 model），这些项不属于 Maestro 的通用模型。这类配置放在**插件配置**里，经 `get-config` import 交给插件（ADR 0017）：
+`write-providers` 收到的 `base-url` 等字符串值，是宿主在投影前把**占位符**替换为全局变量（`variables`）实际值后的**字面值**——插件不需要、也无法感知变量。宿主侧的书写约束：
 
-```wit
-// maestro:plugin@1.2.0 world 新增的宿主 import
-get-config: func() -> option<string>;
-```
-
-- **文件**：`~/.maestro/plugins/<id>/config.json`，结构 `{ "variables": {…}, "form": {…} }`。`variables` 是**变量覆盖**，供宿主在投影前插值，插件看不到；`form` 是插件私有数据，形状由 manifest 的 `settings_schema` 描述。宿主的 SDK 会把该 import 封装为一行调用（与 `log` 同款）。
-- **交付**：`get-config` 返回 `form` 段的**原始 JSON 文本**；没有该段（或没声明 `settings_schema`）时返回 `none`，由插件自行解析与判默认。
-- **不校验**：宿主只搬运不解释——输入期由前端按 `settings_schema` 校验，运行期由插件自行判断。
-- **生命周期**：该文件由宿主读、随插件存在；「重新加载」不覆盖它，「移除」会连同落位目录一并删除。
-- **投影值已解析**：`write-providers` 收到的 `base-url` 等值，是宿主已把占位符替换完的**字面值**——插件不需要、也无法感知变量（变量与插值见 ADR 0015，占位符语法见 ADR 0014）。
+- 值里的字面 `$` 与 `\` 必须写成 `\$` 与 `\\`；`${name}` / `$name` / `${name:default}` 引用变量，未定义即投影失败。
+- `api_key` 与模型 `id` 原样投影、**不参与插值**。
 
 ## 构建
 

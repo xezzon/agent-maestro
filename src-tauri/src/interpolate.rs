@@ -1,10 +1,10 @@
-//! 占位符插值（ADR 0015 / ADR 0017）：把配置值里的占位符替换为变量的实际值。
+//! 占位符插值（ADR 0014 / ADR 0015）：把配置值里的占位符替换为变量的实际值。
 //!
 //! 语法遵循第三方库 [`subst`]（0.3.x）：`${name}` 与短式 `$name`、`${name:default}`
 //! 内联默认值（变量名命中表时优先于内联默认值），反斜杠转义 `$ \ : { }`。
 //! 插值在投影时由宿主执行，插件只收到替换后的字面值。
 //!
-//! 本模块是 ADR 0017 的换库接缝：`interpolate_value` 是唯一接触 subst 的纯函数，
+//! 本模块是 ADR 0014 的换库接缝：`interpolate_value` 是唯一接触 subst 的纯函数，
 //! 测试钉住其语义（升级或更换库改变行为即红，换库成本因此可控）；逐字段的
 //! 结构知识在 `Provider::interpolate`，跨 Provider 的编排在 `interpolate_providers`。
 
@@ -28,7 +28,7 @@ pub(crate) fn interpolate_slot(
 
 /// 对全部 Provider 插值，返回替换后的字面值副本。
 ///
-/// 作用域＝Provider 的一切字符串值（ADR 0015）；
+/// 作用域＝Provider 中除 `api_key` 与模型 `id` 外的字符串值（ADR 0015）；
 /// 任一字段失败即整体失败，原因含 slug + 字段名 + 库报错，不含值与密钥。
 pub fn interpolate_providers(
     providers: &BTreeMap<String, Provider>,
@@ -68,7 +68,7 @@ mod tests {
         interpolate_value(template, variables).unwrap_err()
     }
 
-    /// 换库哨兵（ADR 0017）：`${name}` 长式替换，前后缀拼接原样保留。
+    /// 换库哨兵（ADR 0014）：`${name}` 长式替换，前后缀拼接原样保留。
     #[test]
     fn long_form_placeholder_with_prefix_and_suffix() {
         let variables = vars(&[("HOST", "api.example.com")]);
@@ -120,7 +120,7 @@ mod tests {
         assert_eq!(interpolated(r"\:", &variables), ":");
         assert_eq!(interpolated(r"\{", &variables), "{");
         assert_eq!(interpolated(r"\}", &variables), "}");
-        // 转义后的 `$` 不再构成占位符：api_key 含 `$` 须这样书写。
+        // 转义后的 `$` 不再构成占位符：值里含字面 `$` 须这样书写。
         assert_eq!(interpolated(r"sk-\$abc${name}", &variables), "sk-$abcv");
     }
 
@@ -139,7 +139,7 @@ mod tests {
     }
 
     /// 换库哨兵：值本身以 `$`/`\` 开头不会被特殊化——含 `$` 的字面值必须转义，
-    /// 未转义即报错（ADR 0017 接受的行为变化，约束写进 SDK README）。
+    /// 未转义即报错（ADR 0014 接受的行为变化，约束写进 SDK README）。
     #[test]
     fn unescaped_dollar_in_a_value_is_treated_as_a_reference() {
         let variables = vars(&[]);

@@ -35,7 +35,7 @@ reqwest = { version = "0.13", features = ["blocking"] }
 url = "2"
 wasmtime = { version = "48.0.1", features = ["component-model", "wat"] }
 wasmtime-wasi = "48.0.1"
-# 占位符插值（ADR 0017）：`${name}`/`$name`/`${name:default}`，反斜杠转义。
+# 占位符插值（ADR 0014）：`${name}`/`$name`/`${name:default}`，反斜杠转义。
 subst = "0.3"
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
