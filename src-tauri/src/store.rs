@@ -476,7 +476,7 @@ impl AppStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{Endpoints, ModelEntry};
+    use crate::provider::{ModelEntry, Protocol};
 
     #[test]
     fn empty_config_serializes_to_version_1_schema() {
@@ -513,10 +513,13 @@ mod tests {
 
         let provider = &parsed.providers["ollama"];
         assert_eq!(
-            provider.base_url.openai_completions,
-            Some("http://localhost:11434/v1".to_owned())
+            provider
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
+            Some("http://localhost:11434/v1")
         );
-        assert_eq!(provider.base_url.anthropic_messages, None);
+        assert!(!provider.base_url.contains_key(&Protocol::AnthropicMessages));
         assert_eq!(provider.api_key, "");
         assert_eq!(provider.models.len(), 2);
         assert_eq!(provider.models[0].id, "deepseek-chat");
@@ -548,10 +551,10 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:11434/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -560,10 +563,13 @@ mod tests {
         let reopened = Store::new();
         let provider = &reopened.get().unwrap().providers["ollama"];
         assert_eq!(
-            provider.base_url.openai_completions,
-            Some("http://localhost:11434/v1".to_owned())
+            provider
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
+            Some("http://localhost:11434/v1")
         );
-        assert_eq!(provider.base_url.anthropic_messages, None);
+        assert!(!provider.base_url.contains_key(&Protocol::AnthropicMessages));
         assert_eq!(provider.api_key, "");
         assert!(provider.models.is_empty());
     }
@@ -577,10 +583,10 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:11434/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -590,10 +596,10 @@ mod tests {
             .update_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://api.example.com/v1".to_owned(),
+                    )]),
                     api_key: "sk-test".to_owned(),
                     ..Provider::default()
                 },
@@ -603,10 +609,13 @@ mod tests {
         let reopened = Store::new();
         let provider = &reopened.get().unwrap().providers["ollama"];
         assert_eq!(
-            provider.base_url.openai_completions,
-            Some("https://api.example.com/v1".to_owned())
+            provider
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
+            Some("https://api.example.com/v1")
         );
-        assert_eq!(provider.base_url.anthropic_messages, None);
+        assert!(!provider.base_url.contains_key(&Protocol::AnthropicMessages));
         assert_eq!(provider.api_key, "sk-test");
         assert!(provider.models.is_empty());
     }
@@ -621,10 +630,10 @@ mod tests {
             .update_provider(
                 "ghost",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:9".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:9".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -647,10 +656,10 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:11434/v1".to_owned(),
+                    )]),
                     api_key: "sk-old".to_owned(),
                     models: vec![ModelEntry {
                         id: "old-model".to_owned(),
@@ -666,10 +675,10 @@ mod tests {
             .update_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://api.example.com/v1".to_owned(),
+                    )]),
                     api_key: "sk-new".to_owned(),
                     models: vec![ModelEntry {
                         id: "new-model".to_owned(),
@@ -682,7 +691,10 @@ mod tests {
         let provider = &store.get().unwrap().providers["ollama"];
         assert_eq!(provider.api_key, "sk-new", "api_key 随整包替换覆盖为明文");
         assert_eq!(
-            provider.base_url.openai_completions.as_deref(),
+            provider
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
             Some("https://api.example.com/v1"),
             "端点整包替换"
         );
@@ -764,10 +776,10 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:11434/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -778,10 +790,10 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::None,
-                        anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::AnthropicMessages,
+                        "http://127.0.0.1:8080".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -790,10 +802,13 @@ mod tests {
         let reopened = Store::new();
         let provider = &reopened.get().unwrap().providers["ollama"];
         assert_eq!(
-            provider.base_url.anthropic_messages,
-            Some("http://127.0.0.1:8080".to_owned())
+            provider
+                .base_url
+                .get(&Protocol::AnthropicMessages)
+                .map(String::as_str),
+            Some("http://127.0.0.1:8080")
         );
-        assert_eq!(provider.base_url.openai_completions, None);
+        assert!(!provider.base_url.contains_key(&Protocol::OpenaiCompletions));
         assert!(provider.models.is_empty());
     }
 
@@ -807,10 +822,10 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:11434/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -835,10 +850,10 @@ mod tests {
                 .create_provider(
                     slug,
                     Provider {
-                        base_url: Endpoints {
-                            openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
-                            anthropic_messages: Option::None,
-                        },
+                        base_url: BTreeMap::from([(
+                            Protocol::OpenaiCompletions,
+                            "http://localhost:9/v1".to_owned(),
+                        )]),
                         ..Provider::default()
                     },
                 )
@@ -862,10 +877,10 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:11434/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -874,12 +889,10 @@ mod tests {
             .create_provider(
                 "openrouter",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::None,
-                        anthropic_messages: Option::Some(
-                            "https://anthropic.example.com/v1".to_owned(),
-                        ),
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::AnthropicMessages,
+                        "https://anthropic.example.com/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -889,12 +902,18 @@ mod tests {
         let config = reopened.get().unwrap();
         assert_eq!(config.providers.len(), 2);
         assert_eq!(
-            config.providers["ollama"].base_url.openai_completions,
-            Some("http://localhost:11434/v1".to_owned())
+            config.providers["ollama"]
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
+            Some("http://localhost:11434/v1")
         );
         assert_eq!(
-            config.providers["openrouter"].base_url.anthropic_messages,
-            Some("https://anthropic.example.com/v1".to_owned())
+            config.providers["openrouter"]
+                .base_url
+                .get(&Protocol::AnthropicMessages)
+                .map(String::as_str),
+            Some("https://anthropic.example.com/v1")
         );
     }
 
@@ -929,10 +948,10 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:11434/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -945,12 +964,18 @@ mod tests {
         assert_eq!(openrouter.models[0].id, "z-model");
         assert_eq!(openrouter.models[1].id, "a-model");
         assert_eq!(
-            openrouter.base_url.openai_completions,
-            Some("https://api.example.com/v1".to_owned())
+            openrouter
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
+            Some("https://api.example.com/v1")
         );
         assert_eq!(
-            openrouter.base_url.anthropic_messages,
-            Some("https://anthropic.example.com/v1".to_owned())
+            openrouter
+                .base_url
+                .get(&Protocol::AnthropicMessages)
+                .map(String::as_str),
+            Some("https://anthropic.example.com/v1")
         );
     }
 
@@ -973,10 +998,10 @@ mod tests {
                 .create_provider(
                     "foo",
                     Provider {
-                        base_url: Endpoints {
-                            openai_completions: Option::Some("http://localhost:9".to_owned()),
-                            anthropic_messages: Option::None,
-                        },
+                        base_url: BTreeMap::from([(
+                            Protocol::OpenaiCompletions,
+                            "http://localhost:9".to_owned(),
+                        )]),
                         ..Provider::default()
                     }
                 )
@@ -1011,10 +1036,10 @@ mod tests {
                 .create_provider(
                     "foo",
                     Provider {
-                        base_url: Endpoints {
-                            openai_completions: Option::Some("http://localhost:9".to_owned()),
-                            anthropic_messages: Option::None,
-                        },
+                        base_url: BTreeMap::from([(
+                            Protocol::OpenaiCompletions,
+                            "http://localhost:9".to_owned(),
+                        )]),
                         ..Provider::default()
                     }
                 )
@@ -1036,10 +1061,10 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:9/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1049,10 +1074,10 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::None,
-                        anthropic_messages: Option::Some("http://localhost:10".to_owned()),
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::AnthropicMessages,
+                        "http://localhost:10".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1062,10 +1087,17 @@ mod tests {
         let config = store.get().unwrap();
         assert_eq!(config.providers.len(), 1);
         assert_eq!(
-            config.providers["foo"].base_url.openai_completions,
-            Some("http://localhost:9/v1".to_owned())
+            config.providers["foo"]
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
+            Some("http://localhost:9/v1")
         );
-        assert_eq!(config.providers["foo"].base_url.anthropic_messages, None);
+        assert!(
+            !config.providers["foo"]
+                .base_url
+                .contains_key(&Protocol::AnthropicMessages)
+        );
     }
 
     #[test]
@@ -1078,10 +1110,10 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::None,
-                        anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::AnthropicMessages,
+                        "http://127.0.0.1:8080".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1114,10 +1146,10 @@ mod tests {
             .create_provider(
                 "openrouter",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://api.example.com/v1".to_owned(),
+                    )]),
                     models: models.clone(),
                     ..Provider::default()
                 },
@@ -1146,10 +1178,10 @@ mod tests {
             .create_provider(
                 "openai",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://api.openai.com/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://api.openai.com/v1".to_owned(),
+                    )]),
                     models: vec![gpt_4o()],
                     ..Provider::default()
                 },
@@ -1159,10 +1191,10 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://127.0.0.1:8080/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://127.0.0.1:8080/v1".to_owned(),
+                    )]),
                     models: vec![
                         gpt_4o(),
                         ModelEntry {
@@ -1201,10 +1233,10 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "http://localhost:9/v1".to_owned(),
+                    )]),
                     models: vec![
                         ModelEntry {
                             id: "gpt-4o".to_owned(),
@@ -1404,10 +1436,10 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${HOST}/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1441,12 +1473,13 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
-                        anthropic_messages: Option::Some(
+                    base_url: BTreeMap::from([
+                        (Protocol::OpenaiCompletions, "https://${HOST}/v1".to_owned()),
+                        (
+                            Protocol::AnthropicMessages,
                             "https://${FALLBACK:host.example.com}".to_owned(),
                         ),
-                    },
+                    ]),
                     ..Provider::default()
                 },
             )
@@ -1456,8 +1489,8 @@ mod tests {
         assert_eq!(
             reopened.get().unwrap().providers["gateway"]
                 .base_url
-                .openai_completions
-                .as_deref(),
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
             Some("https://${HOST}/v1"),
         );
     }
@@ -1471,10 +1504,10 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
-                        anthropic_messages: Option::None,
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://api.example.com/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1484,10 +1517,10 @@ mod tests {
             .update_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${MISSING}/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${MISSING}/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1498,8 +1531,8 @@ mod tests {
         assert_eq!(
             reopened.get().unwrap().providers["gateway"]
                 .base_url
-                .openai_completions
-                .as_deref(),
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
             Some("https://api.example.com/v1"),
             "被拒的更新不落盘，原记录保持不变"
         );
@@ -1521,10 +1554,10 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${HOST}/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1558,12 +1591,10 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some(
-                            "https://${OPT:fallback.example.com}/v1".to_owned(),
-                        ),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${OPT:fallback.example.com}/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1590,10 +1621,10 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${HOST}/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1623,10 +1654,10 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${HOST/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${HOST/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1760,7 +1791,10 @@ mod tests {
         let provider = &reopened.get().unwrap().providers["ollama"];
         assert!(provider.enabled);
         assert_eq!(
-            provider.base_url.openai_completions.as_deref(),
+            provider
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
             Some("http://localhost:11434/v1")
         );
         assert_eq!(provider.api_key, "sk-legacy");
@@ -1825,10 +1859,10 @@ mod tests {
                 "gateway",
                 Provider {
                     enabled: false,
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${UNDEFINED}/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${UNDEFINED}/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1846,10 +1880,10 @@ mod tests {
             .create_provider(
                 "enabled",
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${HOST}/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1880,10 +1914,10 @@ mod tests {
                 "gateway",
                 Provider {
                     enabled: false,
-                    base_url: Endpoints {
-                        openai_completions: Option::Some("https://${MISSING}/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://${MISSING}/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             )
@@ -1893,7 +1927,10 @@ mod tests {
         let provider = &store.get().unwrap().providers["gateway"];
         assert!(provider.enabled, "被拒的更新不改配置");
         assert_ne!(
-            provider.base_url.openai_completions.as_deref(),
+            provider
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
             Some("https://${MISSING}/v1")
         );
     }

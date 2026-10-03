@@ -1,28 +1,34 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fmt::{Debug, Display},
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::interpolate::{interpolate_slot, interpolate_value};
+use crate::interpolate::interpolate_value;
 
 /// Provider 在各协议下的端点（每协议至多一个；见 ADR 0003）。
 ///
-/// `None` 即未配置；序列化时跳过（键缺省而非空串），键缺失同样读作 `None`。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) struct Endpoints {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) openai_completions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) anthropic_messages: Option<String>,
-}
+/// 键缺省即未配置；显式空串原样保留（键在而值为空串），不做归一化。
+pub(crate) type Endpoints = BTreeMap<Protocol, String>;
 
 /// Provider 的线协议，与 WIT 合同的 `protocol` 一一对应；序列化为 kebab-case，
 /// 与 [`Endpoints`] 的槽位键同名（`openai-completions` / `anthropic-messages`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Protocol {
     OpenaiCompletions,
     AnthropicMessages,
+}
+
+impl Display for Protocol {
+    /// serde 线名（`openai-completions` / `anthropic-messages`），用于插值字段名。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Protocol::OpenaiCompletions => "openai-completions",
+            Protocol::AnthropicMessages => "anthropic-messages",
+        })
+    }
 }
 
 /// Provider 下跨协议共享的一个模型条目。
@@ -41,6 +47,7 @@ pub(crate) struct Provider {
     /// 是否参与投影：默认启用，旧配置缺该字段同样视为启用（向后兼容）。
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
+    /// 按协议分槽的端点表：键缺省即未配置，显式空串原样保留（见 ADR 0003）。
     #[serde(default)]
     pub(crate) base_url: Endpoints,
     /// 界面所选、用于投影的协议（只存协议，端点 URL 不重复落盘）；`None` 即未选择，
@@ -81,7 +88,7 @@ impl Default for Provider {
 /// 手工实现 Debug：api_key 渲染为 `<set>`/`<unset>`，绝不携带明文。
 /// `Config` 的派生 `Debug` 内层调用它，因此嵌套在 Config 中的 Provider 同获保护
 /// （ADR 0008：凭证绝不落盘进日志）。
-impl std::fmt::Debug for Provider {
+impl Debug for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Provider")
             .field("enabled", &self.enabled)
@@ -108,25 +115,23 @@ impl Provider {
     /// 替换为变量实际值，返回字面值副本；失败返回（字段名, 库报错）。
     ///
     /// 占位符语法与转义由 `crate::interpolate` 的纯函数执行（ADR 0014 换库哨兵）；
-    /// 本方法只负责穷举自身的字符串字段。
+    /// 本方法只负责收集自身的字符串值。
     ///
-    /// 作用域＝除 `api_key` 与模型 `id` 外的一切字符串值（ADR 0015）：字符串
-    /// 字段穷举构造、不带
-    /// `..Default`，给结构体新增字段时在此处编译失败，提示把新字段纳入插值。
+    /// 作用域＝除 `api_key` 与模型 `id` 外的一切字符串值（ADR 0015）。端点表按
+    /// 协议遍历，新增协议自动纳入插值；不再有「新增字符串字段即编译失败」的哨兵，
+    /// 但新增协议仍须补 `to_wit_protocol` 的穷举 match，否则插件侧收不到该端点。
     /// `enabled` 与 `selected_protocol` 是状态/枚举而非字符串值，原样透传、
     /// 不参与插值。
     pub(crate) fn interpolate(
         &self,
         variables: &BTreeMap<String, String>,
     ) -> Result<Provider, FieldError> {
-        let field = "base_url.openai-completions";
-        let openai_completions =
-            interpolate_slot(self.base_url.openai_completions.as_deref(), variables)
-                .map_err(|reason| (field.to_owned(), reason))?;
-        let field = "base_url.anthropic-messages";
-        let anthropic_messages =
-            interpolate_slot(self.base_url.anthropic_messages.as_deref(), variables)
-                .map_err(|reason| (field.to_owned(), reason))?;
+        let mut base_url = BTreeMap::new();
+        for (protocol, url) in &self.base_url {
+            let field = format!("base_url.{protocol}");
+            let value = interpolate_value(url, variables).map_err(|reason| (field, reason))?;
+            base_url.insert(*protocol, value);
+        }
         // api_key 原样保留，不参与插值。
         let api_key = self.api_key.clone();
         let mut models = Vec::with_capacity(self.models.len());
@@ -147,10 +152,7 @@ impl Provider {
         Ok(Provider {
             // enabled 是状态而非配置值：原样透传，不参与插值。
             enabled: self.enabled,
-            base_url: Endpoints {
-                openai_completions,
-                anthropic_messages,
-            },
+            base_url,
             // selected_protocol 是枚举选择而非字符串值：原样透传，不参与插值。
             selected_protocol: self.selected_protocol,
             api_key,
@@ -167,7 +169,10 @@ mod tests {
     fn endpoints_round_trip_explicit_empty_slots_verbatim() {
         let parsed: Endpoints = serde_json::from_str(r#"{"openai-completions":""}"#).unwrap();
 
-        assert_eq!(parsed.openai_completions, Some(String::new()));
+        assert_eq!(
+            parsed.get(&Protocol::OpenaiCompletions).map(String::as_str),
+            Some("")
+        );
         assert_eq!(
             serde_json::to_value(&parsed).unwrap(),
             serde_json::json!({"openai-completions": ""})
@@ -181,10 +186,16 @@ mod tests {
         let parsed: Provider = serde_json::from_str(text).unwrap();
 
         assert_eq!(
-            parsed.base_url.anthropic_messages,
-            Some("http://127.0.0.1:8080".to_owned())
+            parsed
+                .base_url
+                .get(&Protocol::AnthropicMessages)
+                .map(String::as_str),
+            Some("http://127.0.0.1:8080")
         );
-        assert_eq!(parsed.base_url.openai_completions, None);
+        assert!(
+            !parsed.base_url.contains_key(&Protocol::OpenaiCompletions),
+            "未配置的协议键缺省"
+        );
         assert_eq!(parsed.api_key, "");
         assert!(parsed.models.is_empty());
         assert!(
@@ -261,10 +272,16 @@ mod tests {
         let provider = Provider {
             enabled: true,
             selected_protocol: None,
-            base_url: Endpoints {
-                openai_completions: Some("https://api.example.com/v1".to_owned()),
-                anthropic_messages: Some("https://anthropic.example.com/v1".to_owned()),
-            },
+            base_url: BTreeMap::from([
+                (
+                    Protocol::OpenaiCompletions,
+                    "https://api.example.com/v1".to_owned(),
+                ),
+                (
+                    Protocol::AnthropicMessages,
+                    "https://anthropic.example.com/v1".to_owned(),
+                ),
+            ]),
             api_key: "sk-test".to_owned(),
             models: vec![ModelEntry {
                 id: "gpt-4o".to_owned(),
@@ -296,10 +313,16 @@ mod tests {
     #[test]
     fn selected_protocol_round_trips_and_defaults_to_none() {
         let selected = Provider {
-            base_url: Endpoints {
-                openai_completions: Some("https://a.example.com/v1".to_owned()),
-                anthropic_messages: Some("https://b.example.com".to_owned()),
-            },
+            base_url: BTreeMap::from([
+                (
+                    Protocol::OpenaiCompletions,
+                    "https://a.example.com/v1".to_owned(),
+                ),
+                (
+                    Protocol::AnthropicMessages,
+                    "https://b.example.com".to_owned(),
+                ),
+            ]),
             selected_protocol: Some(Protocol::AnthropicMessages),
             ..Provider::default()
         };
@@ -376,10 +399,10 @@ mod tests {
     fn interpolate_replaces_strings_field_by_field_and_keeps_the_original() {
         let provider = Provider {
             enabled: true,
-            base_url: Endpoints {
-                openai_completions: Some("https://${HOST}/v1".to_owned()),
-                anthropic_messages: None,
-            },
+            base_url: BTreeMap::from([(
+                Protocol::OpenaiCompletions,
+                "https://${HOST}/v1".to_owned(),
+            )]),
             selected_protocol: Some(Protocol::OpenaiCompletions),
             api_key: "${KEY}".to_owned(),
             models: vec![
@@ -402,7 +425,10 @@ mod tests {
         let projected = provider.interpolate(&variables).unwrap();
 
         assert_eq!(
-            projected.base_url.openai_completions.as_deref(),
+            projected
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
             Some("https://api.example.com/v1")
         );
         assert_eq!(
@@ -429,10 +455,10 @@ mod tests {
     #[test]
     fn interpolate_failure_reports_field_and_variable_without_values() {
         let provider = Provider {
-            base_url: Endpoints {
-                openai_completions: Some("${UNDEFINED_VAR}".to_owned()),
-                ..Endpoints::default()
-            },
+            base_url: BTreeMap::from([(
+                Protocol::OpenaiCompletions,
+                "${UNDEFINED_VAR}".to_owned(),
+            )]),
             ..Provider::default()
         };
 

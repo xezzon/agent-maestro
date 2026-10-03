@@ -57,28 +57,18 @@ fn to_wit_provider(
     (wit_providers, skipped_provider)
 }
 
-/// 宿主只做映射、不做选择（ADR 0016）：按固定顺序（openai-completions 在前）
+/// 宿主只做映射、不做选择（ADR 0016）：按协议顺序（openai-completions 在前）
 /// 收集非空端点；空串与缺省同义（未配置）。
 fn collect_endpoints(provider: &Provider) -> Vec<WitEndpoint> {
-    let mut endpoints = Vec::new();
-    for (protocol, base_url) in [
-        (
-            WitProtocol::OpenaiCompletions,
-            provider.base_url.openai_completions.as_deref(),
-        ),
-        (
-            WitProtocol::AnthropicMessages,
-            provider.base_url.anthropic_messages.as_deref(),
-        ),
-    ] {
-        if let Some(base_url) = base_url.filter(|url| !url.is_empty()) {
-            endpoints.push(WitEndpoint {
-                protocol,
-                base_url: base_url.to_owned(),
-            });
-        }
-    }
-    endpoints
+    provider
+        .base_url
+        .iter()
+        .filter(|(_, base_url)| !base_url.is_empty())
+        .map(|(protocol, base_url)| WitEndpoint {
+            protocol: to_wit_protocol(*protocol),
+            base_url: base_url.clone(),
+        })
+        .collect()
 }
 
 fn to_wit_protocol(protocol: Protocol) -> WitProtocol {
@@ -105,11 +95,15 @@ mod tests {
     use crate::provider::Endpoints;
 
     fn provider(openai: Option<&str>, anthropic: Option<&str>) -> Provider {
+        let mut base_url = Endpoints::default();
+        if let Some(url) = openai {
+            base_url.insert(Protocol::OpenaiCompletions, url.to_owned());
+        }
+        if let Some(url) = anthropic {
+            base_url.insert(Protocol::AnthropicMessages, url.to_owned());
+        }
         Provider {
-            base_url: Endpoints {
-                openai_completions: openai.map(str::to_owned),
-                anthropic_messages: anthropic.map(str::to_owned),
-            },
+            base_url,
             ..Provider::default()
         }
     }
@@ -173,10 +167,10 @@ mod tests {
             "gateway".to_owned(),
             Provider {
                 enabled: true,
-                base_url: Endpoints {
-                    anthropic_messages: Some("https://anthropic.example.com".to_owned()),
-                    ..Endpoints::default()
-                },
+                base_url: BTreeMap::from([(
+                    Protocol::AnthropicMessages,
+                    "https://anthropic.example.com".to_owned(),
+                )]),
                 api_key: "sk-plain".to_owned(),
                 models: vec![
                     ModelEntry {

@@ -170,7 +170,10 @@ mod tests {
 
         assert_eq!(request.slug, "openrouter");
         assert_eq!(
-            request.base_url.openai_completions.as_deref(),
+            request
+                .base_url
+                .get(&Protocol::OpenaiCompletions)
+                .map(String::as_str),
             Some("http://127.0.0.1:8080/v1")
         );
         assert_eq!(request.api_key.as_deref(), Some("sk-test"));
