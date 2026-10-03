@@ -10,21 +10,21 @@ use crate::{paths::MaestroPaths, plugin::PluginEntry, provider::Provider};
 use serde::{Deserialize, Serialize};
 
 /// 配置文件 schema 版本（见 ADR 0001）。
-pub const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 1;
 
 /// 配置存储的锁被毒化（其它命令持锁期间 panic）时对用户可见的原因。
 /// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
-pub const STORE_LOCK_POISONED: &str = "配置存储不可用";
+const STORE_LOCK_POISONED: &str = "配置存储不可用";
 
 /// `~/.maestro/config.json` 的顶层文档（version 1 schema）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Config {
-    pub version: u32,
+pub(crate) struct Config {
+    pub(crate) version: u32,
     #[serde(default)]
-    pub providers: BTreeMap<String, Provider>,
+    pub(crate) providers: BTreeMap<String, Provider>,
     /// 无插件时省略该段，保持与旧配置文件一致。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub plugins: Vec<PluginEntry>,
+    pub(crate) plugins: Vec<PluginEntry>,
 }
 
 impl Default for Config {
@@ -39,7 +39,7 @@ impl Default for Config {
 
 /// 配置存储的错误；转为 `String` 时面向最终用户。
 #[derive(Debug, Clone)]
-pub enum StoreError {
+pub(crate) enum StoreError {
     /// 配置文件存在但无法解析。
     Corrupt { path: PathBuf, detail: String },
     /// 配置文件版本不被当前应用支持。
@@ -98,7 +98,7 @@ impl From<StoreError> for String {
 ///
 /// 配置文件损坏（无法解析或版本不受支持）时进入保护状态：
 /// 读取与写入一律报错，绝不静默重建或覆盖原文件。
-pub struct Store {
+pub(crate) struct Store {
     config_path: PathBuf,
     state: Result<Config, StoreError>,
 }
@@ -106,7 +106,7 @@ pub struct Store {
 impl Store {
     /// 从全局 [`MaestroPaths`] 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
     /// 损坏则进入保护状态。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let config_path = MaestroPaths::get().config_path();
         let state = match fs::read_to_string(&config_path) {
             Ok(text) => Self::parse(&config_path, &text),
@@ -134,12 +134,16 @@ impl Store {
     }
 
     /// 当前配置；存储处于保护状态时返回错误。
-    pub fn get(&self) -> Result<&Config, &StoreError> {
+    pub(crate) fn get(&self) -> Result<&Config, &StoreError> {
         self.state.as_ref()
     }
 
     /// 新建一条 Provider（slug 唯一），成功后原子写回磁盘。
-    pub fn create_provider(&mut self, slug: &str, provider: Provider) -> Result<(), StoreError> {
+    pub(crate) fn create_provider(
+        &mut self,
+        slug: &str,
+        provider: Provider,
+    ) -> Result<(), StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         if config.providers.contains_key(slug) {
             return Err(StoreError::DuplicateSlug {
@@ -155,7 +159,7 @@ impl Store {
 
     /// 整包替换指定 Provider 的端点、模型列表与 API Key（明文）。
     /// slug 不存在时报错，不做 upsert。
-    pub fn update_provider(
+    pub(crate) fn update_provider(
         &mut self,
         slug: &str,
         provider: Provider,
@@ -177,7 +181,7 @@ impl Store {
     }
 
     /// 删除 Provider，其端点、模型与 API Key 随记录一并移除，不留孤儿数据。
-    pub fn delete_provider(&mut self, slug: &str) -> Result<Provider, StoreError> {
+    pub(crate) fn delete_provider(&mut self, slug: &str) -> Result<Provider, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         let mut next = config.clone();
 
@@ -200,7 +204,7 @@ impl Store {
     ///
     /// 同一临界区内复检来源与 id 冲突：插件服务的预检（`check_id_conflict`）与
     /// 此处写入分属两次加锁，两次锁之间另一来源可能已占用同一 id。
-    pub fn add_plugin(&mut self, plugin_entry: &PluginEntry) -> Result<(), StoreError> {
+    pub(crate) fn add_plugin(&mut self, plugin_entry: &PluginEntry) -> Result<(), StoreError> {
         let source = plugin_entry.source.clone();
         let config = self.state.as_ref().map_err(Clone::clone)?;
         if config.plugins.iter().any(|plugin| plugin.source == source) {
@@ -227,7 +231,7 @@ impl Store {
     }
 
     /// 删除插件条目，返回被删除的条目（调用方据此删除落位目录）。
-    pub fn delete_plugin(&mut self, source: &str) -> Result<PluginEntry, StoreError> {
+    pub(crate) fn delete_plugin(&mut self, source: &str) -> Result<PluginEntry, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         let mut next = config.clone();
         let index = next
@@ -243,13 +247,13 @@ impl Store {
         Ok(removed)
     }
 
-    pub fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
+    pub(crate) fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         Ok(config.plugins.clone())
     }
 
     /// 按来源取插件条目（`source` 即条目唯一身份）。
-    pub fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
+    pub(crate) fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
         let config = self.state.as_ref().map_err(Clone::clone)?;
         config
             .plugins
@@ -280,7 +284,11 @@ impl Store {
     }
 
     /// 启用/禁用插件条目。
-    pub fn set_plugin_enabled(&mut self, source: &str, enabled: bool) -> Result<(), StoreError> {
+    pub(crate) fn set_plugin_enabled(
+        &mut self,
+        source: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
         self.update_plugins(source, |plugins| {
             for plugin in plugins.iter_mut() {
                 if plugin.source == source {
@@ -319,17 +327,17 @@ impl Store {
 }
 
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
-pub struct AppStore {
+pub(crate) struct AppStore {
     /// 读多写少：list_plugins、plugin_by_source、provider 列表等只读路径在
     /// 同一 Store 上并发；写操作（add_plugin / set_plugin_enabled /
     /// create_provider 等）走 `AppStore::write()` 独占。
-    pub store: RwLock<Store>,
+    pub(crate) store: RwLock<Store>,
 }
 
 impl AppStore {
     /// 取只读守卫；调用方仅读取配置时使用。
     /// 其它命令持写锁期间 panic 会毒化锁，此时报错而非静默继续。
-    pub fn read(&self) -> Result<RwLockReadGuard<'_, Store>, String> {
+    pub(crate) fn read(&self) -> Result<RwLockReadGuard<'_, Store>, String> {
         self.store
             .read()
             .map_err(|_| STORE_LOCK_POISONED.to_owned())
@@ -337,7 +345,7 @@ impl AppStore {
 
     /// 取写守卫；调用方对配置做修改时使用。独占期间所有读守卫与其它写守卫
     /// 均需等待。锁被毒化同样报错。
-    pub fn write(&self) -> Result<RwLockWriteGuard<'_, Store>, String> {
+    pub(crate) fn write(&self) -> Result<RwLockWriteGuard<'_, Store>, String> {
         self.store
             .write()
             .map_err(|_| STORE_LOCK_POISONED.to_owned())

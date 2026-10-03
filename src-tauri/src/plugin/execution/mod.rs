@@ -7,7 +7,7 @@ mod bindings {
     });
 }
 
-pub use provider::SkippedProvider;
+pub(crate) use provider::SkippedProvider;
 use std::path::Path;
 use wasmtime::{
     Engine, StoreLimits, StoreLimitsBuilder,
@@ -91,7 +91,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<HostState>, String> {
 }
 
 /// 已实例化的插件：实例化验证与实际调用共用同一管线。
-pub struct InstantiatedPlugin {
+pub(crate) struct InstantiatedPlugin {
     store: wasmtime::Store<HostState>,
     world: bindings::PluginWorld,
 }
@@ -99,7 +99,7 @@ pub struct InstantiatedPlugin {
 impl LoadedPlugin {
     /// 链接期校验：组件字节反序列化、导入/导出类型匹配，不触发组件 init、
     /// 不预开放真实配置目录。这是安装期使用的入口（见 ADR 0006：fail-fast）。
-    pub fn validate(&self, engine: &Engine) -> Result<(), String> {
+    pub(crate) fn validate(&self, engine: &Engine) -> Result<(), String> {
         let component =
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
         let linker = build_linker(engine)?;
@@ -114,7 +114,10 @@ impl LoadedPlugin {
 
     /// 完整实例化：用于实投影（write_providers）。会预开放真实配置目录、
     /// 注册资源限制（防止恶意 memory.grow / table.grow 风暴，CWE-770）。
-    pub fn instantiate_component(&self, engine: &Engine) -> Result<InstantiatedPlugin, String> {
+    pub(crate) fn instantiate_component(
+        &self,
+        engine: &Engine,
+    ) -> Result<InstantiatedPlugin, String> {
         let component =
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
         // 预开放的写入面是装载时解析出的宿主绝对路径（见 `resolve_config_dir`）。
@@ -144,7 +147,7 @@ mod testutil {
     /// 已装载的插件：走真实装载路径（`PlacedPlugin::load` 解析 `config_dir`）。
     /// manifest 声明 `$HOME/.pi`，平台基准目录全部指向传入的临时目录，解析结果
     /// 随插件一并返回——断言对着它写，路径不必硬编码两次。
-    pub fn loaded_plugin(root: &Path, wasm: &[u8]) -> (LoadedPlugin, PathBuf) {
+    pub(crate) fn loaded_plugin(root: &Path, wasm: &[u8]) -> (LoadedPlugin, PathBuf) {
         let dirs = PlatformDirs::new(
             root.to_path_buf(),
             root.to_path_buf(),

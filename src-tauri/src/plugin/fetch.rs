@@ -6,7 +6,7 @@ use reqwest::blocking::Client;
 use std::{io::Read, time::Duration};
 
 /// 拉取插件来源的字节。
-pub trait Fetcher: Send + Sync {
+pub(crate) trait Fetcher: Send + Sync {
     /// 下载 `url` 指向的字节；失败以人类可读原因传播。
     fn fetch(&self, url: &str) -> Result<Vec<u8>, String>;
 }
@@ -27,14 +27,14 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// 仅接受 https（`https_only`），默认跟随重定向（上限 10 跳）——GitHub Release
 /// 的资产下载会重定向到对象存储域名。
-pub struct HttpFetcher {
+pub(crate) struct HttpFetcher {
     /// 客户端初始化失败（TLS 后端不可用）时保留原因：失败只落在本次拉取上，
     /// 不必让整个应用起不来。
     client: Result<Client, String>,
 }
 
 impl HttpFetcher {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let client = Client::builder()
             .https_only(true)
             .user_agent(concat!("agent-maestro/", env!("AGENT_MAESTRO_APP_VERSION")))
@@ -80,7 +80,7 @@ impl Fetcher for HttpFetcher {
 }
 
 #[cfg(test)]
-pub mod testutil {
+pub(crate) mod testutil {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
@@ -92,17 +92,17 @@ pub mod testutil {
     /// 测试替身：按 URL 返回预置响应；未预置的 URL 即失败——
     /// 测试因此绝不会发起真实网络请求。
     #[derive(Default)]
-    pub struct StubFetcher {
+    pub(crate) struct StubFetcher {
         responses: Mutex<BTreeMap<String, Result<Vec<u8>, String>>>,
     }
 
     impl StubFetcher {
-        pub fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self::default()
         }
 
         /// 预置成功响应（覆盖同一 URL 的既有响应，用于模拟上游改版）。
-        pub fn serve(&self, url: &str, body: impl Into<Vec<u8>>) {
+        pub(crate) fn serve(&self, url: &str, body: impl Into<Vec<u8>>) {
             self.responses
                 .lock()
                 .unwrap()
@@ -110,7 +110,7 @@ pub mod testutil {
         }
 
         /// 预置失败响应（网络不可达等）。
-        pub fn fail(&self, url: &str, reason: &str) {
+        pub(crate) fn fail(&self, url: &str, reason: &str) {
             self.responses
                 .lock()
                 .unwrap()
@@ -131,13 +131,13 @@ pub mod testutil {
 
     /// 代理替身：转发到内层替身，并要求每次拉取期间配置存储可被加锁——
     /// 守住「下载不得持有配置存储锁」这条边界。
-    pub struct LockProbeFetcher {
+    pub(crate) struct LockProbeFetcher {
         store: Arc<AppStore>,
         inner: StubFetcher,
     }
 
     impl LockProbeFetcher {
-        pub fn new(store: Arc<AppStore>, inner: StubFetcher) -> Self {
+        pub(crate) fn new(store: Arc<AppStore>, inner: StubFetcher) -> Self {
             Self { store, inner }
         }
     }

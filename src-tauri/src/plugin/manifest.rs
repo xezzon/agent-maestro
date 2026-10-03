@@ -10,7 +10,7 @@ use std::{
 /// 三种来源共用同一份 manifest 校验，`entry` 语义按来源分列，
 /// 不做跨协议的统一解析。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceKind {
+pub(crate) enum SourceKind {
     /// 内置于应用：wasm 内嵌，`entry` 不参与解析。
     Builtin,
     /// https 来源：指向正式发布的 manifest，`entry` 必须是 https URL。
@@ -26,7 +26,7 @@ impl SourceKind {
     /// `builtin:<id>` 内置于应用；https URL 为正式发布来源；本机绝对路径为 file 来源。
     /// 其余形态（如旧配置残留的 Git 地址、相对路径）无法识别，返回 `None` 由调用方
     /// 报「暂不支持的插件来源」。
-    pub fn from_source(source: &str) -> Option<Self> {
+    pub(crate) fn from_source(source: &str) -> Option<Self> {
         if source.starts_with(builtin::SOURCE_PREFIX) {
             Some(SourceKind::Builtin)
         } else if is_https_url(source) {
@@ -44,17 +44,17 @@ impl SourceKind {
 /// 宿主直接读文件，组件不导出 get-metadata；容忍未知字段，
 /// 必填字段缺失或插件 id 不合法即加载失败（见 issue #34）。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Manifest {
+pub(crate) struct Manifest {
     /// 插件 id：`[a-z][a-z0-9-_]*`。
-    pub id: String,
+    pub(crate) id: String,
     /// 插件被授权写入的配置目录：字符串形式以平台变量前缀声明（`$HOME/.pi`、
     /// `$XDG_CONFIG_HOME/zed`…），对象形式按平台键各声明一条（键固定为
     /// `linux`、`macos`、`windows`）；反序列化时即由 [`resolve_config_dir`] 解析为
     /// 宿主绝对路径，构造出的 `Manifest` 只持有绝对路径。
     #[serde(deserialize_with = "deserialize_config_dir")]
-    pub config_dir: PathBuf,
+    pub(crate) config_dir: PathBuf,
     /// 入口 wasm 的回源地址（约束按来源种类分列，见 ADR 0006）。
-    pub entry: String,
+    pub(crate) entry: String,
 }
 
 #[cfg(not(test))]
@@ -68,7 +68,7 @@ thread_local! {
 
 /// 平台基准目录：`config_dir` 声明里的变量前缀在此解析为宿主绝对路径。
 #[derive(Clone, Debug)]
-pub struct PlatformDirs {
+pub(crate) struct PlatformDirs {
     home: PathBuf,
     config: PathBuf,
     config_local: PathBuf,
@@ -83,7 +83,7 @@ impl PlatformDirs {
     /// 测试构建下不读取真实环境——全局实例由 `PlatformDirs::init_test` 或
     /// `PlatformDirs::test_guard` 注入（见 `plugin::testutil`），故这里是空操作：
     /// 测试若漏了注入，由 [`PlatformDirs::get`] 报错，而不是静默落到真实目录。
-    pub fn init_from_system() -> Result<(), String> {
+    pub(crate) fn init_from_system() -> Result<(), String> {
         #[cfg(not(test))]
         {
             let missing = |what: &str| format!("无法解析平台目录：{what}不可用");
@@ -100,7 +100,7 @@ impl PlatformDirs {
     }
 
     /// 注入基准目录：测试用临时目录，不读真实环境。
-    pub fn new(
+    pub(crate) fn new(
         home: PathBuf,
         config: PathBuf,
         config_local: PathBuf,
@@ -117,7 +117,7 @@ impl PlatformDirs {
     }
 
     /// 获取全局实例（值语义，clone 成本极低）。
-    pub fn get() -> Self {
+    fn get() -> Self {
         #[cfg(not(test))]
         {
             PLATFORM_DIRS
@@ -138,14 +138,14 @@ impl PlatformDirs {
 
     /// 测试辅助：设置当前线程的全局实例，返回 RAII guard（drop 时自动清理）。
     #[cfg(test)]
-    pub fn test_guard(dirs: Self) -> PlatformDirsTestGuard {
+    pub(crate) fn test_guard(dirs: Self) -> PlatformDirsTestGuard {
         Self::init_test(dirs);
         PlatformDirsTestGuard
     }
 
     /// 测试辅助：直接设置当前线程的全局实例（不返回 guard，自行管理生命周期）。
     #[cfg(test)]
-    pub fn init_test(dirs: Self) {
+    pub(crate) fn init_test(dirs: Self) {
         PLATFORM_DIRS_TEST.with(|cell| {
             *cell.borrow_mut() = Some(dirs);
         });
@@ -167,7 +167,7 @@ impl PlatformDirs {
 /// 测试 RAII guard：drop 时清理当前线程的 [`PlatformDirs`] 全局实例。
 #[cfg(test)]
 #[must_use = "guard 被立即 drop 将立即清理全局实例"]
-pub struct PlatformDirsTestGuard;
+pub(crate) struct PlatformDirsTestGuard;
 
 #[cfg(test)]
 impl Drop for PlatformDirsTestGuard {
@@ -190,7 +190,7 @@ const SUPPORTED_VARIABLES: &str =
 ///
 /// 使用全局 [`PlatformDirs`] 解析，调用前需先初始化。返回的原因不带层级前缀，
 /// 由 [`parse_placed`] 统一补上「manifest.json 不合法：」。
-pub fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
+fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
     if declared.is_empty() {
         return Err("config_dir 未配置".to_owned());
     }
@@ -316,7 +316,7 @@ fn platform_declaration(
 /// 反序列化时由 [`resolve_config_dir`] 解析为宿主绝对路径。
 ///
 /// 使用全局 [`PlatformDirs`]，调用前需先初始化。
-pub fn parse_placed(value: &str) -> Result<Manifest, String> {
+pub(crate) fn parse_placed(value: &str) -> Result<Manifest, String> {
     let manifest: Manifest =
         serde_json::from_str(value).map_err(|e| format!("manifest.json 不合法：{e}"))?;
     if !is_valid_plugin_id(&manifest.id) {
@@ -332,7 +332,7 @@ pub fn parse_placed(value: &str) -> Result<Manifest, String> {
 }
 
 /// 解析并校验 manifest 文本；`entry` 的约束按来源种类分列。
-pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> {
+pub(crate) fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> {
     let manifest = parse_placed(text)?;
     match kind {
         // wasm 内嵌于二进制，entry 不参与解析。
@@ -369,12 +369,12 @@ pub fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> 
 }
 
 /// 是否为绝对 https URL：明文 http、其他 scheme 与空主机一律拒绝。
-pub fn is_https_url(url: &str) -> bool {
+pub(crate) fn is_https_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
 }
 
 /// 插件 id 规则与 Provider slug 一致（见 CONTEXT.md）。
-pub fn is_valid_plugin_id(id: &str) -> bool {
+fn is_valid_plugin_id(id: &str) -> bool {
     let mut chars = id.chars();
     match chars.next() {
         Some(c) if c.is_ascii_lowercase() => {}
@@ -384,9 +384,9 @@ pub fn is_valid_plugin_id(id: &str) -> bool {
 }
 
 #[cfg(test)]
-pub mod testutil {
+pub(crate) mod testutil {
     /// 上游 manifest 模板：三个测试模块共用同一份 JSON 形状。
-    pub fn manifest_json(id: &str, config_dir: &str, entry: &str) -> String {
+    pub(crate) fn manifest_json(id: &str, config_dir: &str, entry: &str) -> String {
         format!(
             r#"{{
                     "id": "{id}",

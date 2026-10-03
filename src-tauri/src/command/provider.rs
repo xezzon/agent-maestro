@@ -15,7 +15,7 @@ use crate::{
 /// （空串）。更新为整包替换，`api_key` 携带现值或新值（明文，第一期随配置
 /// 文件落盘，ADR 0002 推迟采纳）。
 #[derive(Deserialize)]
-pub struct ProviderRequest {
+pub(crate) struct ProviderRequest {
     #[serde(default)]
     slug: String,
     #[serde(default)]
@@ -39,7 +39,9 @@ impl From<ProviderRequest> for Provider {
 }
 
 #[tauri::command]
-pub fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Provider>, String> {
+pub(crate) fn list_providers(
+    store: State<'_, AppStore>,
+) -> Result<BTreeMap<String, Provider>, String> {
     let outcome = (|| -> Result<BTreeMap<String, Provider>, String> {
         let guard = store.read()?;
         let config = guard.get()?;
@@ -50,7 +52,7 @@ pub fn list_providers(store: State<'_, AppStore>) -> Result<BTreeMap<String, Pro
 }
 
 #[tauri::command]
-pub fn create_provider(
+pub(crate) fn create_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
@@ -65,7 +67,7 @@ pub fn create_provider(
 }
 
 #[tauri::command]
-pub fn update_provider(
+pub(crate) fn update_provider(
     store: State<'_, AppStore>,
     provider: ProviderRequest,
 ) -> Result<(), String> {
@@ -81,7 +83,7 @@ pub fn update_provider(
 }
 
 #[tauri::command]
-pub fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
+pub(crate) fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
     let outcome = (|| {
         let mut guard = store.write()?;
         guard.delete_provider(&slug)?;

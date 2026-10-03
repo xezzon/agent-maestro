@@ -5,35 +5,35 @@ use serde::{Deserialize, Serialize};
 /// `None` 即未配置；序列化时跳过（键缺省而非空串），键缺失同样读作 `None`。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub struct Endpoints {
+pub(crate) struct Endpoints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openai_completions: Option<String>,
+    pub(crate) openai_completions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anthropic_messages: Option<String>,
+    pub(crate) anthropic_messages: Option<String>,
 }
 
 /// Provider 下跨协议共享的一个模型条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelEntry {
+pub(crate) struct ModelEntry {
     #[serde(default)]
-    pub id: String,
+    pub(crate) id: String,
     /// 无显示名时为 `None`，序列化为 `null`，界面回退显示 id。
     #[serde(default)]
-    pub display_name: Option<String>,
+    pub(crate) display_name: Option<String>,
 }
 
 /// 一条 LLM API 接入；以 slug 为 key 存于 providers 之下（见 CONTEXT.md）。
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Provider {
+pub(crate) struct Provider {
     #[serde(default)]
-    pub base_url: Endpoints,
+    pub(crate) base_url: Endpoints,
     /// 凭证以明文随配置文件落盘：空串即未设置（第一期不做密钥链，
     /// ADR 0002 已修订为推迟采纳）。
     #[serde(default)]
-    pub api_key: String,
+    pub(crate) api_key: String,
     /// 保序数组：模型 ID 不做字符集限制，且同一 Provider 内不重复（大小写敏感）。
     #[serde(default)]
-    pub models: Vec<ModelEntry>,
+    pub(crate) models: Vec<ModelEntry>,
 }
 
 /// 手工实现 Debug：api_key 渲染为 `<set>`/`<unset>`，绝不携带明文。

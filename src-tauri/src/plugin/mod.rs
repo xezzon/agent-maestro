@@ -32,18 +32,18 @@ use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, PlatformDirs, SourceKind, is_https_url};
 
 /// 落位目录中的 manifest 文件名。
-pub const PLACED_MANIFEST: &str = "manifest.json";
+const PLACED_MANIFEST: &str = "manifest.json";
 /// 落位目录中的 wasm 文件名；上游资源内容固定落到该名。装载时 `entry` 仍会被
 /// 反序列化，但其指向的路径不再被解析——落位产物只认这个固定文件名。
-pub const PLACED_WASM: &str = "plugin.wasm";
+const PLACED_WASM: &str = "plugin.wasm";
 
-pub struct PlacedPlugin {
+struct PlacedPlugin {
     plugin_dir: PathBuf,
     raw_manifest: String,
     wasm: Vec<u8>,
 }
 
-pub struct LoadedPlugin {
+struct LoadedPlugin {
     manifest: Manifest,
     wasm: Arc<[u8]>,
     plugin: PlacedPlugin,
@@ -75,7 +75,7 @@ impl PlacedPlugin {
     }
 
     /// 落位目录的绝对路径（暴露给错误信息，便于用户手动清理）。
-    pub fn path(&self) -> &Path {
+    fn path(&self) -> &Path {
         &self.plugin_dir
     }
 
@@ -123,7 +123,7 @@ impl PlacedPlugin {
     /// 的唯一构造点，因此 `config_dir` 已解析为宿主绝对路径由装载路径保证。
     ///
     /// 使用全局 [`PlatformDirs`] 解析，调用前需先初始化。
-    pub fn load(self) -> Result<LoadedPlugin, String> {
+    fn load(self) -> Result<LoadedPlugin, String> {
         let manifest = manifest::parse_placed(self.raw_manifest.as_str())?;
         let wasm = Arc::from(self.wasm.clone());
         Ok(LoadedPlugin {
@@ -177,12 +177,12 @@ fn remove_placed_dir(plugin_dir: &Path) -> Result<(), String> {
 /// 写入（内置插件由启动时装载管线补写，与其余来源同一流程）——它是来源到落位
 /// 目录的唯一映射（见 ADR 0006）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginEntry {
-    pub source: String,
+pub(crate) struct PluginEntry {
+    pub(crate) source: String,
     #[serde(default = "default_true")]
-    pub enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    pub id: String,
+    pub(crate) id: String,
 }
 
 fn default_true() -> bool {
@@ -191,27 +191,27 @@ fn default_true() -> bool {
 
 /// 插件列表视图（命令返回给前端的形态）。
 #[derive(Debug, Serialize)]
-pub struct PluginView {
-    pub source: String,
+pub(crate) struct PluginView {
+    source: String,
     /// 来源以内置前缀标识；内置插件可禁用、不可移除。
-    pub builtin: bool,
-    pub enabled: bool,
-    pub id: String,
+    builtin: bool,
+    enabled: bool,
+    id: String,
     /// manifest 声明并解析出的配置目录（宿主绝对路径）。
-    pub config_dir: Option<String>,
-    pub error: Option<String>,
+    config_dir: Option<String>,
+    error: Option<String>,
 }
 
 /// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
 #[derive(Debug, Serialize)]
-pub struct PluginApplyReport {
-    pub id: String,
+pub(crate) struct PluginApplyReport {
+    pub(crate) id: String,
     /// `applied` | `failed` | `skipped`（禁用或加载失败时不执行投影）。
-    pub status: &'static str,
+    pub(crate) status: &'static str,
     /// 已写入文件的宿主绝对路径列表（插件返回相对 config_dir 的路径，由宿主拼接）。
-    pub files: Vec<String>,
-    pub skipped: Vec<SkippedProvider>,
-    pub reason: Option<String>,
+    pub(crate) files: Vec<String>,
+    pub(crate) skipped: Vec<SkippedProvider>,
+    pub(crate) reason: Option<String>,
 }
 
 /// 注册表条目的装载状态；装载失败进错误态并携带人类可读原因。
@@ -227,7 +227,7 @@ enum PluginState {
 
 /// 插件服务：内存注册表由 `startup` 与各生命周期方法（安装/启停/移除/重载）
 /// 按配置条目增量维护。
-pub struct PluginService {
+pub(crate) struct PluginService {
     engine: Engine,
     /// https 拉取的注入点（生产为同步 reqwest 实现，测试为替身）。
     fetcher: Arc<dyn Fetcher>,
@@ -251,12 +251,12 @@ fn build_engine() -> Engine {
 impl PluginService {
     /// 构造：使用全局的 [`MaestroPaths`] 与 [`PlatformDirs`]，两者均在应用启动阶段
     /// 完成初始化（[`MaestroPaths::init`] / [`PluginService::startup`]）。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_fetcher(Arc::new(HttpFetcher::new()))
     }
 
     /// 注入 fetcher：测试用替身。
-    pub fn with_fetcher(fetcher: Arc<dyn Fetcher>) -> Self {
+    fn with_fetcher(fetcher: Arc<dyn Fetcher>) -> Self {
         Self {
             engine: build_engine(),
             fetcher,
@@ -270,7 +270,7 @@ impl PluginService {
     ///
     /// 平台目录是 `config_dir` 解析的前提，不可用时启动失败（与主目录缺失的处理一致）；
     /// 配置存储不可用则降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
-    pub fn startup(&self, store: &AppStore) -> Result<(), String> {
+    pub(crate) fn startup(&self, store: &AppStore) -> Result<(), String> {
         PlatformDirs::init_from_system()?;
 
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
@@ -336,7 +336,7 @@ impl PluginService {
     }
 
     /// 当前注册表视图。
-    pub fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
+    pub(crate) fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
         let plugin_entries = store.read()?.list_plugins().map_err(|_| "配置文件损坏")?;
         let plugins = self.entries.read().map_err(|_| "插件注册表不可用")?;
         let plugin_view =
@@ -381,7 +381,7 @@ impl PluginService {
     /// 整个流程在 `install_lock` 内独占：避免两个并发 install 各自落位后又被对方
     /// 的清理逻辑误删赢家的产物。配置存储只在短读/短写处加锁：获取、校验与落位
     /// 全程不持锁。
-    pub fn add_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    pub(crate) fn add_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
         let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
 
         // 来源形态在发起获取之前判定：无法识别的来源直接拒绝。
@@ -494,7 +494,12 @@ impl PluginService {
     /// 启用：先从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步注册表
     /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
     /// 两次加锁之间条目可能被移除：写配置前按来源复检，条目已消失即报错。
-    pub fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
+    pub(crate) fn set_enabled(
+        &self,
+        store: &AppStore,
+        source: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
         let entry = store.read()?.plugin_by_source(source)?;
         if entry.enabled == enabled {
             return Ok(());
@@ -544,7 +549,7 @@ impl PluginService {
     /// 分发，见 ADR 0004）。整个流程在 `install_lock` 内独占：读条目、卸载内存、
     /// 删条目与删落位目录必须连续完成，中间不得插入另一次 install——安装先落位
     /// 后写条目，删目录若放到锁外，并发安装可能在条目删除后重新落位而被误删。
-    pub fn remove_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    pub(crate) fn remove_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
         let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
 
         // 内置插件随应用分发，不可移除（见 ADR 0004）。
@@ -579,7 +584,7 @@ impl PluginService {
     ///
     /// 插件执行时长不受应用控制：注册表锁只在快照阶段短暂持有（克隆 Arc 与
     /// 收集跳过态），wasm 实例化与调用全部在锁外进行，不阻塞其它命令。
-    pub fn write_providers(
+    pub(crate) fn write_providers(
         &self,
         providers: &BTreeMap<String, Provider>,
     ) -> Result<Vec<PluginApplyReport>, String> {
@@ -657,7 +662,7 @@ impl PluginService {
     ///
     /// 整个流程在 `install_lock` 内独占：与 add / remove 共用同一把锁，避免
     /// reload 写到一半时另一 add 把同一 id 的产物覆盖或被 remove 误删。
-    pub fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    pub(crate) fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
         let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
 
         // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
@@ -739,8 +744,8 @@ pub(crate) mod testutil {
         sync::{Arc, RwLock},
     };
 
-    pub use super::fetch::testutil::{LockProbeFetcher, StubFetcher};
-    pub use super::manifest::testutil::manifest_json;
+    pub(crate) use super::fetch::testutil::{LockProbeFetcher, StubFetcher};
+    pub(crate) use super::manifest::testutil::manifest_json;
     use super::{Fetcher, PluginService};
     use crate::{
         paths::MaestroPaths,

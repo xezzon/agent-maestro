@@ -30,12 +30,12 @@ static DEGRADED: OnceLock<String> = OnceLock::new();
 static INVALID_LEVEL: OnceLock<String> = OnceLock::new();
 
 /// 文件目标不可用的原因；由应用 setup 阶段（logger 已就绪）读取并打 WARN。
-pub fn degraded_reason() -> Option<&'static str> {
+pub(crate) fn degraded_reason() -> Option<&'static str> {
     DEGRADED.get().map(String::as_str)
 }
 
 /// 环境变量里的非法级别值；由应用 setup 阶段读取并打 WARN。
-pub fn invalid_level() -> Option<&'static str> {
+pub(crate) fn invalid_level() -> Option<&'static str> {
     INVALID_LEVEL.get().map(String::as_str)
 }
 
@@ -71,7 +71,7 @@ fn probe_log_dir(paths: &MaestroPaths) -> Result<(), String> {
 /// 非法值忽略并在 logger 就绪后补 WARN（不写入 `config.json`）。
 ///
 /// 必须在单实例插件之后调用（该插件须先于其他插件注册）。
-pub fn attach(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+pub(crate) fn attach(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     let (level, invalid) = match std::env::var("MAESTRO_LOG_LEVEL") {
         Ok(raw) => match parse_level(&raw) {
             Some(level) => (level, None),

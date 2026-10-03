@@ -11,7 +11,7 @@ use crate::{
 /// 该检查由 `service.list` 内部的短锁完成，此处不得再持 store 锁——
 /// 否则与 `list` 内部加锁构成同线程重入，死锁。
 #[tauri::command]
-pub fn list_plugins(
+pub(crate) fn list_plugins(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
@@ -22,7 +22,7 @@ pub fn list_plugins(
 
 /// 启用/禁用插件。
 #[tauri::command]
-pub fn set_plugin_enabled(
+pub(crate) fn set_plugin_enabled(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
     source: String,
@@ -43,7 +43,7 @@ pub fn set_plugin_enabled(
 /// 失败不写条目、不落位；清理残留失败时会把残留路径一并返回界面。
 /// 修复后重新添加即可（见 ADR 0006）。
 #[tauri::command]
-pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
+pub(crate) async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
     // 安装类命令另加进入行：「有进入、无结果」正是定位卡住的证据（如 #46）。
     log::info!("add_plugin start: source={source}");
     // 识别参数在闭包 move 前格式化；payload 本身不进日志。
@@ -59,7 +59,7 @@ pub async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
 /// 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，成功才替换落位目录
 /// （失败时旧版本保持可用）。
 #[tauri::command]
-pub async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String> {
+pub(crate) async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String> {
     log::info!("reload_plugin start: source={source}");
     let context = format!("source={source}");
     let outcome = on_install_pool(app, move |store, service| {
@@ -72,7 +72,7 @@ pub async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String>
 
 /// 移除插件：删配置条目与落位目录（幂等），不联网。
 #[tauri::command]
-pub fn remove_plugin(
+pub(crate) fn remove_plugin(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
     source: String,
@@ -88,7 +88,7 @@ pub fn remove_plugin(
 /// store 锁在读取 providers 后即释放，注册表锁也仅用于快照：
 /// 插件执行时长不受应用控制，执行全程不持锁，不得阻塞其它命令。
 #[tauri::command]
-pub fn apply_providers(
+pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {

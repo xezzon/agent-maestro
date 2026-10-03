@@ -8,7 +8,7 @@ use super::bindings::exports::maestro::plugin::plugin::{
 use crate::provider::{ModelEntry, Provider};
 
 impl InstantiatedPlugin {
-    pub fn write_provider(
+    pub(crate) fn write_provider(
         &mut self,
         providers: &BTreeMap<String, Provider>,
     ) -> Result<(Vec<String>, Vec<SkippedProvider>), String> {
@@ -25,9 +25,9 @@ impl InstantiatedPlugin {
 
 /// 投影结果中被跳过的 Provider 及原因（协议槽位为零或两个非空）。
 #[derive(Debug, Serialize)]
-pub struct SkippedProvider {
-    pub slug: String,
-    pub reason: String,
+pub(crate) struct SkippedProvider {
+    slug: String,
+    reason: String,
 }
 
 fn to_wit_provider(
