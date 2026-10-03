@@ -35,7 +35,7 @@ impl Guest for MyPlugin {
 export!(MyPlugin);
 ```
 
-`Provider` 每条只带一个协议的端点（见 ADR 0003）。写入应落在 manifest 声明的 `config_dir`——宿主把它预开放为 "/"，是插件唯一可写面；建议 tmp + rename 原子写。
+`Provider` 携带其全部已配置端点（`endpoints`，宿主按固定顺序收集，openai-completions 在前）与投影选择（`selected-protocol`，可能缺失或指向未配置的协议），由插件裁定投影用哪个端点（选择有效→用它，否则唯一端点，多端点且无有效选择→优先 openai-completions，见 ADR 0016）；零端点的 Provider 不进入 `providers` 列表（宿主在投影结果中报告跳过）。写入应落在 manifest 声明的 `config_dir`——宿主把它预开放为 "/"，是插件唯一可写面；建议 tmp + rename 原子写。
 
 投影期间的非致命事件可经 `logger` import（v1.1.0 起）上报应用日志，语义要点见[过程性日志（logger import）](#过程性日志logger-import)。
 
@@ -226,4 +226,4 @@ log(Level::Warning, "模型 x 已弃用，仍继续投影");
 
 ## 参考
 
-- WIT 合同随本 crate 分发（[`wit/maestro-plugin.wit`](wit/maestro-plugin.wit)），构建时内嵌生成绑定（`build.rs`）；版本约定见 crate 文档（`src/lib.rs`）。投影合同的完整定义（输入输出类型、单协议 Provider、宿主跳过规则）以 WIT 合同为准。
+- WIT 合同随本 crate 分发（[`wit/maestro-plugin.wit`](wit/maestro-plugin.wit)），构建时内嵌生成绑定（`build.rs`）；版本约定见 crate 文档（`src/lib.rs`）。投影合同的完整定义（输入输出类型、端点与投影选择、宿主零端点跳过规则）以 WIT 合同为准。
