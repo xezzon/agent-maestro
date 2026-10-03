@@ -9,3 +9,5 @@
 **message 中不得携带凭证**是硬约束：宿主不做内容审查（与 ADR 0008 的信任模型一致——插件本就持有 api_key，宿主过滤既不可靠又造误报），约束落在 SDK 文档（`crates/maestro-plugin-sdk/README.md`，兼作插件作者指南）；插件把秘密上报进日志文件属于与「插件在错误消息里回显密钥」同类的已知残余风险。验证只覆盖级别映射：它是纯函数，单测钉住 error/warning/info/debug 四个分支。import 的宿主接线（linker 注册、实例化与投影不受影响）没有自动化测试——实施中曾构建验证夹具 `log-fixture`（按四个 level 各上报一条后返回空文件列表，随宿主构建自动编译），评审后按「不值得为一个测试维护一个插件 crate」的取舍裁掉，接受接线回归的风险，首个引用 logger 的插件接入时以人工验收补上：默认级别下日志文件出现 error/warning/info 三条，`MAESTRO_LOG_LEVEL=debug` 下四条。
 
 曾考虑并否决的形态：收集进投影结果按插件分组展示（见上，决策收缩）；复用 `wasi:logging`（多一套 import 集合与级别体系，和 ADR 0008 的单旋钮打架，wasi 标准库的 logging 包在 WASI 0.2 里也尚未定稿）；把 guest stdout/stderr 接进日志（ADR 0008 已否决——改变 guest 行为、WIT `log` 的版本成本更可控）；宿主按正则审查 message 疑似密钥（不可靠且误报，宁守作者约定）；双版本注册（见上，承诺收回）。
+
+修订（2026-10-03）：本 ADR 中「SDK 的版本对齐约定（SDK 1.x ↔ WIT 1.x）不变」一句已随合同升级失效——WIT `maestro:plugin` 因端点选择移交插件升 2.0.0（见 ADR 0016），对齐约定随之变为 SDK 2.x ↔ WIT 2.x；「宿主只注册当前版本、旧组件须以新版 SDK 重编译」的原则不变。
