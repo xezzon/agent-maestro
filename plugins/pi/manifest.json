@@ -1,5 +1,11 @@
 {
   "id": "pi",
   "config_dir": "$HOME/.pi",
-  "entry": "target/wasm32-wasip2/release/maestro_plugin_pi.wasm"
+  "entry": "target/wasm32-wasip2/release/maestro_plugin_pi.wasm",
+  "upstream": {
+    "url": "https://pi.dev/",
+    "repository": "https://github.com/earendil-works/pi",
+    "npm": "@earendil-works/pi-coding-agent",
+    "version": "1.0.0"
+  }
 }
