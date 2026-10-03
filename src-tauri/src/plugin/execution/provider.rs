@@ -26,8 +26,8 @@ impl InstantiatedPlugin {
 /// 投影结果中被跳过的 Provider 及原因（协议槽位为零或两个非空）。
 #[derive(Debug, Serialize)]
 pub(crate) struct SkippedProvider {
-    slug: String,
-    reason: String,
+    pub(crate) slug: String,
+    pub(crate) reason: String,
 }
 
 fn to_wit_provider(

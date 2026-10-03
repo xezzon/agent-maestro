@@ -1,4 +1,5 @@
 mod command;
+mod interpolate;
 mod logging;
 mod paths;
 mod plugin;

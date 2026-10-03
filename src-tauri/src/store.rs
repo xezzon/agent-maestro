@@ -16,12 +16,19 @@ const CONFIG_VERSION: u32 = 1;
 /// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
 const STORE_LOCK_POISONED: &str = "配置存储不可用";
 
+/// 全局变量表（ADR 0015）：名 → 默认值，供投影前的占位符插值。
+/// 插值（`crate::interpolate`）与插件服务是它的消费方。
+pub type Variables = BTreeMap<String, String>;
+
 /// `~/.maestro/config.json` 的顶层文档（version 1 schema）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Config {
     pub(crate) version: u32,
     #[serde(default)]
     pub(crate) providers: BTreeMap<String, Provider>,
+    /// 全局变量表（ADR 0015）：名 → 默认值。纯增量字段：缺键的旧文件照常读入得空表。
+    #[serde(default)]
+    pub(crate) variables: Variables,
     /// 无插件时省略该段，保持与旧配置文件一致。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) plugins: Vec<PluginEntry>,
@@ -32,6 +39,7 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             providers: BTreeMap::new(),
+            variables: BTreeMap::new(),
             plugins: Vec::new(),
         }
     }
@@ -363,7 +371,10 @@ mod tests {
 
         let text = serde_json::to_string(&config).unwrap();
 
-        assert_eq!(text, r#"{"version":1,"providers":{}}"#);
+        assert_eq!(
+            text, r#"{"version":1,"providers":{},"variables":{}}"#,
+            "空变量表恒序列化为 {{}}"
+        );
         let parsed: Config = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed, config);
     }
@@ -1138,6 +1149,49 @@ mod tests {
             store.get().unwrap().plugins.is_empty(),
             "缺 plugins 段的旧配置文件直接可用（纯增量字段，见 issue #34）"
         );
+    }
+
+    /// 全局变量表是纯增量字段（ADR 0015）：无 variables 的旧文件照常读入得空表，
+    /// CONFIG_VERSION 保持 1；空表照常写出为 `{}`。
+    #[test]
+    fn variables_default_to_empty_and_serialize_as_an_empty_object() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+        fs::write(
+            MaestroPaths::get().config_path(),
+            r#"{"version":1,"providers":{}}"#,
+        )
+        .unwrap();
+
+        let store = Store::new();
+
+        assert!(store.get().unwrap().variables.is_empty());
+        assert_eq!(
+            serde_json::to_string(store.get().unwrap()).unwrap(),
+            r#"{"version":1,"providers":{},"variables":{}}"#,
+            "空变量表序列化为 {{}}，不做省略"
+        );
+    }
+
+    #[test]
+    fn variables_round_trip_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let store = Store::new();
+        let variables = BTreeMap::from([
+            ("HOST".to_owned(), "api.example.com".to_owned()),
+            ("EMPTY".to_owned(), String::new()),
+        ]);
+        {
+            let mut config = store.get().unwrap().clone();
+            config.variables = variables.clone();
+            store.persist(&config).unwrap();
+        }
+
+        let reopened = Store::new();
+
+        assert_eq!(reopened.get().unwrap().variables, variables);
     }
 
     /// L1 红线（ADR 0008）：Config 的派生 Debug 内层调用 Provider 的手工 Debug，

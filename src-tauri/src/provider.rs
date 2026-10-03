@@ -1,4 +1,8 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+
+use crate::interpolate::{interpolate_slot, interpolate_value};
 
 /// Provider 在各协议下的端点（每协议至多一个；见 ADR 0003）。
 ///
@@ -53,6 +57,58 @@ impl std::fmt::Debug for Provider {
             )
             .field("models", &self.models)
             .finish()
+    }
+}
+
+/// 插值失败：（字段名, 库报错）。库报错只含变量名与位置，不含值与密钥。
+pub(crate) type FieldError = (String, String);
+
+impl Provider {
+    /// 插值（CONTEXT.md「插值」/ ADR 0015）：把自身全部字符串值里的占位符
+    /// 替换为变量实际值，返回字面值副本；失败返回（字段名, 库报错）。
+    ///
+    /// 占位符语法与转义由 `crate::interpolate` 的纯函数执行（ADR 0017 换库哨兵）；
+    /// 本方法只负责穷举自身的字符串字段。
+    ///
+    /// 作用域＝自身的一切字符串值（ADR 0015）：字符串字段穷举构造、不带
+    /// `..Default`，给结构体新增字段时在此处编译失败，提示把新字段纳入插值。
+    pub(crate) fn interpolate(
+        &self,
+        variables: &BTreeMap<String, String>,
+    ) -> Result<Provider, FieldError> {
+        let field = "base_url.openai-completions";
+        let openai_completions =
+            interpolate_slot(self.base_url.openai_completions.as_deref(), variables)
+                .map_err(|reason| (field.to_owned(), reason))?;
+        let field = "base_url.anthropic-messages";
+        let anthropic_messages =
+            interpolate_slot(self.base_url.anthropic_messages.as_deref(), variables)
+                .map_err(|reason| (field.to_owned(), reason))?;
+        // api_key 原样保留，不参与插值。
+        let api_key = self.api_key.clone();
+        let mut models = Vec::with_capacity(self.models.len());
+        for (index, model) in self.models.iter().enumerate() {
+            let field = format!("models[{index}].display_name");
+            let display_name = model
+                .display_name
+                .as_deref()
+                .map(|name| interpolate_value(name, variables))
+                .transpose()
+                .map_err(|reason| (field, reason))?;
+            // 模型 ID 是标识符：原样保留，不参与插值。
+            models.push(ModelEntry {
+                id: model.id.clone(),
+                display_name,
+            });
+        }
+        Ok(Provider {
+            base_url: Endpoints {
+                openai_completions,
+                anthropic_messages,
+            },
+            api_key,
+            models,
+        })
     }
 }
 
@@ -174,5 +230,77 @@ mod tests {
             format!("{:?}", Provider::default()).contains("<unset>"),
             "未配置渲染为 <unset>"
         );
+    }
+
+    fn vars(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// 插值（`Provider::interpolate`）输出全部字面值副本：除模型 ID 与 api_key
+    /// （原样保留）外逐字段替换，原值不动。
+    #[test]
+    fn interpolate_replaces_strings_field_by_field_and_keeps_the_original() {
+        let provider = Provider {
+            base_url: Endpoints {
+                openai_completions: Some("https://${HOST}/v1".to_owned()),
+                anthropic_messages: None,
+            },
+            api_key: "${KEY}".to_owned(),
+            models: vec![
+                ModelEntry {
+                    id: "${MODEL}".to_owned(),
+                    display_name: Some("Model ${MODEL}".to_owned()),
+                },
+                ModelEntry {
+                    id: "plain-id".to_owned(),
+                    display_name: None,
+                },
+            ],
+        };
+
+        let variables = vars(&[
+            ("HOST", "api.example.com"),
+            ("KEY", "sk-x"),
+            ("MODEL", "gpt-4o"),
+        ]);
+        let projected = provider.interpolate(&variables).unwrap();
+
+        assert_eq!(
+            projected.base_url.openai_completions.as_deref(),
+            Some("https://api.example.com/v1")
+        );
+        assert_eq!(projected.api_key, "${KEY}", "api_key 原样投影、不参与插值");
+        assert_eq!(
+            projected.models[0].id, "${MODEL}",
+            "模型 ID 是标识符，原样投影、不参与插值"
+        );
+        assert_eq!(
+            projected.models[0].display_name.as_deref(),
+            Some("Model gpt-4o")
+        );
+        assert_eq!(projected.models[1].id, "plain-id");
+        assert_eq!(projected.models[1].display_name, None);
+        // 原 Provider 不被修改。
+        assert_eq!(provider.api_key, "${KEY}");
+    }
+
+    /// 任一字段失败即整体失败：返回（字段名, 库报错），不含值与密钥。
+    #[test]
+    fn interpolate_failure_reports_field_and_variable_without_values() {
+        let provider = Provider {
+            base_url: Endpoints {
+                openai_completions: Some("${UNDEFINED_VAR}".to_owned()),
+                ..Endpoints::default()
+            },
+            ..Provider::default()
+        };
+
+        let (field, reason) = provider.interpolate(&vars(&[])).unwrap_err();
+
+        assert_eq!(field, "base_url.openai-completions");
+        assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
     }
 }
