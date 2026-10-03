@@ -6,7 +6,11 @@ use std::{
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use crate::{paths::MaestroPaths, plugin::PluginEntry, provider::Provider};
+use crate::{
+    paths::MaestroPaths,
+    plugin::PluginEntry,
+    provider::{FieldError, Provider},
+};
 use serde::{Deserialize, Serialize};
 
 /// 配置文件 schema 版本（见 ADR 0001）。
@@ -16,12 +20,19 @@ const CONFIG_VERSION: u32 = 1;
 /// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
 const STORE_LOCK_POISONED: &str = "配置存储不可用";
 
+/// 全局变量表（ADR 0015）：名 → 默认值，供投影前的占位符插值。
+/// 插值（`crate::interpolate`）与插件服务是它的消费方。
+pub type Variables = BTreeMap<String, String>;
+
 /// `~/.maestro/config.json` 的顶层文档（version 1 schema）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Config {
     pub(crate) version: u32,
     #[serde(default)]
     pub(crate) providers: BTreeMap<String, Provider>,
+    /// 全局变量表（ADR 0015）：名 → 默认值。纯增量字段：缺键的旧文件照常读入得空表。
+    #[serde(default)]
+    pub(crate) variables: Variables,
     /// 无插件时省略该段，保持与旧配置文件一致。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) plugins: Vec<PluginEntry>,
@@ -32,6 +43,7 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             providers: BTreeMap::new(),
+            variables: BTreeMap::new(),
             plugins: Vec::new(),
         }
     }
@@ -56,6 +68,16 @@ pub(crate) enum StoreError {
     DuplicateSource { source: String },
     /// 同一 id 已被其它来源的插件条目持有（id 是来源到落位目录的唯一映射）。
     DuplicateId { id: String, source: String },
+    /// Provider 对（变更后的）全局变量表插值失败：变量未定义或占位符语法
+    /// 错误。与投影时的插值失败同因同报，只是提前到落盘前拦截
+    /// （provider↔variables 一致性，ADR 0015）。
+    Interpolation {
+        slug: String,
+        field: String,
+        reason: String,
+    },
+    /// 变量名不合法：占位符无法引用（变量名语法见 ADR 0014）。
+    InvalidVariableName { name: String },
 }
 
 impl From<&StoreError> for String {
@@ -84,6 +106,14 @@ impl From<&StoreError> for String {
             StoreError::DuplicateId { id, source } => {
                 format!("插件 id「{id}」已被来源 {source} 占用")
             }
+            StoreError::Interpolation {
+                slug,
+                field,
+                reason,
+            } => format!("Provider「{slug}」的 {field} 插值失败：{reason}"),
+            StoreError::InvalidVariableName { name } => format!(
+                "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
+            ),
         }
     }
 }
@@ -139,6 +169,8 @@ impl Store {
     }
 
     /// 新建一条 Provider（slug 唯一），成功后原子写回磁盘。
+    /// 落盘前对当前变量表插值一次：占位符引用必须可解析（变量已定义，或带
+    /// 内联默认值），语法错误同样拦截——provider↔variables 一致性。
     pub(crate) fn create_provider(
         &mut self,
         slug: &str,
@@ -150,6 +182,9 @@ impl Store {
                 slug: slug.to_owned(),
             });
         }
+        provider
+            .interpolate(&config.variables)
+            .map_err(|error| interpolation_error(slug, error))?;
         let mut next = config.clone();
         next.providers.insert(slug.to_owned(), provider);
         self.persist(&next)?;
@@ -158,7 +193,8 @@ impl Store {
     }
 
     /// 整包替换指定 Provider 的端点、模型列表与 API Key（明文）。
-    /// slug 不存在时报错，不做 upsert。
+    /// slug 不存在时报错，不做 upsert；落盘前对当前变量表插值一次，占位符
+    /// 引用必须可解析（同 `create_provider`）。
     pub(crate) fn update_provider(
         &mut self,
         slug: &str,
@@ -169,6 +205,9 @@ impl Store {
 
         match next.providers.get(slug).cloned() {
             Some(original) => {
+                provider
+                    .interpolate(&next.variables)
+                    .map_err(|error| interpolation_error(slug, error))?;
                 next.providers.insert(slug.to_owned(), provider);
                 self.persist(&next)?;
                 self.state = Ok(next);
@@ -195,6 +234,31 @@ impl Store {
                 slug: slug.to_owned(),
             }),
         }
+    }
+
+    /// 整包替换全局变量表（ADR 0015）：新增、修改与删除都走同一条全量保存路径。
+    /// 变量名须合法（`[A-Za-z0-9_]+`，ADR 0014），否则占位符无法引用；落盘前
+    /// 用新表对全部存量 Provider 插值一次：删除导致任一 Provider 的引用无法解析
+    /// 时整表拒绝（provider↔variables 一致性）。空默认值合法（`${EMPTY}`）。
+    pub(crate) fn set_variables(&mut self, variables: Variables) -> Result<(), StoreError> {
+        for name in variables.keys() {
+            if !is_valid_variable_name(name) {
+                return Err(StoreError::InvalidVariableName {
+                    name: name.to_owned(),
+                });
+            }
+        }
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        for (slug, provider) in &config.providers {
+            provider
+                .interpolate(&variables)
+                .map_err(|error| interpolation_error(slug, error))?;
+        }
+        let mut next = config.clone();
+        next.variables = variables;
+        self.persist(&next)?;
+        self.state = Ok(next);
+        Ok(())
     }
 
     /// 新增插件条目，追加在现有条目之后。
@@ -326,6 +390,22 @@ impl Store {
     }
 }
 
+/// 变量名合法性（ADR 0014）：`[A-Za-z0-9_]+`，与占位符语法一致。
+fn is_valid_variable_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Provider 插值失败 → 存储错误：与投影时（`interpolate_providers`）同因同报、
+/// 同款文案，只是提前到落盘前。
+fn interpolation_error(slug: &str, error: FieldError) -> StoreError {
+    let (field, reason) = error;
+    StoreError::Interpolation {
+        slug: slug.to_owned(),
+        field,
+        reason,
+    }
+}
+
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
 pub(crate) struct AppStore {
     /// 读多写少：list_plugins、plugin_by_source、provider 列表等只读路径在
@@ -363,7 +443,10 @@ mod tests {
 
         let text = serde_json::to_string(&config).unwrap();
 
-        assert_eq!(text, r#"{"version":1,"providers":{}}"#);
+        assert_eq!(
+            text, r#"{"version":1,"providers":{},"variables":{}}"#,
+            "空变量表恒序列化为 {{}}"
+        );
         let parsed: Config = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed, config);
     }
@@ -1140,6 +1223,105 @@ mod tests {
         );
     }
 
+    /// 全局变量表是纯增量字段（ADR 0015）：无 variables 的旧文件照常读入得空表，
+    /// CONFIG_VERSION 保持 1；空表照常写出为 `{}`。
+    #[test]
+    fn variables_default_to_empty_and_serialize_as_an_empty_object() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+        fs::write(
+            MaestroPaths::get().config_path(),
+            r#"{"version":1,"providers":{}}"#,
+        )
+        .unwrap();
+
+        let store = Store::new();
+
+        assert!(store.get().unwrap().variables.is_empty());
+        assert_eq!(
+            serde_json::to_string(store.get().unwrap()).unwrap(),
+            r#"{"version":1,"providers":{},"variables":{}}"#,
+            "空变量表序列化为 {{}}，不做省略"
+        );
+    }
+
+    #[test]
+    fn variables_round_trip_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let store = Store::new();
+        let variables = BTreeMap::from([
+            ("HOST".to_owned(), "api.example.com".to_owned()),
+            ("EMPTY".to_owned(), String::new()),
+        ]);
+        {
+            let mut config = store.get().unwrap().clone();
+            config.variables = variables.clone();
+            store.persist(&config).unwrap();
+        }
+
+        let reopened = Store::new();
+
+        assert_eq!(reopened.get().unwrap().variables, variables);
+    }
+
+    /// 整包替换变量表：新增、修改与删除都走同一条全量保存路径（issue #90），
+    /// 成功后原子写回磁盘。
+    #[test]
+    fn set_variables_replaces_whole_table_and_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+
+        store
+            .set_variables(BTreeMap::from([
+                ("HOST".to_owned(), "api.example.com".to_owned()),
+                ("TOKEN".to_owned(), "old".to_owned()),
+            ]))
+            .unwrap();
+        // 第二次保存携带值修改后的表：整包替换，不与旧表合并。
+        store
+            .set_variables(BTreeMap::from([
+                ("HOST".to_owned(), "gateway.example.com".to_owned()),
+                ("TOKEN".to_owned(), "old".to_owned()),
+            ]))
+            .unwrap();
+
+        let reopened = Store::new();
+        assert_eq!(
+            reopened.get().unwrap().variables,
+            BTreeMap::from([
+                ("HOST".to_owned(), "gateway.example.com".to_owned()),
+                ("TOKEN".to_owned(), "old".to_owned())
+            ])
+        );
+    }
+
+    /// 变量表清空同样是合法保存：空表照常写出为 `{}`。
+    #[test]
+    fn set_variables_to_empty_clears_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+            .unwrap();
+
+        store.set_variables(BTreeMap::new()).unwrap();
+
+        assert!(store.get().unwrap().variables.is_empty());
+        let reopened = Store::new();
+        assert!(reopened.get().unwrap().variables.is_empty());
+        assert_eq!(
+            fs::read_to_string(MaestroPaths::get().config_path()).unwrap(),
+            "{\n  \"version\": 1,\n  \"providers\": {},\n  \"variables\": {}\n}\n"
+        );
+    }
+
     /// L1 红线（ADR 0008）：Config 的派生 Debug 内层调用 Provider 的手工 Debug，
     /// 嵌套渲染同样不得携带 api_key 明文。
     #[test]
@@ -1181,5 +1363,333 @@ mod tests {
         assert!(store.set_plugin_enabled("builtin:pi", true).is_err());
         assert!(store.add_plugin(&entry).is_err());
         assert!(store.delete_plugin("builtin:pi").is_err());
+        assert!(store.set_variables(BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn create_provider_rejects_references_to_undefined_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+
+        let err = store
+            .create_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Interpolation { .. }));
+        let message = String::from(err);
+        assert!(message.contains("HOST"), "{message}");
+        assert!(message.contains("base_url.openai-completions"), "{message}");
+        assert!(store.get().unwrap().providers.is_empty());
+        assert!(
+            !MaestroPaths::get().config_path().exists(),
+            "报错路径不得静默写入文件"
+        );
+    }
+
+    /// 已定义的变量与带内联默认值的引用都可通过；存储层原样保存，插值发生在投影时。
+    #[test]
+    fn create_provider_accepts_defined_variables_and_inline_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+            .unwrap();
+
+        store
+            .create_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
+                        anthropic_messages: Option::Some(
+                            "https://${FALLBACK:host.example.com}".to_owned(),
+                        ),
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap();
+
+        let reopened = Store::new();
+        assert_eq!(
+            reopened.get().unwrap().providers["gateway"]
+                .base_url
+                .openai_completions
+                .as_deref(),
+            Some("https://${HOST}/v1"),
+        );
+    }
+
+    #[test]
+    fn update_provider_rejects_undefined_variables_and_keeps_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .create_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
+                        anthropic_messages: Option::None,
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap();
+
+        let err = store
+            .update_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${MISSING}/v1".to_owned()),
+                        ..Endpoints::default()
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Interpolation { .. }));
+        let reopened = Store::new();
+        assert_eq!(
+            reopened.get().unwrap().providers["gateway"]
+                .base_url
+                .openai_completions
+                .as_deref(),
+            Some("https://api.example.com/v1"),
+            "被拒的更新不落盘，原记录保持不变"
+        );
+    }
+
+    /// 删除在用变量整表拒绝：报错与投影时插值失败同款文案，落盘不变。
+    #[test]
+    fn set_variables_rejects_removing_a_variable_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .set_variables(BTreeMap::from([
+                ("HOST".to_owned(), "api.example.com".to_owned()),
+                ("UNUSED".to_owned(), "x".to_owned()),
+            ]))
+            .unwrap();
+        store
+            .create_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
+                        ..Endpoints::default()
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap();
+
+        let err = store
+            .set_variables(BTreeMap::from([("UNUSED".to_owned(), "x".to_owned())]))
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Interpolation { .. }));
+        let message = String::from(err);
+        assert!(message.contains("HOST"), "{message}");
+        assert!(message.contains("gateway"), "{message}");
+        let reopened = Store::new();
+        assert!(
+            reopened.get().unwrap().variables.contains_key("HOST"),
+            "被拒的保存不落盘，变量表保持不变"
+        );
+    }
+
+    /// 只被带内联默认值的引用提到的变量可以删除（删除后插值仍可解析）。
+    #[test]
+    fn set_variables_allows_removing_a_variable_only_referenced_with_inline_default() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .set_variables(BTreeMap::from([("OPT".to_owned(), "x".to_owned())]))
+            .unwrap();
+        store
+            .create_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some(
+                            "https://${OPT:fallback.example.com}/v1".to_owned(),
+                        ),
+                        ..Endpoints::default()
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap();
+
+        store.set_variables(BTreeMap::new()).unwrap();
+
+        assert!(store.get().unwrap().variables.is_empty());
+    }
+
+    /// 改值与新增不受一致性约束：在用变量的值可以修改。
+    #[test]
+    fn set_variables_allows_changing_the_value_of_a_variable_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+            .unwrap();
+        store
+            .create_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
+                        ..Endpoints::default()
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap();
+
+        store
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "gateway.example.com".to_owned(),
+            )]))
+            .unwrap();
+
+        assert_eq!(
+            store.get().unwrap().variables["HOST"],
+            "gateway.example.com"
+        );
+    }
+
+    /// 占位符语法错误同样在落盘前拦截：与投影时插值失败同因同报。
+    #[test]
+    fn create_provider_rejects_malformed_placeholders() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+
+        let err = store
+            .create_provider(
+                "gateway",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${HOST/v1".to_owned()),
+                        ..Endpoints::default()
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Interpolation { .. }));
+        assert!(String::from(err).contains("base_url.openai-completions"));
+        assert!(store.get().unwrap().providers.is_empty());
+    }
+
+    /// 手工改出的非法模板同样让变量表保存被拒：落盘不变式＝全部 Provider 对
+    /// 当前（变更后的）变量表可插值。
+    #[test]
+    fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+        fs::write(
+            MaestroPaths::get().config_path(),
+            r#"{
+                "version": 1,
+                "providers": {
+                    "gateway": {
+                        "base_url": {
+                            "openai-completions": "https://${HOST/v1"
+                        }
+                    }
+                },
+                "variables": {"HOST": "api.example.com"}
+            }"#,
+        )
+        .unwrap();
+        let original = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
+        let mut store = Store::new();
+
+        let err = store
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "gateway.example.com".to_owned(),
+            )]))
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::Interpolation { .. }));
+        assert_eq!(
+            fs::read_to_string(MaestroPaths::get().config_path()).unwrap(),
+            original,
+            "被拒的保存不落盘"
+        );
+    }
+
+    /// 变量名合法性在后端同样强制（ADR 0014 的 `[A-Za-z0-9_]+`）：绕过前端
+    /// 直传命令的非法键名整表拒绝、不落盘。
+    #[test]
+    fn set_variables_rejects_invalid_variable_names() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+
+        for name in ["a-b", "", "带 空格"] {
+            let err = store
+                .set_variables(BTreeMap::from([(name.to_owned(), "x".to_owned())]))
+                .unwrap_err();
+
+            assert!(
+                matches!(err, StoreError::InvalidVariableName { .. }),
+                "name={name:?}"
+            );
+            assert!(
+                !MaestroPaths::get().config_path().exists(),
+                "报错路径不得落盘"
+            );
+        }
+    }
+
+    /// 空默认值是合法状态（`${EMPTY}` 解析为空串即按未配置端点处理，ADR 0015），
+    /// 后端不拒绝；非空的合法名照常保存。
+    #[test]
+    fn set_variables_accepts_an_empty_default_value() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+
+        store
+            .set_variables(BTreeMap::from([
+                ("EMPTY".to_owned(), String::new()),
+                ("HOST".to_owned(), "api.example.com".to_owned()),
+            ]))
+            .unwrap();
+
+        assert_eq!(store.get().unwrap().variables["EMPTY"], "");
+        let reopened = Store::new();
+        assert_eq!(reopened.get().unwrap().variables["EMPTY"], "");
     }
 }

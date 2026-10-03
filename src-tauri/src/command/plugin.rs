@@ -92,12 +92,15 @@ pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
+    // `?` 在闭包内传播：读 store 的错误也被捕获进 outcome，与 write_providers 的错误
+    // 统一走「outcome → 日志 → 返回」路径。若平铺到函数体，`?` 会提前返回并跳过失败日志。
     let outcome = (|| -> Result<Vec<PluginApplyReport>, String> {
-        let providers = {
+        let (providers, variables) = {
             let guard = store.read()?;
-            guard.get()?.providers.clone()
+            let config = guard.get()?;
+            (config.providers.clone(), config.variables.clone())
         };
-        service.write_providers(&providers)
+        service.write_providers(&providers, &variables)
     })();
     // 结果行携带逐插件状态摘要（id:status），命令 payload 不进日志。
     match &outcome {

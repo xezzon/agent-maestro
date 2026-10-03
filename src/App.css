@@ -31,6 +31,31 @@ body {
   margin-bottom: 16px;
 }
 
+/* Provider 页双栏布局：左侧 Provider 列表与右侧全局变量侧栏各自独立滚动。 */
+.providers-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.providers-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 16px;
+}
+
+.providers-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.variables-sider {
+  flex: 0 0 320px;
+  overflow-y: auto;
+}
+
 .provider-meta {
   display: flex;
   align-items: center;
@@ -86,6 +111,47 @@ body {
   display: flex;
   align-items: baseline;
   gap: 8px;
+}
+
+/* 全局变量表卡片（src/VariablesCard.jsx，issue #90） */
+.variable-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 每个变量占两行（左：变量名 / 默认值；右：删除按钮，垂直居中）；min-width: 0 防止长内容把行撑出卡片。 */
+.variable-fields {
+  flex: 1;
+  min-width: 0;
+}
+
+.variable-name {
+  margin-bottom: 0;
+}
+
+.variable-field {
+  margin-bottom: 0;
+}
+
+.variable-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.variable-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.variable-list .variable-value {
+  min-width: 0;
+  word-break: break-all;
 }
 
 /* 侧边栏结构：品牌置顶，普通菜单居中（flex:1），功能性入口置底。 */

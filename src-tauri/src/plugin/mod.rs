@@ -25,7 +25,7 @@ use crate::{
     paths::MaestroPaths,
     plugin::builtin::{BUILTIN_PI_ID, BUILTIN_PI_SOURCE},
     provider::Provider,
-    store::{AppStore, StoreError},
+    store::{AppStore, StoreError, Variables},
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
@@ -582,11 +582,16 @@ impl PluginService {
     /// Loaded 实例化组件后调用 `write_provider`；Disabled 与 Error 态不执行投影。
     /// 单个插件的失败不影响其它插件，失败原因写入该插件的报告。
     ///
+    /// 投影前由宿主先做占位符插值（ADR 0015：先插值、后挑选端点）：按插件合并
+    /// 变量表（插件配置落地前即全局变量表，见 #89）后对全部 provider 插值；
+    /// 任一字段失败即该插件整体 `failed`——不实例化、不调用插件、不写任何文件。
+    ///
     /// 插件执行时长不受应用控制：注册表锁只在快照阶段短暂持有（克隆 Arc 与
     /// 收集跳过态），wasm 实例化与调用全部在锁外进行，不阻塞其它命令。
     pub(crate) fn write_providers(
         &self,
         providers: &BTreeMap<String, Provider>,
+        variables: &Variables,
     ) -> Result<Vec<PluginApplyReport>, String> {
         let (mut reports, loaded) = {
             let entries = self.entries.read().map_err(|_| "插件注册表不可用")?;
@@ -618,10 +623,12 @@ impl PluginService {
 
         for (id, loaded_plugin) in loaded {
             log::debug!("projecting providers: id={id}");
-            let report = match loaded_plugin
-                .instantiate_component(&self.engine)
-                .and_then(|mut instantiated| instantiated.write_provider(providers))
-            {
+            let report = match crate::interpolate::interpolate_providers(providers, variables)
+                .and_then(|projected| {
+                    loaded_plugin
+                        .instantiate_component(&self.engine)
+                        .and_then(|mut instantiated| instantiated.write_provider(&projected))
+                }) {
                 // 插件返回的是相对 config_dir 的路径：拼成宿主绝对路径回报给界面。
                 Ok((files, skipped)) => {
                     match project_files(&loaded_plugin.manifest.config_dir, files) {
@@ -1497,7 +1504,9 @@ mod tests {
             },
         )]);
 
-        let reports = service.write_providers(&providers).unwrap();
+        let reports = service
+            .write_providers(&providers, &BTreeMap::new())
+            .unwrap();
 
         let by_id: HashMap<&str, &PluginApplyReport> = reports
             .iter()
@@ -1562,7 +1571,9 @@ mod tests {
             },
         )]);
 
-        let reports = service.write_providers(&providers).unwrap();
+        let reports = service
+            .write_providers(&providers, &BTreeMap::new())
+            .unwrap();
 
         assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
         let logs = logs.lock().unwrap();
@@ -1576,6 +1587,120 @@ mod tests {
             !logs.iter().any(|line| line.contains(canary)),
             "api_key 绝不进入日志输出：{logs:?}"
         );
+    }
+
+    /// 投影前宿主先插值（ADR 0015）：占位符在调用插件前替换为变量值，
+    /// 插件只收到替换后的字面值。
+    #[test]
+    fn write_providers_interpolates_placeholders_before_projection() {
+        use crate::provider::Endpoints;
+
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                base_url: Endpoints {
+                    openai_completions: Some("https://${HOST}/v1".to_owned()),
+                    ..Endpoints::default()
+                },
+                api_key: "sk-literal".to_owned(),
+                ..Provider::default()
+            },
+        )]);
+        let variables = BTreeMap::from([("HOST".to_owned(), "api.example.com".to_owned())]);
+
+        let reports = service.write_providers(&providers, &variables).unwrap();
+
+        assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+        let written: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            written["providers"]["gateway"]["baseUrl"],
+            "https://api.example.com/v1"
+        );
+        assert_eq!(
+            written["providers"]["gateway"]["apiKey"], "sk-literal",
+            "api_key 原样投影、不参与插值"
+        );
+    }
+
+    /// 任一字段解析失败即整插件 failed：不调用插件、不写任何文件，
+    /// 原因含 slug + 字段名 + 变量名，不含值与密钥（ADR 0015）。
+    #[test]
+    fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_error() {
+        use crate::provider::Endpoints;
+
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                base_url: Endpoints {
+                    openai_completions: Some("https://${UNDEFINED_VAR}/v1".to_owned()),
+                    ..Endpoints::default()
+                },
+                api_key: "sk-canary-must-not-leak".to_owned(),
+                ..Provider::default()
+            },
+        )]);
+
+        let reports = service
+            .write_providers(&providers, &BTreeMap::new())
+            .unwrap();
+
+        assert_eq!(reports[0].status, "failed");
+        let reason = reports[0].reason.as_deref().unwrap();
+        assert!(reason.contains("gateway"), "{reason}");
+        assert!(reason.contains("base_url.openai-completions"), "{reason}");
+        assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
+        assert!(
+            !reason.contains("sk-canary-must-not-leak"),
+            "失败原因不得携带值与密钥：{reason}"
+        );
+        assert!(
+            !home.path().join(".pi").join("agent").exists(),
+            "插值失败不得实例化插件、不得写任何文件"
+        );
+    }
+
+    /// 先插值、后挑选端点：解析为空串的端点按未配置处理（ADR 0015），
+    /// 走既有的合法跳过路径而非失败。
+    #[test]
+    fn endpoint_that_interpolates_to_empty_counts_as_unconfigured() {
+        use crate::provider::Endpoints;
+
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                base_url: Endpoints {
+                    openai_completions: Some("${EMPTY}".to_owned()),
+                    ..Endpoints::default()
+                },
+                ..Provider::default()
+            },
+        )]);
+        let variables = BTreeMap::from([("EMPTY".to_owned(), String::new())]);
+
+        let reports = service.write_providers(&providers, &variables).unwrap();
+
+        assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+        assert_eq!(reports[0].skipped.len(), 1);
+        assert_eq!(reports[0].skipped[0].slug, "gateway");
+        assert_eq!(reports[0].skipped[0].reason, "未配置任何协议端点");
     }
 
     /// 插件返回的路径必须是 config_dir 内的相对路径：绝对路径与 `..` 一律拒绝（fail-loud），

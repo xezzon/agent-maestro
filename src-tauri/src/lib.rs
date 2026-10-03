@@ -1,4 +1,5 @@
 mod command;
+mod interpolate;
 mod logging;
 mod paths;
 mod plugin;
@@ -7,7 +8,8 @@ mod store;
 
 use command::{
     add_plugin, apply_providers, create_provider, delete_provider, list_plugins, list_providers,
-    reload_plugin, remove_plugin, set_plugin_enabled, update_provider,
+    list_variables, reload_plugin, remove_plugin, set_plugin_enabled, set_variables,
+    update_provider,
 };
 use plugin::PluginService;
 use std::sync::RwLock;
@@ -121,6 +123,8 @@ pub fn run() {
             create_provider,
             update_provider,
             delete_provider,
+            list_variables,
+            set_variables,
             list_plugins,
             set_plugin_enabled,
             add_plugin,

@@ -19,6 +19,8 @@ import {
 import { FileTextOutlined } from "@ant-design/icons";
 import { createProvider, deleteProvider, listProviders, updateProvider } from "./api/provider";
 import { applyProviders, listPlugins } from "./api/plugins";
+import { listVariables } from "./api/variables";
+import VariablesCard from "./components/VariablesCard";
 import { openPath } from "@tauri-apps/plugin-opener";
 
 
@@ -359,6 +361,7 @@ function ApplyResultList({ reports }) {
 
 export default function ProvidersPage() {
   const [providers, setProviders] = useState([]);
+  const [variables, setVariables] = useState({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [creating, setCreating] = useState(false);
@@ -369,8 +372,9 @@ export default function ProvidersPage() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const providers = await listProviders()
+      const [providers, variables] = await Promise.all([listProviders(), listVariables()]);
       setProviders(providers);
+      setVariables(variables);
       setLoadError(null);
     } catch (err) {
       setLoadError(String(err));
@@ -416,7 +420,7 @@ export default function ProvidersPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page providers-page">
       <div className="page-header">
         <Typography.Title level={4} style={{ margin: 0 }}>
           Provider
@@ -448,39 +452,47 @@ export default function ProvidersPage() {
         <ApplyResultList reports={reports ?? []} />
       </Modal>
 
-      {loading && providers.length === 0 ? (
-        <div className="page-loading">
-          <Spin />
-        </div>
-      ) : providers.length === 0 && !creating ? (
-        <Empty description="尚未接入任何 Provider">
-          <Button type="primary" onClick={openCreate}>
-            新建 Provider
-          </Button>
-        </Empty>
-      ) : (
-        <Flex vertical gap={16}>
-          {
-            creating && (
-              <Card title="新建 Provider">
-                <ProviderForm
-                  provider={{ slug: "", protocol: null, base_url: "", models: [] }}
-                  providers={providers}
-                  onFinish={(refresh) => {
-                    setCreating(false);
-                    if (refresh) {
-                      reload();
-                    }
-                  }}
-                />
-              </Card>
-            )
-          }
-          {providers.map((provider) =>
-            <ProviderCard key={provider.slug} provider={provider} onReload={reload} />
+      <div className="providers-layout">
+        <div className="providers-main">
+          {loading && providers.length === 0 ? (
+            <div className="page-loading">
+              <Spin />
+            </div>
+          ) : (
+            <Flex vertical gap={16}>
+              {providers.length === 0 && !creating && (
+                <Empty description="尚未接入任何 Provider">
+                  <Button type="primary" onClick={openCreate}>
+                    新建 Provider
+                  </Button>
+                </Empty>
+              )}
+              {
+                creating && (
+                  <Card title="新建 Provider">
+                    <ProviderForm
+                      provider={{ slug: "", protocol: null, base_url: "", models: [] }}
+                      providers={providers}
+                      onFinish={(refresh) => {
+                        setCreating(false);
+                        if (refresh) {
+                          reload();
+                        }
+                      }}
+                    />
+                  </Card>
+                )
+              }
+              {providers.map((provider) =>
+                <ProviderCard key={provider.slug} provider={provider} onReload={reload} />
+              )}
+            </Flex>
           )}
-        </Flex>
-      )}
+        </div>
+        <aside className="variables-sider">
+          <VariablesCard variables={variables} onReload={reload} />
+        </aside>
+      </div>
     </div>
   );
 }

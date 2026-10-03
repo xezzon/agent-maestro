@@ -6,8 +6,6 @@ Maestro 插件接口合同 `maestro:plugin` 的类型化 Rust 绑定，同时是
 
 第三方插件以两种来源安装：**https 来源**（指向 manifest.json 的 https URL，面向正式发布）与**file 来源**（指向本机 manifest.json 绝对路径，面向本地调试）。两种来源在装载、校验与沙箱上完全同构。
 
-术语以 [`CONTEXT.md`](../../CONTEXT.md) 为准；架构取舍见 [ADR 0004](../../docs/adr/0004-wasm-component-plugins.md)（WASM 组件插件）、[ADR 0006](../../docs/adr/0006-plugin-sources-https-and-local-path.md)（来源与发布）、[ADR 0007](../../docs/adr/0007-plugin-sdk-distributed-via-git-tag.md)（SDK 分发）、[ADR 0013](../../docs/adr/0013-plugin-logger-import.md)（logger import）。
-
 ## 依赖方式
 
 本 crate 不发布到 crates.io。以 git 依赖引用本仓库中的 `crates/maestro-plugin-sdk`，并锁定 Maestro 的发布 tag——tag 与宿主版本一致，随 tag 固化插件与宿主的兼容组合：
@@ -204,6 +202,13 @@ log(Level::Warning, "模型 x 已弃用，仍继续投影");
 - 应用日志默认级别 INFO：debug 消息默认不落盘，`MAESTRO_LOG_LEVEL=debug` 时展开；日志按大小轮转（ADR 0008），不要用日志刷屏。
 - **message 不得携带 API Key 等凭证**——宿主不做内容审查，上报即落盘进日志文件（该文件定位是「发给维护者」的现场证据）。
 - 插件不调用 `log` 时行为与 1.0.0 合同完全一致；宿主恒定提供该 import，但 WIT 包版本升级（1.0.0 → 1.1.0）后宿主只注册当前版本，按旧合同编译的组件需以新版 SDK 重编译。
+
+## 配置值的插值（ADR 0014 / ADR 0015）
+
+`write-providers` 收到的 `base-url` 等字符串值，是宿主在投影前把**占位符**替换为全局变量（`variables`）实际值后的**字面值**——插件不需要、也无法感知变量。宿主侧的书写约束：
+
+- 值里的字面 `$` 与 `\` 必须写成 `\$` 与 `\\`；`${name}` / `$name` / `${name:default}` 引用变量，未定义即投影失败。
+- `api_key` 与模型 `id` 原样投影、**不参与插值**。
 
 ## 构建
 
