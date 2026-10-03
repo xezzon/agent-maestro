@@ -584,7 +584,7 @@ impl PluginService {
     ///
     /// 传入的每个 Provider 都参与投影：是否禁用由调用方先行剔除（#94 在命令层
     /// `enabled_providers` 完成），本函数不感知 `enabled`。投影前做占位符插值
-    /// （ADR 0015：先插值、后挑选端点）：按插件合并变量表（插件配置落地前即全局
+    /// （ADR 0015：先插值、后映射端点；端点选择见 ADR 0016）：按插件合并变量表（插件配置落地前即全局
     /// 变量表，见 #89）；任一字段失败即该插件整体 `failed`——不实例化、不调用插件、
     /// 不写任何文件。
     ///
@@ -1459,7 +1459,7 @@ mod tests {
     /// 逐插件报告：applied / failed / skipped 分类，单插件失败不影响其它插件。
     #[test]
     fn write_providers_reports_per_plugin_and_isolates_failures() {
-        use crate::provider::Endpoints;
+        use crate::provider::Protocol;
 
         let home = temp_home();
         let store = store_at(home.path());
@@ -1498,10 +1498,10 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                base_url: Endpoints {
-                    openai_completions: Some("https://api.example.com/v1".to_owned()),
-                    ..Endpoints::default()
-                },
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://api.example.com/v1".to_owned(),
+                )]),
                 ..Provider::default()
             },
         )]);
@@ -1552,7 +1552,7 @@ mod tests {
     /// 该值——把「api_key 绝不进日志」变成可执行断言。
     #[test]
     fn projection_path_never_logs_the_api_key() {
-        use crate::provider::Endpoints;
+        use crate::provider::Protocol;
 
         let logs = crate::logging::capture::captured_logs();
         let home = temp_home();
@@ -1565,10 +1565,10 @@ mod tests {
             "gateway".to_owned(),
             Provider {
                 api_key: canary.to_owned(),
-                base_url: Endpoints {
-                    openai_completions: Some("https://api.example.com/v1".to_owned()),
-                    ..Endpoints::default()
-                },
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://api.example.com/v1".to_owned(),
+                )]),
                 ..Provider::default()
             },
         )]);
@@ -1595,7 +1595,7 @@ mod tests {
     /// 插件只收到替换后的字面值。
     #[test]
     fn write_providers_interpolates_placeholders_before_projection() {
-        use crate::provider::Endpoints;
+        use crate::provider::Protocol;
 
         let home = temp_home();
         let store = store_at(home.path());
@@ -1605,10 +1605,10 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                base_url: Endpoints {
-                    openai_completions: Some("https://${HOST}/v1".to_owned()),
-                    ..Endpoints::default()
-                },
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${HOST}/v1".to_owned(),
+                )]),
                 api_key: "sk-literal".to_owned(),
                 ..Provider::default()
             },
@@ -1636,7 +1636,7 @@ mod tests {
     /// 原因含 slug + 字段名 + 变量名，不含值与密钥（ADR 0015）。
     #[test]
     fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_error() {
-        use crate::provider::Endpoints;
+        use crate::provider::Protocol;
 
         let home = temp_home();
         let store = store_at(home.path());
@@ -1646,10 +1646,10 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                base_url: Endpoints {
-                    openai_completions: Some("https://${UNDEFINED_VAR}/v1".to_owned()),
-                    ..Endpoints::default()
-                },
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${UNDEFINED_VAR}/v1".to_owned(),
+                )]),
                 api_key: "sk-canary-must-not-leak".to_owned(),
                 ..Provider::default()
             },
@@ -1674,11 +1674,11 @@ mod tests {
         );
     }
 
-    /// 先插值、后挑选端点：解析为空串的端点按未配置处理（ADR 0015），
+    /// 先插值、后映射端点：解析为空串的端点按未配置处理（ADR 0015），
     /// 走既有的合法跳过路径而非失败。
     #[test]
     fn endpoint_that_interpolates_to_empty_counts_as_unconfigured() {
-        use crate::provider::Endpoints;
+        use crate::provider::Protocol;
 
         let home = temp_home();
         let store = store_at(home.path());
@@ -1688,10 +1688,7 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                base_url: Endpoints {
-                    openai_completions: Some("${EMPTY}".to_owned()),
-                    ..Endpoints::default()
-                },
+                base_url: BTreeMap::from([(Protocol::OpenaiCompletions, "${EMPTY}".to_owned())]),
                 ..Provider::default()
             },
         )]);

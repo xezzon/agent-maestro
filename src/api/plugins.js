@@ -10,7 +10,7 @@
 /**
  * @typedef {Object} SkippedProvider
  * @property {string} slug
- * @property {string} reason 协议槽位为零或两个非空的跳过原因。
+ * @property {string} reason 跳过原因（当前仅未配置任何协议端点）。
  */
 /**
  * 逐插件投影报告。

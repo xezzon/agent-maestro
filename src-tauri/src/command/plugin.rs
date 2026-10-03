@@ -163,7 +163,7 @@ mod tests {
     use super::enabled_providers;
     use crate::{
         plugin::testutil::{store_at, temp_home, test_service},
-        provider::{Endpoints, Provider},
+        provider::{Protocol, Provider},
     };
 
     /// 禁用 Provider 不参与投影（#94）：先投影一次留下条目，再禁用并重新投影，
@@ -180,20 +180,20 @@ mod tests {
             (
                 "gateway".to_owned(),
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Some("https://api.example.com/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://api.example.com/v1".to_owned(),
+                    )]),
                     ..Provider::default()
                 },
             ),
             (
                 "offline".to_owned(),
                 Provider {
-                    base_url: Endpoints {
-                        openai_completions: Some("https://offline.example.com/v1".to_owned()),
-                        ..Endpoints::default()
-                    },
+                    base_url: BTreeMap::from([(
+                        Protocol::OpenaiCompletions,
+                        "https://offline.example.com/v1".to_owned(),
+                    )]),
                     api_key: "sk-disabled-must-not-leak".to_owned(),
                     ..Provider::default()
                 },

@@ -2,6 +2,7 @@
  * @typedef {'openai-completions' | 'anthropic-messages'} ProviderProtocol
  */
 /**
+ * 两个协议的端点槽位恒存在，空串表示该协议未配置（后端落盘时省略空槽位的键）。
  * @typedef {Record<ProviderProtocol, string>} Endpoints
  */
 /**
@@ -14,10 +15,12 @@
 /**
  * 后端 `list_providers` 返回的记录形态：`api_key` 为明文凭证，
  * 空串即未设置；第一期凭证随配置文件落盘，不做密钥链（ADR 0002 推迟采纳）。
+ * `base_url` 只包含已配置的槽位，缺键即未配置。
  * @typedef {Object} ProviderRequest
  * @property {string} slug
  * @property {boolean} enabled 禁用后不参与投影；旧配置缺此字段视为启用。
- * @property {Endpoints} base_url
+ * @property {Partial<Endpoints>} base_url
+ * @property {ProviderProtocol|null} selected_protocol 界面所选端点；未选为 `null`。
  * @property {string=} api_key
  * @property {Model[]} models 保序模型列表。
  */
@@ -27,25 +30,48 @@
  * @typedef {Object} Provider
  * @property {string} slug
  * @property {boolean} enabled 禁用后不参与投影；禁用态仍可编辑。
- * @property {ProviderProtocol} protocol
- * @property {string} base_url
+ * @property {Endpoints} base_url
+ * @property {ProviderProtocol|null} selected_protocol 投影使用的协议；未选为 `null`。
  * @property {Model[]} models
  * @property {string=} api_key
  */
 import { invoke } from "@tauri-apps/api/core";
 
+/** @type {ProviderProtocol} */
+export const OPENAI_COMPLETIONS = "openai-completions";
+/** @type {ProviderProtocol} */
+export const ANTHROPIC_MESSAGES = "anthropic-messages";
+/** @type {ProviderProtocol[]} */
+export const PROVIDER_PROTOCOLS = [OPENAI_COMPLETIONS, ANTHROPIC_MESSAGES];
+
 /**
- * 创建/更新命令共用的 `provider` 负载：`base_url` 按所选协议落对应槽位（ADR 0003），
+ * 把后端可能缺键的 `base_url` 补齐为两个槽位恒存在的形态，缺键补空串。
+ * @param {Partial<Endpoints>|undefined} baseUrl
+ * @returns {Endpoints}
+ */
+export function normalizeEndpoints(baseUrl) {
+  return Object.fromEntries(
+    PROVIDER_PROTOCOLS.map((protocol) => [protocol, baseUrl?.[protocol] ?? ""]),
+  );
+}
+
+/**
+ * 创建/更新命令共用的 `provider` 负载：`base_url` 只携带已填写的槽位，
+ * `selected_protocol` 归一化为已填槽位之一（否则 `null`，投影时由插件兜底）。
  * `api_key` 与模型列表随整包替换回传（保序）。
  * @param {Provider} provider
  */
 function toProviderPayload(provider) {
-  return {
-    ...provider,
-    base_url: {
-      [provider.protocol]: provider.base_url,
-    },
-  };
+  const base_url = Object.fromEntries(
+    Object.entries(normalizeEndpoints(provider.base_url)).filter(
+      ([, url]) => url.trim() !== "",
+    ),
+  );
+  const selected_protocol =
+    provider.selected_protocol && base_url[provider.selected_protocol]
+      ? provider.selected_protocol
+      : null;
+  return { ...provider, base_url, selected_protocol };
 }
 
 /**
@@ -78,8 +104,8 @@ export async function listProviders() {
     .map(([slug, provider]) => ({
       ...provider,
       slug,
-      protocol: Object.keys(provider.base_url)[0],
-      base_url: Object.values(provider.base_url)[0],
+      base_url: normalizeEndpoints(provider.base_url),
+      selected_protocol: provider.selected_protocol ?? null,
       api_key_set: !!provider.api_key,
     }))
     .sort((a, b) => a.slug.localeCompare(b.slug));

@@ -48,21 +48,21 @@
 //!
 //! # 版本对齐约定
 //!
-//! SDK 版本与 WIT 包 `maestro:plugin` 版本按 semver 对齐：SDK 1.x ↔ WIT 1.x，
+//! SDK 版本与 WIT 包 `maestro:plugin` 版本按 semver 对齐：SDK 2.x ↔ WIT 2.x，
 //! 合同 breaking 变更时同步升 major；minor/patch 在 major 内各自独立。
-//! `maestro:plugin` v1 内只加不改（只新增字段、协议与函数）；WIT 包版本升级
-//! （如 1.0.0 → 1.1.0）后宿主只注册当前版本，插件须以新版 SDK 重编译
+//! `maestro:plugin` 在 major 内只加不改（只新增字段、协议与函数）；WIT 包版本
+//! 升级（如 1.1.0 → 2.0.0）后宿主只注册当前版本，插件须以新版 SDK 重编译
 //! （宿主恒定提供的 import 不改变这一要求）。
 //! WIT 合同随本 crate 分发（`wit/maestro-plugin.wit`），构建时内嵌该文件
 //! 生成绑定（见 build.rs）。
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-/// `maestro:plugin` v1 合同的全部 WIT 类型与 `Guest` trait。
+/// `maestro:plugin` v2 合同的全部 WIT 类型与 `Guest` trait。
 ///
-/// 类型与合同 v1 一一对应：加字段/加协议 = 合同升包版本 + 插件重编译。
-pub use exports::maestro::plugin::plugin::{Guest, Model, Protocol, Provider};
+/// 类型与合同 v2 一一对应：加字段/加协议 = 合同升包版本 + 插件重编译。
+pub use exports::maestro::plugin::plugin::{Endpoint, Guest, Model, Protocol, Provider};
 
-/// 过程性日志 import 绑定（`maestro:plugin` v1.1.0，见 [`log`]）：
+/// 过程性日志 import 绑定（`maestro:plugin` v1.1.0 起，见 [`log`]）：
 /// [`Level`] 枚举与 [`log`] 函数 re-export 到 crate 根，方便插件一行引入。
 pub use maestro::plugin::logger::{Level, log};

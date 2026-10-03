@@ -18,14 +18,6 @@ pub(crate) fn interpolate_value(template: &str, variables: &Variables) -> Result
     subst::substitute(template, variables).map_err(|e| e.to_string())
 }
 
-pub(crate) fn interpolate_slot(
-    slot: Option<&str>,
-    variables: &BTreeMap<String, String>,
-) -> Result<Option<String>, String> {
-    slot.map(|url| crate::interpolate::interpolate_value(url, variables))
-        .transpose()
-}
-
 /// 对传入的每个 Provider 插值，返回替换后的字面值副本。
 ///
 /// 作用域＝Provider 中除 `api_key` 与模型 `id` 外的字符串值（ADR 0015）。
@@ -52,7 +44,7 @@ pub fn interpolate_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::Endpoints;
+    use crate::provider::Protocol;
 
     fn vars(entries: &[(&str, &str)]) -> Variables {
         entries
@@ -155,13 +147,12 @@ mod tests {
         providers.insert(
             "gateway".to_owned(),
             Provider {
-                enabled: true,
-                base_url: Endpoints {
-                    openai_completions: Some("https://${HOST}/v1".to_owned()),
-                    ..Endpoints::default()
-                },
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${HOST}/v1".to_owned(),
+                )]),
                 api_key: "sk-canary-do-not-leak".to_owned(),
-                models: Vec::new(),
+                ..Default::default()
             },
         );
 

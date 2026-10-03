@@ -4,11 +4,14 @@
 //! 实现 SDK re-export 的 `Guest` trait；本插件兼作 SDK 的常驻契约验证与插件作者的
 //! 参考实现。宿主把 manifest 声明的 config_dir（pi 即 `$HOME/.pi`）预开放为 "/"，
 //! 插件以相对路径写入文件，整文件重写，保证已删除的 Provider 不残留。
+//!
+//! 端点选择在插件侧完成（ADR 0016）：宿主把全部端点与界面选择整包交给插件，
+//! 由插件按自身兜底规则挑出投影使用的那个。
 
 use std::fs;
 use std::path::Path;
 
-use maestro_plugin_sdk::{Guest, Model, Protocol, Provider, export};
+use maestro_plugin_sdk::{Endpoint, Guest, Level, Model, Protocol, Provider, export, log};
 
 /// pi 的 models.json 中 provider 条目的字段名。
 const KEY_API: &str = "api";
@@ -35,9 +38,20 @@ fn write_models_json(providers: &[Provider]) -> Result<(), String> {
     // serde_json 默认以 BTreeMap 承载对象，key 输出即按字典序排序，保证产物确定性。
     let mut root = serde_json::Map::new();
     for provider in providers {
+        // 宿主只把非空端点的 Provider 送进来；其余属防御分支，不静默丢弃。
+        let Some(endpoint) = effective_endpoint(provider) else {
+            log(
+                Level::Warning,
+                &format!(
+                    "Provider \"{}\" has no usable endpoint; skipping",
+                    provider.slug
+                ),
+            );
+            continue;
+        };
         let mut entry = serde_json::Map::new();
-        entry.insert(KEY_API.to_owned(), protocol_api(&provider.protocol).into());
-        entry.insert(KEY_BASE_URL.to_owned(), provider.base_url.as_str().into());
+        entry.insert(KEY_API.to_owned(), protocol_api(&endpoint.protocol).into());
+        entry.insert(KEY_BASE_URL.to_owned(), endpoint.base_url.as_str().into());
         if let Some(api_key) = &provider.api_key {
             entry.insert(KEY_API_KEY.to_owned(), escape_api_key(api_key).into());
         }
@@ -57,6 +71,29 @@ fn write_models_json(providers: &[Provider]) -> Result<(), String> {
         .map_err(|e| format!("替换 agent/models.json 失败\n原因：{e}"))?;
 
     Ok(())
+}
+
+/// 选择投影端点（ADR 0016）：
+/// 1. 界面所选协议确有端点 → 用它；
+/// 2. 否则只剩一个端点 → 用它（覆盖旧配置无选择、选择失效两类情形）；
+/// 3. 否则多端点且无有效选择 → 取固定顺序里的首选 openai-completions。
+fn effective_endpoint(provider: &Provider) -> Option<&Endpoint> {
+    if let Some(selected) = &provider.selected_protocol
+        && let Some(endpoint) = provider
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.protocol == selected)
+    {
+        return Some(endpoint);
+    }
+    if provider.endpoints.len() == 1 {
+        return provider.endpoints.first();
+    }
+    provider
+        .endpoints
+        .iter()
+        .find(|endpoint| matches!(endpoint.protocol, Protocol::OpenaiCompletions))
+        .or_else(|| provider.endpoints.first())
 }
 
 /// 枚举透传为 pi 期望的线协议名字符串。
