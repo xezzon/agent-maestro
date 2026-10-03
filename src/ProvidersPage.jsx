@@ -37,10 +37,12 @@ const ANTHROPIC_MESSAGES = "anthropic-messages";
 /**
  * @param {Object} param0
  * @param {import("./api/provider").Provider} param0.provider
- * @param {() => void} param0.onReload
+ * @param {() => Promise<void>} param0.onReload
  */
 function ProviderCard({ provider, onReload }) {
   const [editing, setEditing] = useState(false);
+  // 开关与编辑表单互斥：任一方进行中另一方整体禁用。否则切换成功后、
+  // 列表刷新落地前提交的表单仍持有切换前的 provider，会把刚完成的禁用改回启用。
   const [busy, setBusy] = useState(false);
 
   /** 开关独立于编辑表单：切换失败保持原状态。 */
@@ -48,7 +50,7 @@ function ProviderCard({ provider, onReload }) {
     setBusy(true);
     try {
       await setProviderEnabled(provider.slug, enabled);
-      onReload();
+      await onReload();
     } catch (err) {
       message.error(String(err));
     } finally {
@@ -77,6 +79,8 @@ function ProviderCard({ provider, onReload }) {
       ? <ProviderForm
         provider={provider}
         providers={[]} // 更新状态下不需要检查 slug 冲突（因为 slug 不可编辑）
+        disabled={busy}
+        onBusyChange={setBusy}
         onFinish={(refresh) => {
           setEditing(false)
           if (refresh) {
@@ -163,8 +167,10 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
  * @param {import("./api/provider").Provider} param0.provider
  * @param {import("./api/provider").Provider[]} param0.providers 当前存在的 providers，用于检查 slug 冲突
  * @param {(refresh: boolean) => void} param0.onFinish
+ * @param {boolean=} param0.disabled 外部（状态开关）进行中时整体禁用表单
+ * @param {(busy: boolean) => void=} param0.onBusyChange 上报本表单的保存态
  */
-function ProviderForm({ provider, providers, onFinish }) {
+function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyChange }) {
   const SLUG_PATTERN = /^[a-z][a-z0-9-_]*$/;
   const PROTOCOL_OPTIONS = [
     {
@@ -225,6 +231,7 @@ function ProviderForm({ provider, providers, onFinish }) {
   // 显式与 provider 合并回传，避免缺字段被后端默认值静默重置为启用。
   async function submitWith(apiFn) {
     setSaving(true);
+    onBusyChange?.(true);
     try {
       const values = await form.validateFields();
       await apiFn({ ...provider, ...values });
@@ -236,12 +243,14 @@ function ProviderForm({ provider, providers, onFinish }) {
       }
     } finally {
       setSaving(false);
+      onBusyChange?.(false);
     }
   }
 
   return <Form
     form={form}
     layout="vertical"
+    disabled={disabled}
     initialValues={provider}
     onFinish={handleSubmit}
   >
