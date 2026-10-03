@@ -17,7 +17,7 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import { FileTextOutlined } from "@ant-design/icons";
+import { CheckCircleTwoTone, FileTextOutlined } from "@ant-design/icons";
 import {
   ANTHROPIC_MESSAGES,
   OPENAI_COMPLETIONS,
@@ -127,7 +127,12 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
             <Flex align="center" gap={8}>
               <span>{protocol}</span>
               {provider.selected_protocol === protocol && (
-                <Tag color="blue">投影使用</Tag>
+                <Tooltip title="已选择">
+                  <Tag
+                    color="blue"
+                    icon={<CheckCircleTwoTone aria-label="已选择" />}
+                  />
+                </Tooltip>
               )}
             </Flex>
           }
