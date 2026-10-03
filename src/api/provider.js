@@ -16,6 +16,7 @@
  * 空串即未设置；第一期凭证随配置文件落盘，不做密钥链（ADR 0002 推迟采纳）。
  * @typedef {Object} ProviderRequest
  * @property {string} slug
+ * @property {boolean} enabled 禁用后不参与投影；旧配置缺此字段视为启用。
  * @property {Endpoints} base_url
  * @property {string=} api_key
  * @property {Model[]} models 保序模型列表。
@@ -25,6 +26,7 @@
  * 创建/更新时整包回传。
  * @typedef {Object} Provider
  * @property {string} slug
+ * @property {boolean} enabled 禁用后不参与投影；禁用态仍可编辑。
  * @property {ProviderProtocol} protocol
  * @property {string} base_url
  * @property {Model[]} models
@@ -81,6 +83,15 @@ export async function listProviders() {
       api_key_set: !!provider.api_key,
     }))
     .sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+/**
+ * 启用/禁用 Provider：禁用后不再投影到各工具。切换只改状态，不触发插值校验。
+ * @param {string} slug
+ * @param {boolean} enabled
+ */
+export async function setProviderEnabled(slug, enabled) {
+  await invoke("set_provider_enabled", { slug, enabled });
 }
 
 /**

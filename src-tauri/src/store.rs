@@ -170,7 +170,8 @@ impl Store {
 
     /// 新建一条 Provider（slug 唯一），成功后原子写回磁盘。
     /// 落盘前对当前变量表插值一次：占位符引用必须可解析（变量已定义，或带
-    /// 内联默认值），语法错误同样拦截——provider↔variables 一致性。
+    /// 内联默认值），语法错误同样拦截——provider↔variables 一致性；
+    /// 禁用状态不影响该校验。
     pub(crate) fn create_provider(
         &mut self,
         slug: &str,
@@ -182,9 +183,7 @@ impl Store {
                 slug: slug.to_owned(),
             });
         }
-        provider
-            .interpolate(&config.variables)
-            .map_err(|error| interpolation_error(slug, error))?;
+        validate_provider(slug, &provider, &config.variables)?;
         let mut next = config.clone();
         next.providers.insert(slug.to_owned(), provider);
         self.persist(&next)?;
@@ -194,7 +193,7 @@ impl Store {
 
     /// 整包替换指定 Provider 的端点、模型列表与 API Key（明文）。
     /// slug 不存在时报错，不做 upsert；落盘前对当前变量表插值一次，占位符
-    /// 引用必须可解析（同 `create_provider`）。
+    /// 引用必须可解析（同 `create_provider`，禁用状态不影响校验）。
     pub(crate) fn update_provider(
         &mut self,
         slug: &str,
@@ -205,9 +204,7 @@ impl Store {
 
         match next.providers.get(slug).cloned() {
             Some(original) => {
-                provider
-                    .interpolate(&next.variables)
-                    .map_err(|error| interpolation_error(slug, error))?;
+                validate_provider(slug, &provider, &next.variables)?;
                 next.providers.insert(slug.to_owned(), provider);
                 self.persist(&next)?;
                 self.state = Ok(next);
@@ -238,8 +235,9 @@ impl Store {
 
     /// 整包替换全局变量表（ADR 0015）：新增、修改与删除都走同一条全量保存路径。
     /// 变量名须合法（`[A-Za-z0-9_]+`，ADR 0014），否则占位符无法引用；落盘前
-    /// 用新表对全部存量 Provider 插值一次：删除导致任一 Provider 的引用无法解析
-    /// 时整表拒绝（provider↔variables 一致性）。空默认值合法（`${EMPTY}`）。
+    /// 用新表对全部存量 Provider（含禁用者）插值一次：删除导致任一 Provider 的
+    /// 引用无法解析时整表拒绝（provider↔variables 一致性）。空默认值合法
+    /// （`${EMPTY}`）。
     pub(crate) fn set_variables(&mut self, variables: Variables) -> Result<(), StoreError> {
         for name in variables.keys() {
             if !is_valid_variable_name(name) {
@@ -250,9 +248,7 @@ impl Store {
         }
         let config = self.state.as_ref().map_err(Clone::clone)?;
         for (slug, provider) in &config.providers {
-            provider
-                .interpolate(&variables)
-                .map_err(|error| interpolation_error(slug, error))?;
+            validate_provider(slug, provider, &variables)?;
         }
         let mut next = config.clone();
         next.variables = variables;
@@ -364,6 +360,35 @@ impl Store {
         })
     }
 
+    /// 启用/禁用单个 Provider（独立于编辑表单的开关）。
+    ///
+    /// 幂等：状态未变即直接成功、不写盘。切换不改变占位符文本，而存储写出的每条
+    /// 记录都已通过落盘一致性校验（create/update/set_variables 均不豁免禁用项），
+    /// 故切换无需再次校验插值。
+    pub(crate) fn set_provider_enabled(
+        &mut self,
+        slug: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        let current = config
+            .providers
+            .get(slug)
+            .ok_or_else(|| StoreError::MissingSlug {
+                slug: slug.to_owned(),
+            })?;
+        if current.enabled == enabled {
+            return Ok(());
+        }
+        let mut next = config.clone();
+        if let Some(provider) = next.providers.get_mut(slug) {
+            provider.enabled = enabled;
+        }
+        self.persist(&next)?;
+        self.state = Ok(next);
+        Ok(())
+    }
+
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
     fn persist(&self, config: &Config) -> Result<(), StoreError> {
         let dir = self.config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -404,6 +429,22 @@ fn interpolation_error(slug: &str, error: FieldError) -> StoreError {
         field,
         reason,
     }
+}
+
+/// Provider 落盘前的插值校验（provider↔variables 一致性，ADR 0015）。
+///
+/// 全部 Provider（含禁用者）都须对当前变量表可解析：落盘内容始终是自洽的，
+/// 禁用只是一种投影时的结构过滤，不改变存储不变式。
+/// create_provider/update_provider/set_variables 共用这一条规则。
+fn validate_provider(
+    slug: &str,
+    provider: &Provider,
+    variables: &Variables,
+) -> Result<(), StoreError> {
+    provider
+        .interpolate(variables)
+        .map_err(|error| interpolation_error(slug, error))?;
+    Ok(())
 }
 
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。
@@ -507,6 +548,7 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -537,6 +579,7 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -551,6 +594,7 @@ mod tests {
             .update_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -582,6 +626,7 @@ mod tests {
             .update_provider(
                 "ghost",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
@@ -609,6 +654,7 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -627,6 +673,7 @@ mod tests {
             .update_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -724,6 +771,7 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -739,6 +787,7 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
@@ -769,6 +818,7 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -798,6 +848,7 @@ mod tests {
                 .create_provider(
                     slug,
                     Provider {
+                        enabled: true,
                         base_url: Endpoints {
                             openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                             anthropic_messages: Option::None,
@@ -826,6 +877,7 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -839,6 +891,7 @@ mod tests {
             .create_provider(
                 "openrouter",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some(
@@ -895,6 +948,7 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -940,6 +994,7 @@ mod tests {
                 .create_provider(
                     "foo",
                     Provider {
+                        enabled: true,
                         base_url: Endpoints {
                             openai_completions: Option::Some("http://localhost:9".to_owned()),
                             anthropic_messages: Option::None,
@@ -979,6 +1034,7 @@ mod tests {
                 .create_provider(
                     "foo",
                     Provider {
+                        enabled: true,
                         base_url: Endpoints {
                             openai_completions: Option::Some("http://localhost:9".to_owned()),
                             anthropic_messages: Option::None,
@@ -1005,6 +1061,7 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -1019,6 +1076,7 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://localhost:10".to_owned()),
@@ -1049,6 +1107,7 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
@@ -1086,6 +1145,7 @@ mod tests {
             .create_provider(
                 "openrouter",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -1118,6 +1178,7 @@ mod tests {
             .create_provider(
                 "openai",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.openai.com/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -1131,6 +1192,7 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://127.0.0.1:8080/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -1173,6 +1235,7 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
+                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -1691,5 +1754,182 @@ mod tests {
         assert_eq!(store.get().unwrap().variables["EMPTY"], "");
         let reopened = Store::new();
         assert_eq!(reopened.get().unwrap().variables["EMPTY"], "");
+    }
+
+    /// 旧配置文件缺 `enabled` 键：读入即启用；随后任一次落盘都补全该键，
+    /// 原有数据（端点/模型/api_key/变量）一字不丢。
+    #[test]
+    fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let path = MaestroPaths::get().config_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "providers": {
+                    "ollama": {
+                        "base_url": {"openai-completions": "http://localhost:11434/v1"},
+                        "api_key": "sk-legacy",
+                        "models": [{"id": "deepseek-chat", "display_name": "DeepSeek Chat"}]
+                    }
+                },
+                "variables": {"HOST": "api.example.com"}
+            }"#,
+        )
+        .unwrap();
+
+        let mut store = Store::new();
+        assert!(
+            store.get().unwrap().providers["ollama"].enabled,
+            "旧配置缺 enabled 键即视为启用"
+        );
+
+        // 一次无关的落盘（新增变量）后，旧记录被完整保留并补全 enabled 键。
+        let mut variables = store.get().unwrap().variables.clone();
+        variables.insert("EXTRA".to_owned(), "1".to_owned());
+        store.set_variables(variables).unwrap();
+
+        let reopened = Store::new();
+        let provider = &reopened.get().unwrap().providers["ollama"];
+        assert!(provider.enabled);
+        assert_eq!(
+            provider.base_url.openai_completions.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(provider.api_key, "sk-legacy");
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].id, "deepseek-chat");
+        assert_eq!(
+            provider.models[0].display_name.as_deref(),
+            Some("DeepSeek Chat")
+        );
+        assert_eq!(reopened.get().unwrap().variables["HOST"], "api.example.com");
+        assert_eq!(reopened.get().unwrap().variables["EXTRA"], "1");
+    }
+
+    #[test]
+    fn set_provider_enabled_toggles_and_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .create_provider("ollama", Provider::default())
+            .unwrap();
+
+        store.set_provider_enabled("ollama", false).unwrap();
+
+        assert!(!store.get().unwrap().providers["ollama"].enabled);
+        assert!(
+            !Store::new().get().unwrap().providers["ollama"].enabled,
+            "禁用态随记录落盘"
+        );
+
+        store.set_provider_enabled("ollama", true).unwrap();
+        assert!(Store::new().get().unwrap().providers["ollama"].enabled);
+    }
+
+    #[test]
+    fn set_provider_enabled_is_idempotent_and_missing_slug_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .create_provider("ollama", Provider::default())
+            .unwrap();
+
+        store.set_provider_enabled("ollama", true).unwrap();
+        assert!(store.get().unwrap().providers["ollama"].enabled);
+
+        let err = store.set_provider_enabled("missing", false).unwrap_err();
+        assert!(matches!(err, StoreError::MissingSlug { .. }));
+    }
+
+    /// 禁用的 Provider 同样受插值校验约束：落盘内容始终对变量表可解析，
+    /// 禁用只是投影时的结构过滤，不放宽 provider↔variables 一致性。
+    #[test]
+    fn disabled_provider_is_still_subject_to_interpolation_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+
+        // 禁用态也不能保存引用未定义变量的记录。
+        let err = store
+            .create_provider(
+                "gateway",
+                Provider {
+                    enabled: false,
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${UNDEFINED}/v1".to_owned()),
+                        ..Endpoints::default()
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Interpolation { .. }));
+
+        // 先建一个引用 HOST 的启用 Provider，再禁用。
+        store
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+            .unwrap();
+        store
+            .create_provider(
+                "enabled",
+                Provider {
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${HOST}/v1".to_owned()),
+                        ..Endpoints::default()
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap();
+        store.set_provider_enabled("enabled", false).unwrap();
+
+        // 禁用项引用的变量同样不能删除：禁用者仍算「在使用中」。
+        let err = store.set_variables(BTreeMap::new()).unwrap_err();
+        assert!(matches!(err, StoreError::Interpolation { .. }));
+        assert!(
+            store.get().unwrap().variables.contains_key("HOST"),
+            "被拒的删变量不改配置"
+        );
+    }
+
+    /// 整包更新为禁用态同样要过插值校验：不能把记录改成引用未定义变量。
+    #[test]
+    fn update_provider_to_disabled_still_checks_interpolation() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .create_provider("gateway", Provider::default())
+            .unwrap();
+
+        let err = store
+            .update_provider(
+                "gateway",
+                Provider {
+                    enabled: false,
+                    base_url: Endpoints {
+                        openai_completions: Option::Some("https://${MISSING}/v1".to_owned()),
+                        ..Endpoints::default()
+                    },
+                    ..Provider::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Interpolation { .. }));
+
+        let provider = &store.get().unwrap().providers["gateway"];
+        assert!(provider.enabled, "被拒的更新不改配置");
+        assert_ne!(
+            provider.base_url.openai_completions.as_deref(),
+            Some("https://${MISSING}/v1")
+        );
     }
 }

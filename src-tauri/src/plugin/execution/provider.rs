@@ -142,6 +142,7 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
+                enabled: true,
                 base_url: Endpoints {
                     anthropic_messages: Some("https://anthropic.example.com".to_owned()),
                     ..Endpoints::default()

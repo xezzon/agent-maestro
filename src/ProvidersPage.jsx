@@ -12,12 +12,19 @@ import {
   Popconfirm,
   Radio,
   Spin,
+  Switch,
   Tag,
   Tooltip,
   Typography,
 } from "antd";
 import { FileTextOutlined } from "@ant-design/icons";
-import { createProvider, deleteProvider, listProviders, updateProvider } from "./api/provider";
+import {
+  createProvider,
+  deleteProvider,
+  listProviders,
+  setProviderEnabled,
+  updateProvider,
+} from "./api/provider";
 import { applyProviders, listPlugins } from "./api/plugins";
 import { listVariables } from "./api/variables";
 import VariablesCard from "./components/VariablesCard";
@@ -30,16 +37,50 @@ const ANTHROPIC_MESSAGES = "anthropic-messages";
 /**
  * @param {Object} param0
  * @param {import("./api/provider").Provider} param0.provider
- * @param {() => void} param0.onReload
+ * @param {() => Promise<void>} param0.onReload
  */
 function ProviderCard({ provider, onReload }) {
   const [editing, setEditing] = useState(false);
+  // 开关与编辑表单互斥：任一方进行中另一方整体禁用。否则切换成功后、
+  // 列表刷新落地前提交的表单仍持有切换前的 provider，会把刚完成的禁用改回启用。
+  const [busy, setBusy] = useState(false);
 
-  return <Card title={provider.slug}>
+  /** 开关独立于编辑表单：切换失败保持原状态。 */
+  async function handleToggleEnabled(enabled) {
+    setBusy(true);
+    try {
+      await setProviderEnabled(provider.slug, enabled);
+      await onReload();
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const title = (
+    <Flex justify="space-between" align="center">
+      <Flex align="center" gap={8}>
+        <Typography.Text strong>{provider.slug}</Typography.Text>
+        {!provider.enabled && <Tag>已禁用</Tag>}
+      </Flex>
+      <Switch
+        checked={provider.enabled}
+        checkedChildren="启用"
+        unCheckedChildren="禁用"
+        disabled={busy}
+        onChange={handleToggleEnabled}
+      />
+    </Flex>
+  );
+
+  return <Card title={title} className={provider.enabled ? undefined : "provider-disabled"}>
     {editing
       ? <ProviderForm
         provider={provider}
         providers={[]} // 更新状态下不需要检查 slug 冲突（因为 slug 不可编辑）
+        disabled={busy}
+        onBusyChange={setBusy}
         onFinish={(refresh) => {
           setEditing(false)
           if (refresh) {
@@ -126,8 +167,10 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
  * @param {import("./api/provider").Provider} param0.provider
  * @param {import("./api/provider").Provider[]} param0.providers 当前存在的 providers，用于检查 slug 冲突
  * @param {(refresh: boolean) => void} param0.onFinish
+ * @param {boolean=} param0.disabled 外部（状态开关）进行中时整体禁用表单
+ * @param {(busy: boolean) => void=} param0.onBusyChange 上报本表单的保存态
  */
-function ProviderForm({ provider, providers, onFinish }) {
+function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyChange }) {
   const SLUG_PATTERN = /^[a-z][a-z0-9-_]*$/;
   const PROTOCOL_OPTIONS = [
     {
@@ -184,12 +227,15 @@ function ProviderForm({ provider, providers, onFinish }) {
   }
 
   // 命令成功即已落盘，由父组件刷新列表。
+  // `enabled` 不是 Form.Item（开关独立于表单），validateFields 不返回它；
+  // 显式与 provider 合并回传，避免缺字段被后端默认值静默重置为启用。
   async function submitWith(apiFn) {
     setSaving(true);
+    onBusyChange?.(true);
     try {
-      await form.validateFields()
-        .then(apiFn)
-        .then(() => onFinish(true));
+      const values = await form.validateFields();
+      await apiFn({ ...provider, ...values });
+      onFinish(true);
     } catch (err) {
       // 校验失败已内联展示，无需重复报错；其余为命令调用失败。
       if (!err?.errorFields) {
@@ -197,12 +243,14 @@ function ProviderForm({ provider, providers, onFinish }) {
       }
     } finally {
       setSaving(false);
+      onBusyChange?.(false);
     }
   }
 
   return <Form
     form={form}
     layout="vertical"
+    disabled={disabled}
     initialValues={provider}
     onFinish={handleSubmit}
   >
@@ -471,7 +519,7 @@ export default function ProvidersPage() {
                 creating && (
                   <Card title="新建 Provider">
                     <ProviderForm
-                      provider={{ slug: "", protocol: null, base_url: "", models: [] }}
+                      provider={{ slug: "", protocol: null, base_url: "", models: [], enabled: true }}
                       providers={providers}
                       onFinish={(refresh) => {
                         setCreating(false);

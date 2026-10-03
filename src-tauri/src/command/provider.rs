@@ -12,8 +12,9 @@ use crate::{
 /// 创建/更新 Provider 命令的 `provider` 负载；slug 亦随负载传入。
 ///
 /// `base_url` 与 `models` 缺省即视为未配置/空列表；`api_key` 缺省即未设置
-/// （空串）。更新为整包替换，`api_key` 携带现值或新值（明文，第一期随配置
-/// 文件落盘，ADR 0002 推迟采纳）。
+/// （空串）；`enabled` 缺省即启用（旧 payload 不带该字段时不被静默禁用）。
+/// 更新为整包替换，`api_key` 携带现值或新值（明文，第一期随配置
+/// 文件落盘，ADR 0002 推迟采纳），`enabled` 亦携带现值或新值。
 #[derive(Deserialize)]
 pub(crate) struct ProviderRequest {
     #[serde(default)]
@@ -24,6 +25,8 @@ pub(crate) struct ProviderRequest {
     api_key: Option<String>,
     #[serde(default)]
     models: Vec<ModelEntry>,
+    #[serde(default = "crate::provider::default_true")]
+    enabled: bool,
 }
 
 /// 映射为配置记录：slug 由调用方另行取出作存储 key，不进记录本体；
@@ -31,6 +34,7 @@ pub(crate) struct ProviderRequest {
 impl From<ProviderRequest> for Provider {
     fn from(val: ProviderRequest) -> Self {
         Provider {
+            enabled: val.enabled,
             base_url: val.base_url,
             api_key: val.api_key.unwrap_or_default(),
             models: val.models,
@@ -93,6 +97,23 @@ pub(crate) fn delete_provider(store: State<'_, AppStore>, slug: String) -> Resul
     outcome
 }
 
+/// 切换单个 Provider 的启用状态（不经过编辑表单的独立开关）。
+#[tauri::command]
+pub(crate) fn set_provider_enabled(
+    store: State<'_, AppStore>,
+    slug: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let context = format!("slug={slug} enabled={enabled}");
+    let outcome = (|| {
+        let mut guard = store.write()?;
+        guard.set_provider_enabled(&slug, enabled)?;
+        Ok(())
+    })();
+    log_outcome("set_provider_enabled", &context, &outcome);
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,7 +158,8 @@ mod tests {
                 "slug": "openrouter",
                 "base_url": {"openai-completions": "http://127.0.0.1:8080/v1"},
                 "api_key": "sk-test",
-                "models": [{"id": "gpt-4o", "display_name": "GPT-4o"}]
+                "models": [{"id": "gpt-4o", "display_name": "GPT-4o"}],
+                "enabled": false
             }"#,
         )
         .unwrap();
@@ -150,6 +172,7 @@ mod tests {
         assert_eq!(request.api_key.as_deref(), Some("sk-test"));
         assert_eq!(request.models.len(), 1);
         assert_eq!(request.models[0].id, "gpt-4o");
+        assert!(!request.enabled, "负载显式携带禁用态");
     }
 
     #[test]
@@ -178,5 +201,21 @@ mod tests {
         let without_api_key: Provider = parse(r#"{}"#).unwrap().into();
 
         assert_eq!(without_api_key.api_key, "", "api_key 缺省即未设置（空串）");
+    }
+
+    /// `enabled` 缺省即启用：旧 payload 或漏字段不会被静默禁用。
+    #[test]
+    fn enabled_absent_means_enabled() {
+        assert!(parse(r#"{}"#).unwrap().enabled);
+        let record: Provider = parse(r#"{}"#).unwrap().into();
+        assert!(record.enabled, "缺省映射为启用");
+    }
+
+    /// 显式携带的禁用态原样进入记录，不被缺省值覆盖。
+    #[test]
+    fn enabled_false_is_mapped_verbatim() {
+        let record: Provider = parse(r#"{"enabled":false}"#).unwrap().into();
+
+        assert!(!record.enabled);
     }
 }
