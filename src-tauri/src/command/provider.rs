@@ -6,13 +6,14 @@ use tauri::State;
 use super::log_outcome;
 use crate::{
     AppStore,
-    provider::{Endpoints, ModelEntry, Provider},
+    provider::{Endpoints, ModelEntry, Protocol, Provider},
 };
 
 /// 创建/更新 Provider 命令的 `provider` 负载；slug 亦随负载传入。
 ///
 /// `base_url` 与 `models` 缺省即视为未配置/空列表；`api_key` 缺省即未设置
-/// （空串）；`enabled` 缺省即启用（旧 payload 不带该字段时不被静默禁用）。
+/// （空串）；`selected_protocol` 缺省即未选择（`null` 同义，见 ADR 0016）；
+/// `enabled` 缺省即启用（旧 payload 不带该字段时不被静默禁用）。
 /// 更新为整包替换，`api_key` 携带现值或新值（明文，第一期随配置
 /// 文件落盘，ADR 0002 推迟采纳），`enabled` 亦携带现值或新值。
 #[derive(Deserialize)]
@@ -21,6 +22,8 @@ pub(crate) struct ProviderRequest {
     slug: String,
     #[serde(default)]
     base_url: Endpoints,
+    #[serde(default)]
+    selected_protocol: Option<Protocol>,
     #[serde(default)]
     api_key: Option<String>,
     #[serde(default)]
@@ -36,6 +39,7 @@ impl From<ProviderRequest> for Provider {
         Provider {
             enabled: val.enabled,
             base_url: val.base_url,
+            selected_protocol: val.selected_protocol,
             api_key: val.api_key.unwrap_or_default(),
             models: val.models,
         }
@@ -217,5 +221,23 @@ mod tests {
         let record: Provider = parse(r#"{"enabled":false}"#).unwrap().into();
 
         assert!(!record.enabled);
+    }
+
+    /// 选择缺省（或显式 `null`）即未选择；显式协议原样进入记录（ADR 0016）。
+    #[test]
+    fn selected_protocol_absent_is_none_and_explicit_is_mapped() {
+        assert_eq!(parse(r#"{}"#).unwrap().selected_protocol, None);
+        assert_eq!(
+            parse(r#"{"selected_protocol":null}"#)
+                .unwrap()
+                .selected_protocol,
+            None
+        );
+
+        let record: Provider = parse(r#"{"selected_protocol":"anthropic-messages"}"#)
+            .unwrap()
+            .into();
+
+        assert_eq!(record.selected_protocol, Some(Protocol::AnthropicMessages));
     }
 }

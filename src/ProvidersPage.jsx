@@ -19,9 +19,13 @@ import {
 } from "antd";
 import { FileTextOutlined } from "@ant-design/icons";
 import {
+  ANTHROPIC_MESSAGES,
+  OPENAI_COMPLETIONS,
+  PROVIDER_PROTOCOLS,
   createProvider,
   deleteProvider,
   listProviders,
+  normalizeEndpoints,
   setProviderEnabled,
   updateProvider,
 } from "./api/provider";
@@ -29,10 +33,6 @@ import { applyProviders, listPlugins } from "./api/plugins";
 import { listVariables } from "./api/variables";
 import VariablesCard from "./components/VariablesCard";
 import { openPath } from "@tauri-apps/plugin-opener";
-
-
-const OPENAI_COMPLTIONS = "openai-completions";
-const ANTHROPIC_MESSAGES = "anthropic-messages";
 
 /**
  * @param {Object} param0
@@ -120,9 +120,25 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
 
   return <>
     <Form layout="vertical" disabled>
-      <Form.Item label={provider.protocol}>
-        <Input disabled value={provider.base_url} />
-      </Form.Item>
+      {PROVIDER_PROTOCOLS.map((protocol) => (
+        <Form.Item
+          key={protocol}
+          label={
+            <Flex align="center" gap={8}>
+              <span>{protocol}</span>
+              {provider.selected_protocol === protocol && (
+                <Tag color="blue">投影使用</Tag>
+              )}
+            </Flex>
+          }
+        >
+          <Input
+            disabled
+            value={provider.base_url?.[protocol] ?? ""}
+            placeholder="未配置"
+          />
+        </Form.Item>
+      ))}
     </Form>
     <div className="provider-meta">
       <span>
@@ -174,7 +190,7 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
   const SLUG_PATTERN = /^[a-z][a-z0-9-_]*$/;
   const PROTOCOL_OPTIONS = [
     {
-      value: OPENAI_COMPLTIONS,
+      value: OPENAI_COMPLETIONS,
       label: "openai-completions（OpenAI 兼容 Chat Completions）",
     },
     {
@@ -183,7 +199,6 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
     },
   ];
   const BASE_URL_RULES = [
-    { required: true, message: "请输入 Base URL" },
     {
       validator: (_, value) => {
         if (!value) return Promise.resolve();
@@ -197,6 +212,33 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
           return Promise.reject(new Error("Base URL 仅支持 http(s) 地址"));
         }
         return Promise.resolve();
+      },
+    },
+  ];
+  // 两个协议至少填一个端点：两个 URL 字段各自的 BASE_URL_RULES 都放行空值，
+  // 这里在 openai 槽位上补一条整体校验（提交时全量 validateFields 会一并触发）。
+  const AT_LEAST_ONE_ENDPOINT_RULE = {
+    validator: () => {
+      const endpoints = form.getFieldValue("base_url") ?? {};
+      return PROVIDER_PROTOCOLS.some(
+        (protocol) => (endpoints[protocol] ?? "").trim() !== "",
+      )
+        ? Promise.resolve()
+        : Promise.reject(new Error("请至少填写一个协议的 Base URL"));
+    },
+  };
+  // 两个协议都配置时必须选定投影使用的端点；只配置一个时无需选择。
+  const SELECTED_PROTOCOL_RULES = [
+    {
+      validator: (_, value) => {
+        const filled = PROVIDER_PROTOCOLS.filter(
+          (protocol) =>
+            (form.getFieldValue(["base_url", protocol]) ?? "").trim() !== "",
+        );
+        if (filled.length < 2) return Promise.resolve();
+        return filled.includes(value)
+          ? Promise.resolve()
+          : Promise.reject(new Error("请选择投影使用的端点"));
       },
     },
   ];
@@ -220,6 +262,11 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
   ];
 
   const [form] = Form.useForm();
+  // 实时追踪两个端点槽位，用于禁用「未配置」协议的投影选项。
+  const watchedEndpoints = Form.useWatch("base_url", form) ?? {};
+  const filledProtocols = PROVIDER_PROTOCOLS.filter(
+    (protocol) => (watchedEndpoints[protocol] ?? "").trim() !== "",
+  );
   const [saving, setSaving] = useState(false);
 
   function handleSubmit() {
@@ -279,15 +326,34 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
     </Form.Item>
 
     <Form.Item
-      name="protocol"
-      label="协议"
-      rules={[{ required: true, message: "请选择协议" }]}
+      name={["base_url", OPENAI_COMPLETIONS]}
+      label={`Base URL（${OPENAI_COMPLETIONS}）`}
+      rules={[...BASE_URL_RULES, AT_LEAST_ONE_ENDPOINT_RULE]}
     >
-      <Radio.Group className="protocol-radios" options={PROTOCOL_OPTIONS} />
+      <Input placeholder="例如 http://localhost:11434/v1" />
     </Form.Item>
 
-    <Form.Item name="base_url" label="Base URL" rules={BASE_URL_RULES}>
-      <Input placeholder="例如 http://localhost:11434/v1" />
+    <Form.Item
+      name={["base_url", ANTHROPIC_MESSAGES]}
+      label={`Base URL（${ANTHROPIC_MESSAGES}）`}
+      rules={BASE_URL_RULES}
+    >
+      <Input placeholder="例如 https://api.anthropic.com" />
+    </Form.Item>
+
+    <Form.Item
+      name="selected_protocol"
+      label="投影使用"
+      rules={SELECTED_PROTOCOL_RULES}
+      extra="只配置一个协议时无需选择；两个都配置时必选，投影按所选协议写入。"
+    >
+      <Radio.Group
+        className="protocol-radios"
+        options={PROTOCOL_OPTIONS.map((option) => ({
+          ...option,
+          disabled: !filledProtocols.includes(option.value),
+        }))}
+      />
     </Form.Item>
 
     <Form.Item
@@ -519,7 +585,13 @@ export default function ProvidersPage() {
                 creating && (
                   <Card title="新建 Provider">
                     <ProviderForm
-                      provider={{ slug: "", protocol: null, base_url: "", models: [], enabled: true }}
+                      provider={{
+                        slug: "",
+                        base_url: normalizeEndpoints(),
+                        selected_protocol: null,
+                        models: [],
+                        enabled: true,
+                      }}
                       providers={providers}
                       onFinish={(refresh) => {
                         setCreating(false);
