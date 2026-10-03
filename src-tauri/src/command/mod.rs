@@ -1,10 +1,12 @@
 mod plugin;
 mod provider;
+mod variables;
 
 pub(crate) use plugin::{
     add_plugin, apply_providers, list_plugins, reload_plugin, remove_plugin, set_plugin_enabled,
 };
 pub(crate) use provider::{create_provider, delete_provider, list_providers, update_provider};
+pub(crate) use variables::{list_variables, set_variables};
 
 /// 命令层结果行（ADR 0008）：成功 INFO 携带识别参数（slug/source），失败 ERROR
 /// 携带原因。命令 payload（如携带明文 api_key 的 `ProviderRequest`）一律不进
