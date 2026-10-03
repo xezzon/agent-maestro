@@ -155,13 +155,12 @@ mod tests {
         providers.insert(
             "gateway".to_owned(),
             Provider {
-                enabled: true,
                 base_url: Endpoints {
                     openai_completions: Some("https://${HOST}/v1".to_owned()),
                     ..Endpoints::default()
                 },
                 api_key: "sk-canary-do-not-leak".to_owned(),
-                models: Vec::new(),
+                ..Default::default()
             },
         );
 

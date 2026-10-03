@@ -548,13 +548,11 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -579,13 +577,11 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -594,13 +590,12 @@ mod tests {
             .update_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
                     api_key: "sk-test".to_owned(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -626,13 +621,11 @@ mod tests {
             .update_provider(
                 "ghost",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:9".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap_err();
@@ -654,7 +647,6 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -664,6 +656,7 @@ mod tests {
                         id: "old-model".to_owned(),
                         display_name: Option::None,
                     }],
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -673,7 +666,6 @@ mod tests {
             .update_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
@@ -683,6 +675,7 @@ mod tests {
                         id: "new-model".to_owned(),
                         display_name: Option::None,
                     }],
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -771,13 +764,11 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -787,13 +778,11 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -818,13 +807,11 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -848,13 +835,11 @@ mod tests {
                 .create_provider(
                     slug,
                     Provider {
-                        enabled: true,
                         base_url: Endpoints {
                             openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                             anthropic_messages: Option::None,
                         },
-                        api_key: String::new(),
-                        models: Vec::new(),
+                        ..Provider::default()
                     },
                 )
                 .unwrap();
@@ -877,13 +862,11 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -891,15 +874,13 @@ mod tests {
             .create_provider(
                 "openrouter",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some(
                             "https://anthropic.example.com/v1".to_owned(),
                         ),
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -948,13 +929,11 @@ mod tests {
             .create_provider(
                 "ollama",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:11434/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -994,13 +973,11 @@ mod tests {
                 .create_provider(
                     "foo",
                     Provider {
-                        enabled: true,
                         base_url: Endpoints {
                             openai_completions: Option::Some("http://localhost:9".to_owned()),
                             anthropic_messages: Option::None,
                         },
-                        api_key: String::new(),
-                        models: Vec::new(),
+                        ..Provider::default()
                     }
                 )
                 .is_err()
@@ -1034,13 +1011,11 @@ mod tests {
                 .create_provider(
                     "foo",
                     Provider {
-                        enabled: true,
                         base_url: Endpoints {
                             openai_completions: Option::Some("http://localhost:9".to_owned()),
                             anthropic_messages: Option::None,
                         },
-                        api_key: String::new(),
-                        models: Vec::new(),
+                        ..Provider::default()
                     }
                 )
                 .is_err()
@@ -1061,13 +1036,11 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -1076,13 +1049,11 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://localhost:10".to_owned()),
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap_err();
@@ -1107,13 +1078,11 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::None,
                         anthropic_messages: Option::Some("http://127.0.0.1:8080".to_owned()),
                     },
-                    api_key: String::new(),
-                    models: Vec::new(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -1145,13 +1114,12 @@ mod tests {
             .create_provider(
                 "openrouter",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.example.com/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
                     models: models.clone(),
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -1178,13 +1146,12 @@ mod tests {
             .create_provider(
                 "openai",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("https://api.openai.com/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
                     models: vec![gpt_4o()],
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -1192,12 +1159,10 @@ mod tests {
             .create_provider(
                 "gateway",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://127.0.0.1:8080/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
                     models: vec![
                         gpt_4o(),
                         ModelEntry {
@@ -1205,6 +1170,7 @@ mod tests {
                             display_name: Option::None,
                         },
                     ],
+                    ..Provider::default()
                 },
             )
             .unwrap();
@@ -1235,12 +1201,10 @@ mod tests {
             .create_provider(
                 "foo",
                 Provider {
-                    enabled: true,
                     base_url: Endpoints {
                         openai_completions: Option::Some("http://localhost:9/v1".to_owned()),
                         anthropic_messages: Option::None,
                     },
-                    api_key: String::new(),
                     models: vec![
                         ModelEntry {
                             id: "gpt-4o".to_owned(),
@@ -1255,6 +1219,7 @@ mod tests {
                             display_name: Option::None,
                         },
                     ],
+                    ..Provider::default()
                 },
             )
             .unwrap();
