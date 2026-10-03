@@ -6,8 +6,6 @@ Maestro 插件接口合同 `maestro:plugin` 的类型化 Rust 绑定，同时是
 
 第三方插件以两种来源安装：**https 来源**（指向 manifest.json 的 https URL，面向正式发布）与**file 来源**（指向本机 manifest.json 绝对路径，面向本地调试）。两种来源在装载、校验与沙箱上完全同构。
 
-术语以 [`CONTEXT.md`](../../CONTEXT.md) 为准；架构取舍见 [ADR 0004](../../docs/adr/0004-wasm-component-plugins.md)（WASM 组件插件）、[ADR 0006](../../docs/adr/0006-plugin-sources-https-and-local-path.md)（来源与发布）、[ADR 0007](../../docs/adr/0007-plugin-sdk-distributed-via-git-tag.md)（SDK 分发）、[ADR 0013](../../docs/adr/0013-plugin-logger-import.md)（logger import）。
-
 ## 依赖方式
 
 本 crate 不发布到 crates.io。以 git 依赖引用本仓库中的 `crates/maestro-plugin-sdk`，并锁定 Maestro 的发布 tag——tag 与宿主版本一致，随 tag 固化插件与宿主的兼容组合：

@@ -76,6 +76,8 @@ pub(crate) enum StoreError {
         field: String,
         reason: String,
     },
+    /// 变量名不合法：占位符无法引用（变量名语法见 ADR 0014）。
+    InvalidVariableName { name: String },
 }
 
 impl From<&StoreError> for String {
@@ -109,6 +111,9 @@ impl From<&StoreError> for String {
                 field,
                 reason,
             } => format!("Provider「{slug}」的 {field} 插值失败：{reason}"),
+            StoreError::InvalidVariableName { name } => format!(
+                "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
+            ),
         }
     }
 }
@@ -232,9 +237,17 @@ impl Store {
     }
 
     /// 整包替换全局变量表（ADR 0015）：新增、修改与删除都走同一条全量保存路径。
-    /// 落盘前用新表对全部存量 Provider 插值一次：删除导致任一 Provider 的引用
-    /// 无法解析时整表拒绝（provider↔variables 一致性）。
+    /// 变量名须合法（`[A-Za-z0-9_]+`，ADR 0014），否则占位符无法引用；落盘前
+    /// 用新表对全部存量 Provider 插值一次：删除导致任一 Provider 的引用无法解析
+    /// 时整表拒绝（provider↔variables 一致性）。空默认值合法（`${EMPTY}`）。
     pub(crate) fn set_variables(&mut self, variables: Variables) -> Result<(), StoreError> {
+        for name in variables.keys() {
+            if !is_valid_variable_name(name) {
+                return Err(StoreError::InvalidVariableName {
+                    name: name.to_owned(),
+                });
+            }
+        }
         let config = self.state.as_ref().map_err(Clone::clone)?;
         for (slug, provider) in &config.providers {
             provider
@@ -375,6 +388,11 @@ impl Store {
             .map_err(|e| io_error(e.error))?;
         Ok(())
     }
+}
+
+/// 变量名合法性（ADR 0014）：`[A-Za-z0-9_]+`，与占位符语法一致。
+fn is_valid_variable_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Provider 插值失败 → 存储错误：与投影时（`interpolate_providers`）同因同报、
@@ -1629,5 +1647,49 @@ mod tests {
             original,
             "被拒的保存不落盘"
         );
+    }
+
+    /// 变量名合法性在后端同样强制（ADR 0014 的 `[A-Za-z0-9_]+`）：绕过前端
+    /// 直传命令的非法键名整表拒绝、不落盘。
+    #[test]
+    fn set_variables_rejects_invalid_variable_names() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+
+        for name in ["a-b", "", "带 空格"] {
+            let err = store
+                .set_variables(BTreeMap::from([(name.to_owned(), "x".to_owned())]))
+                .unwrap_err();
+
+            assert!(
+                matches!(err, StoreError::InvalidVariableName { .. }),
+                "name={name:?}"
+            );
+            assert!(
+                !MaestroPaths::get().config_path().exists(),
+                "报错路径不得落盘"
+            );
+        }
+    }
+
+    /// 空默认值是合法状态（`${EMPTY}` 解析为空串即按未配置端点处理，ADR 0015），
+    /// 后端不拒绝；非空的合法名照常保存。
+    #[test]
+    fn set_variables_accepts_an_empty_default_value() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+
+        store
+            .set_variables(BTreeMap::from([
+                ("EMPTY".to_owned(), String::new()),
+                ("HOST".to_owned(), "api.example.com".to_owned()),
+            ]))
+            .unwrap();
+
+        assert_eq!(store.get().unwrap().variables["EMPTY"], "");
+        let reopened = Store::new();
+        assert_eq!(reopened.get().unwrap().variables["EMPTY"], "");
     }
 }
