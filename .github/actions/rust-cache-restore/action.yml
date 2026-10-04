@@ -1,0 +1,67 @@
+name: Restore cargo caches
+description: 恢复 cargo home 与指定 profile 的 Cargo 构建产物缓存。
+
+# 缓存约定（写入侧见 .github/actions/rust-cache-save，另见 ADR 0009）：
+# - 每次运行恢复两条条目：cargo home（跨平台共享）与指定 profile 的构建产物（按平台、按 profile 分开）。
+# - cargo home 条目不带 os/arch 前缀：registry 里是 `.crate` 源码包，与 rustc 版本和平台都无关，
+#   各工作流、各平台都读它；跨 OS 恢复必须在缓存步骤上开 `enableCrossOsArchive`：
+#   该输入默认 false、只允许同 OS 恢复归档，不开则 Windows 永远读不到 Linux 写出的条目。
+# - 产物条目按 profile 分开（Check 用 `cargo-test-`，Release 用 `cargo-release-`）：两边的
+#   target 目录内容互不通用，而 actions/cache 在主键精确命中时会跳过保存 ——
+#   共用一个 key 会让先跑的一方把另一方的产物永久挡在缓存之外。
+# - 产物 key 里除 Cargo.lock 哈希还有 rust-toolchain.toml 哈希：只升工具链时换新 key，
+#   避免「恢复旧产物 → 全量重编 → 保存又被跳过」的死循环。
+# - restore-keys 收窄到本平台本 profile：Cargo.lock 变化后仍能部分复用旧产物。
+#
+# 这里只恢复、不写入：是否写入由调用方交给 cache-save 的 `write` 开关控制，以免并行的 PR
+# 运行把仓库 10 GiB 的缓存配额占满。
+
+inputs:
+  profile:
+    description: 产物缓存 profile。Check 传 cargo-test，Release 传 cargo-release。
+    required: true
+
+outputs:
+  home-hit:
+    description: cargo home 是否精确命中主键（'true' 或空）。透传给 cache-save 决定是否写入。
+    value: ${{ steps.cache-home.outputs.cache-hit }}
+  home-key:
+    description: cargo home 本次对应的主键。透传给 cache-save，保证恢复与保存用同一个 key。
+    value: ${{ steps.cache-home.outputs.cache-primary-key }}
+  artifact-hit:
+    description: 构建产物是否精确命中主键（'true' 或空）。透传给 cache-save 决定是否写入。
+    value: ${{ steps.cache-target.outputs.cache-hit }}
+  artifact-key:
+    description: 构建产物本次对应的主键。透传给 cache-save，保证恢复与保存用同一个 key。
+    value: ${{ steps.cache-target.outputs.cache-primary-key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Restore cargo home
+      id: cache-home
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+        key: cargo-home-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-home-
+        # home 条目按设计跨平台共享，而 actions/cache 默认只恢复同 OS 的归档。
+        enableCrossOsArchive: true
+
+    - name: Restore build artifacts
+      id: cache-target
+      uses: actions/cache/restore@v6
+      with:
+        # 刻意不含 crates/maestro-plugin-sdk/target/：SDK 的 Cargo.lock 未纳入版本控制
+        # （库 crate 不提交 lock），key 里只能放它的 Cargo.toml 哈希 —— 那是依赖范围而非
+        # 解析结果，传递依赖发一个 patch 版就让缓存内容追不上；而 key 不变时保存会被跳过，
+        # 缓存于是长期停留在过期状态。它的冷编代价约 1 分钟，不值得为此加机制。
+        path: |
+          src-tauri/target/
+          # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
+          plugins/pi/target/
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.profile }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
+        restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.profile }}-

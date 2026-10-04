@@ -42,9 +42,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # 删除缓存需要 actions: write。job 级 permissions 覆盖工作流级的 contents: read，
-    # 故须在这里把 contents 再列一遍。这一步授予会执行 PR 代码的 job 写权限，但驱逐步骤
-    # 只在 push 到 main 时执行、且凭据只通过该步骤的 env 注入：非 main 运行（含 PR）拿不到
-    # 这个 token，fork PR 更是会被 GitHub 强制降级为只读。
+    # 故须在这里把 contents 再列一遍。这一步授予会执行 PR 代码的 job 写权限，但 cache-save
+    # 里的驱逐步骤由 write 开关门控（本 job 只在 push 到 main 时传 true），凭据只在那个
+    # 步骤的 env 里注入：非 main 运行（含 PR）走不到它，fork PR 更是会被 GitHub 强制降级为只读。
     permissions:
       contents: read
       actions: write
@@ -73,51 +73,13 @@ jobs:
           rustc --version
           cargo --version
 
-      # 缓存约定（与 Release 工作流的同名字段互补，见 ADR 0009）：
-      # - 只有 push 到 main 才写缓存，非 main 分支（PR、workflow_dispatch）只读恢复。
-      #   cargo-test 产物约 2.3 GiB/份，若每次 PR 都写，并行的几个 PR 就能把仓库 10 GiB
-      #   的缓存配额占满，旧条目被 LRU 驱逐时连 Release 依赖的 cargo-release 缓存一起丢掉。
-      #   注意 `pull_request` 不受官方「低信任默认只读」的保护：文档明确 PR 运行仍会写
-      #   refs/pull/N/merge 作用域的缓存，因此必须在这里显式限制。
-      #   做法是把 actions/cache 拆成 restore + save 两步：save 用 `github.ref == 'refs/heads/main'`
-      #   门控；原生 actions/cache 的 post 保存无法条件化，改用 save action 后才会按分支开关。
-      # - cargo home 条目跨平台共享，不带 os/arch 前缀：registry 里是 `.crate` 源码包，
-      #   与 rustc 版本和平台都无关；本工作流在 push 到 main 时持续续它的 TTL（7 天不访问即驱逐），
-      #   各平台的 Release 都读它。跨 OS 恢复还须在缓存步骤上开 `enableCrossOsArchive`：
-      #   该输入默认 false、只允许同 OS 恢复归档，不开则 Windows 永远读不到 Linux 写出的条目。
-      # - 产物条目按 profile 分开（本工作流 `cargo-test-`，Release 用 `cargo-release-`）：
-      #   两边的 target 目录内容互不通用，而主键精确命中时会跳过保存 ——
-      #   共用一个 key 会让先跑的一方把另一方的产物永久挡在缓存之外。
-      # - 产物 key 里除 Cargo.lock 哈希还有 rust-toolchain.toml 哈希：只升工具链时换新 key，
-      #   避免「恢复旧产物 → 全量重编 → 保存又被跳过」的死循环。
-      # - restore-keys 收窄到本平台本 profile：Cargo.lock 变化后仍能部分复用旧产物。
-      - name: Restore cargo home
-        id: cache-home
-        uses: actions/cache/restore@v6
+      # 缓存约定与实现见 .github/actions/rust-cache-restore（恢复）与 rust-cache-save（保存 + 驱逐）；
+      # 本 job 只负责传 profile 与「main 才写」的开关。
+      - name: Restore caches
+        id: cache
+        uses: ./.github/actions/rust-cache-restore
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: cargo-home-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-home-
-          # home 条目按设计跨平台共享，而 actions/cache 默认只恢复同 OS 的归档。
-          enableCrossOsArchive: true
-
-      - name: Restore build artifacts
-        id: cache-target
-        uses: actions/cache/restore@v6
-        with:
-          # 刻意不含 crates/maestro-plugin-sdk/target/：SDK 的 Cargo.lock 未纳入版本控制
-          # （库 crate 不提交 lock），key 里只能放它的 Cargo.toml 哈希 —— 那是依赖范围而非
-          # 解析结果，传递依赖发一个 patch 版就让缓存内容追不上；而 key 不变时保存会被跳过，
-          # 缓存于是长期停留在过期状态。它的冷编代价约 1 分钟，不值得为此加机制。
-          path: |
-            src-tauri/target/
-            # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
-            plugins/pi/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-test-
+          profile: cargo-test
 
       - name: Format
         run: cargo fmt --check
@@ -138,49 +100,15 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
         working-directory: crates/maestro-plugin-sdk
 
-      # 保存新条目之前先把旧的 cargo-test 条目驱逐掉：本 profile 的缓存全库只保留一份，
-      # 即本次运行即将写出的这一份。单条约 2.3 GiB，留两份以上就会顶满仓库 10 GiB 的配额，
-      # 触发 LRU 驱逐时连 Release 依赖的 cargo-release 缓存也会被清掉。
-      # 查询刻意不带 ref（API 缺省返回所有 ref），这样早期留在 refs/pull/*/merge 上的同名
-      # 条目也会一并清掉；key 过滤是前缀匹配，正好覆盖 `cargo-test-` 后接任意哈希的组合。
-      # 条件与 Save build artifacts 一致：只在真的要写新条目时执行；本次精确命中主键时不保存，
-      # 也就不动现有那一份。若驱逐成功而紧随其后的保存失败，会短暂失去缓存（下一次 main 运行重建）。
-      - name: Evict old cargo-test caches
-        if: github.ref == 'refs/heads/main' && steps.cache-target.outputs.cache-hit != 'true'
-        env:
-          # 只注入到这一步；删除缓存需要 actions: write（见 job 上的 permissions）。
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # 先把 id 全部列完再删：边翻页边删会让后续页的偏移错位、漏掉条目。
-          ids=$(gh api --paginate \
-            "repos/${{ github.repository }}/actions/caches?key=${{ runner.os }}-${{ runner.arch }}-cargo-test-&per_page=100" \
-            --jq '.actions_caches[].id')
-          for id in ${ids}; do
-            echo "deleting cargo-test cache ${id}"
-            gh api -X DELETE "repos/${{ github.repository }}/actions/caches/${id}"
-          done
-
-      # 构建全部结束后再保存：只在 push 到 main、且本次未精确命中主键时写入，
-      # 与原生 actions/cache 的保存语义一致（命中即跳过，避免存档内容不变却重复上传），
-      # 区别只在于这个条件现在是可表达的 —— post 阶段的自动保存没有挂钩。
-      - name: Save cargo home
-        if: github.ref == 'refs/heads/main' && steps.cache-home.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+      # 构建全部结束后再保存：写入门控、命中跳过与旧条目驱逐都在 rust-cache-save 里，
+      # 这里只把 profile、开关与 rust-cache-restore 透出的结果传进去。
+      - name: Save caches
+        uses: ./.github/actions/rust-cache-save
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ steps.cache-home.outputs.cache-primary-key }}
-          # 与 Restore cargo home 同步：save 侧同样默认只接受同 OS 的恢复，须显式打开。
-          enableCrossOsArchive: true
-
-      - name: Save build artifacts
-        if: github.ref == 'refs/heads/main' && steps.cache-target.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          # 与 Restore build artifacts 保持同一组路径（同样不含 crates/maestro-plugin-sdk/target/）。
-          path: |
-            src-tauri/target/
-            plugins/pi/target/
-          key: ${{ steps.cache-target.outputs.cache-primary-key }}
+          profile: cargo-test
+          write: ${{ github.ref == 'refs/heads/main' }}
+          evict: 'true'
+          home-hit: ${{ steps.cache.outputs.home-hit }}
+          home-key: ${{ steps.cache.outputs.home-key }}
+          artifact-hit: ${{ steps.cache.outputs.artifact-hit }}
+          artifact-key: ${{ steps.cache.outputs.artifact-key }}
