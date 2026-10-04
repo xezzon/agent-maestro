@@ -1,0 +1,11 @@
+# 0018: 插件配置存放于落位目录，经 get-config import 交付，落位替换改为逐文件
+
+同一份全局配置投影到多个工具，但各工具需要微调（例如同一网关下指向不同的 `GATEWAY_ID`），并各自携带工具专有的配置项（例如 Claude Code 要选定单一 model）。这些差异过去只能改全局配置，一处改动波及其它工具。我们决定给每个插件一份**插件配置**：`~/.maestro/plugins/<id>/config.json`，结构 `{ "variables": {…}, "form": {…} }`——`variables` 是宿主消费的**变量覆盖**（见 ADR 0015），`form` 是由 manifest 的 `settings_schema`（见 ADR 0017）描述的**插件私有数据**。读取方唯一地定为**宿主**：覆盖轴是宿主在投影前做变换的依据，宿主不读就无法投影；因此不采用「插件在沙箱里自读」。
+
+交付形态：`maestro:plugin` 升 **1.2.0**，`plugin-world` 新增宿主 import `get-config: func() -> option<string>`，返回 `form` 段的原始 JSON 文本（无该段则 `none`）；`write-providers` 签名不动。选择 import 而非给 `write-providers` 加参数，是为与 ADR 0013 的 `logger` 同构（宿主侧能力一律走 import），且导出签名保持稳定。ADR 0013 已收回「宿主同时注册新旧版本」的承诺——包版本升级即以新 SDK 重编译、宿主只注册当前版本——本能力照此办理，内置 pi 与第三方插件均需重编译。宿主侧接线：`build_linker`（`src-tauri/src/plugin/execution/mod.rs`）里的 `PluginWorld::add_to_linker` 覆盖世界中的全部 import，新增 import 的实现落在 `execution/` 下一个模块（对照 `logger.rs`），`HostState` 增加一个承载 `form` 的字段。组件 init 早于 `write-providers`、且 init 也能调 import，故 `form` 必须在实例化之前就位。
+
+**落位替换改为逐文件**：`~/.maestro/plugins/<id>/` 原是纯宿主产物目录（`manifest.json` + `plugin.wasm`，由 `save`/`swap_placed` 整目录替换、`remove_placed_dir` 整目录删除）。插件配置进驻后它与用户数据混居，整目录替换会冲掉用户配置。我们把替换从「staging 整目录换 + 失败回滚」改为**逐文件覆盖**：`save` 往已存在的插件目录里先写 `manifest.json`、后写 `plugin.wasm`（tmp + rename），`config.json` 完全不碰；首次安装则建目录后写这两件。「移除」仍整目录删除，连带删掉插件配置——这是有意接受的行为（重新添加即从干净状态开始）。代价是**取消「重新加载失败时旧版本保持可用」**这一既有保证：换 `plugin.wasm` 失败会停在「新 manifest + 旧 wasm」的混合态，恢复手段是从来源重新加载。该保证靠 `swap_placed` 的备份/回滚实现，现被移除；相关测试（`reload_failure_keeps_the_old_placed_version_usable`、`swap_placed_restores_the_backup_when_replacement_fails`）与 SDK README 的承诺文字随之改写。
+
+后果：插件配置是**又一处明文落点**（`variables` 覆盖里常有 API Key），与 ADR 0002 推迟密钥链的取舍一致，未新增决策；契约升 1.2.0，插件重编译；SDK README 需补 `get-config` 一节并修订落位与重载的文字。
+
+曾考虑并否决的形态：**插件在沙箱里自读**——`~/.maestro/plugins/<id>/` 不在组件可见路径内，而 `/` 已被 `config_dir` 占用，要另开一条只读挂载与并行路径约定；覆盖轴又决定了宿主无论如何都得读这个文件，双读双解析不划算。**给 `write-providers` 加参数**——把投影输入当参数更「纯」，但改动导出签名，且与 `logger` 的 import 惯例不一致；两者都升包版本，兼容性上并无差别。**放进 `config.json`**（ADR 0001 的单文档原则）——会让主 store 混入不透明的插件私有 JSON。**独立的 `plugin-config/<id>.json`**——绕开了落位替换问题，却多一套文件与错误路径，且与「随插件存在」的语义脱节。**P1：整目录替换前把 `config.json` 复制进 staging**——能保住失败回滚，但让 `save` 从此知道「目录里有用户数据」，整目录替换语义继续背着用户数据；相较之下逐文件替换更简单直接。
