@@ -137,6 +137,13 @@ jobs:
           ref: ${{ needs.bump.outputs.sha }}
           persist-credentials: false
 
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # xdg-utils（xdg-open）是 AppImage 打包的必需项；ARM 镜像可能未预装。
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
+
       - uses: pnpm/action-setup@v6
         with:
           version: 12
@@ -145,18 +152,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: lts/*
-
-      # universal 目标要求两个 arch 的 std：宿主（arm64）自带 aarch64-apple-darwin，仅需补 Intel。
-      - name: Install Rust target (macOS universal)
-        if: runner.os == 'macOS'
-        run: rustup target add x86_64-apple-darwin
-
-      - name: Install Tauri Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          # xdg-utils（xdg-open）是 AppImage 打包的必需项；ARM 镜像可能未预装。
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
 
       # 缓存约定与实现见 .github/actions/rust-cache-restore（恢复）与 rust-cache-save（保存 + 驱逐）；
       # 与 Check 同一套，本 job 只负责传 profile 与写入开关。要点：
@@ -180,6 +175,11 @@ jobs:
         uses: ./.github/actions/rust-cache-restore
         with:
           profile: cargo-release
+
+      # universal 目标要求两个 arch 的 std：宿主（arm64）自带 aarch64-apple-darwin，仅需补 Intel。
+      - name: Install Rust target (macOS universal)
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
