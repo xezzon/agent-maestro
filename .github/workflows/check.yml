@@ -67,18 +67,26 @@ jobs:
           cargo --version
 
       # 缓存约定（与 Release 工作流的同名字段互补，见 ADR 0009）：
+      # - 只有 push 到 main 才写缓存，非 main 分支（PR、workflow_dispatch）只读恢复。
+      #   cargo-test 产物约 2.3 GiB/份，若每次 PR 都写，并行的几个 PR 就能把仓库 10 GiB
+      #   的缓存配额占满，旧条目被 LRU 驱逐时连 Release 依赖的 cargo-release 缓存一起丢掉。
+      #   注意 `pull_request` 不受官方「低信任默认只读」的保护：文档明确 PR 运行仍会写
+      #   refs/pull/N/merge 作用域的缓存，因此必须在这里显式限制。
+      #   做法是把 actions/cache 拆成 restore + save 两步：save 用 `github.ref == 'refs/heads/main'`
+      #   门控；原生 actions/cache 的 post 保存无法条件化，改用 save action 后才会按分支开关。
       # - cargo home 条目跨平台共享，不带 os/arch 前缀：registry 里是 `.crate` 源码包，
       #   与 rustc 版本和平台都无关；本工作流在 push 到 main 时持续续它的 TTL（7 天不访问即驱逐），
       #   各平台的 Release 都读它。跨 OS 恢复还须在缓存步骤上开 `enableCrossOsArchive`：
       #   该输入默认 false、只允许同 OS 恢复归档，不开则 Windows 永远读不到 Linux 写出的条目。
       # - 产物条目按 profile 分开（本工作流 `cargo-test-`，Release 用 `cargo-release-`）：
-      #   两边的 target 目录内容互不通用，而 actions/cache 在主键精确命中时会跳过保存 ——
+      #   两边的 target 目录内容互不通用，而主键精确命中时会跳过保存 ——
       #   共用一个 key 会让先跑的一方把另一方的产物永久挡在缓存之外。
       # - 产物 key 里除 Cargo.lock 哈希还有 rust-toolchain.toml 哈希：只升工具链时换新 key，
       #   避免「恢复旧产物 → 全量重编 → 保存又被跳过」的死循环。
       # - restore-keys 收窄到本平台本 profile：Cargo.lock 变化后仍能部分复用旧产物。
-      - name: Cache cargo home
-        uses: actions/cache@v6
+      - name: Restore cargo home
+        id: cache-home
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -89,8 +97,9 @@ jobs:
           # home 条目按设计跨平台共享，而 actions/cache 默认只恢复同 OS 的归档。
           enableCrossOsArchive: true
 
-      - name: Cache build artifacts
-        uses: actions/cache@v6
+      - name: Restore build artifacts
+        id: cache-target
+        uses: actions/cache/restore@v6
         with:
           # 刻意不含 crates/maestro-plugin-sdk/target/：SDK 的 Cargo.lock 未纳入版本控制
           # （库 crate 不提交 lock），key 里只能放它的 Cargo.toml 哈希 —— 那是依赖范围而非
@@ -121,3 +130,28 @@ jobs:
       - name: Clippy (maestro-plugin-sdk)
         run: cargo clippy --all-targets -- -D warnings
         working-directory: crates/maestro-plugin-sdk
+
+      # 构建全部结束后再保存：只在 push 到 main、且本次未精确命中主键时写入，
+      # 与原生 actions/cache 的保存语义一致（命中即跳过，避免存档内容不变却重复上传），
+      # 区别只在于这个条件现在是可表达的 —— post 阶段的自动保存没有挂钩。
+      - name: Save cargo home
+        if: github.ref == 'refs/heads/main' && steps.cache-home.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cache-home.outputs.cache-primary-key }}
+          # 与 Restore cargo home 同步：save 侧同样默认只接受同 OS 的恢复，须显式打开。
+          enableCrossOsArchive: true
+
+      - name: Save build artifacts
+        if: github.ref == 'refs/heads/main' && steps.cache-target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          # 与 Restore build artifacts 保持同一组路径（同样不含 crates/maestro-plugin-sdk/target/）。
+          path: |
+            src-tauri/target/
+            plugins/pi/target/
+          key: ${{ steps.cache-target.outputs.cache-primary-key }}
