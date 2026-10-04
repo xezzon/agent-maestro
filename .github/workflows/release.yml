@@ -108,6 +108,12 @@ jobs:
     # 该环境必须先配好再合并本改动：工作流引用不存在的环境时 GitHub 会自动创建它，
     # 那是一个没有任何规则的裸环境，守卫会静默失效。
     environment: release
+    # 删除缓存需要 actions: write；tauri-action 建 tag、发 Release 需要 contents: write。
+    # job 级 permissions 会覆盖工作流级，故须把 contents 再列一遍。本 job 只在 main 上运行
+    # （环境守卫），驱逐步骤另由 cache-save 的 write/evict 开关门控，凭据只注入那一步的 env。
+    permissions:
+      contents: write
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -131,6 +137,13 @@ jobs:
           ref: ${{ needs.bump.outputs.sha }}
           persist-credentials: false
 
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # xdg-utils（xdg-open）是 AppImage 打包的必需项；ARM 镜像可能未预装。
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
+
       - uses: pnpm/action-setup@v6
         with:
           version: 12
@@ -140,23 +153,11 @@ jobs:
         with:
           node-version: lts/*
 
-      # universal 目标要求两个 arch 的 std：宿主（arm64）自带 aarch64-apple-darwin，仅需补 Intel。
-      - name: Install Rust target (macOS universal)
-        if: runner.os == 'macOS'
-        run: rustup target add x86_64-apple-darwin
-
-      - name: Install Tauri Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          # xdg-utils（xdg-open）是 AppImage 打包的必需项；ARM 镜像可能未预装。
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
-
-      # 缓存约定（与 Check 工作流的同名字段互补，见 ADR 0009）：
+      # 缓存约定与实现见 .github/actions/rust-cache-restore（恢复）与 rust-cache-save（保存 + 驱逐）；
+      # 与 Check 同一套，本 job 只负责传 profile 与写入开关。要点：
       # - cargo home 条目跨平台共享，不带 os/arch 前缀：registry 里是 `.crate` 源码包，
       #   与 rustc 版本和平台都无关；Check 在 main 上的推送持续续它的 TTL（7 天不访问即驱逐），
-      #   各平台的 Release 都读它。跨 OS 恢复还须在缓存步骤上开 `enableCrossOsArchive`：
-      #   该输入默认 false、只允许同 OS 恢复归档，不开则 Windows 永远读不到 Linux 写出的条目。
+      #   各平台的 Release 都读它。
       # - 产物条目按 profile 分开（本工作流 `cargo-release-`，Check 用 `cargo-test-`）：
       #   两边的 target 目录内容互不通用，而 actions/cache 在主键精确命中时会跳过保存 ——
       #   共用一个 key 会让先跑的一方把另一方的产物永久挡在缓存之外。
@@ -165,27 +166,20 @@ jobs:
       # - restore-keys 收窄到本平台本 profile：Cargo.lock 变化后仍能部分复用旧产物。
       # - key 里的 Cargo.lock 哈希不随发版变动：应用版本号不在 lock 里（ADR 0012），
       #   否则每次 bump 都会换一个主键，上面「两次发布之间复用」的意图就落空了。
-      - name: Cache cargo home
-        uses: actions/cache@v6
+      # - 写入门控与 Check 相同（仅 push 到 main）；本工作流受 `release` 环境守卫，实际只在
+      #   main 上运行。保存前按 `<os>-<arch>-cargo-release-` 前缀驱逐本平台的旧条目，
+      #   每个平台只留本次这一份，免得旧 lock 的条目把仓库 10 GiB 配额顶满、LRU 连别的
+      #   profile 一起清掉（配额溢出的来龙去脉见 ADR 0009）。
+      - name: Restore caches
+        id: cache
+        uses: ./.github/actions/rust-cache-restore
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: cargo-home-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-home-
-          # home 条目按设计跨平台共享，而 actions/cache 默认只恢复同 OS 的归档。
-          enableCrossOsArchive: true
+          profile: cargo-release
 
-      - name: Cache release artifacts
-        uses: actions/cache@v6
-        with:
-          path: |
-            src-tauri/target/
-            # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
-            plugins/pi/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-release-
+      # universal 目标要求两个 arch 的 std：宿主（arm64）自带 aarch64-apple-darwin，仅需补 Intel。
+      - name: Install Rust target (macOS universal)
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -216,3 +210,16 @@ jobs:
           # Windows 更新包优先 NSIS 安装器（默认选 MSI 只是历史兼容行为）。
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+      # 构建结束后再保存：写入门控、命中跳过与旧条目驱逐都在 rust-cache-save 里，
+      # 这里只把 profile、开关与 rust-cache-restore 透出的结果传进去。
+      - name: Save caches
+        uses: ./.github/actions/rust-cache-save
+        with:
+          profile: cargo-release
+          write: ${{ github.ref == 'refs/heads/main' }}
+          evict: 'true'
+          home-hit: ${{ steps.cache.outputs.home-hit }}
+          home-key: ${{ steps.cache.outputs.home-key }}
+          artifact-hit: ${{ steps.cache.outputs.artifact-hit }}
+          artifact-key: ${{ steps.cache.outputs.artifact-key }}
