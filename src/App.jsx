@@ -12,7 +12,7 @@ const { Sider, Content } = Layout;
 const NAV_MAIN_ITEMS = [{ key: "providers", label: "Provider" }];
 const NAV_BOTTOM_ITEMS = [{ key: "plugins", label: "Plugins" }];
 
-// 插件配置页的导航 key 前缀，key 为 `plugin:<source>`（source 是 URL 或路径）。
+// 插件配置页的导航 key 前缀，key 为 `plugin:<id>`（id 是插件唯一标识）。
 const PLUGIN_KEY_PREFIX = "plugin:";
 
 function App() {
@@ -35,8 +35,8 @@ function App() {
   const pluginNavItems = plugins
     .filter((plugin) => plugin.enabled && !plugin.error)
     .map((plugin) => ({
-      key: `${PLUGIN_KEY_PREFIX}${plugin.source}`,
-      label: plugin.id || plugin.source,
+      key: `${PLUGIN_KEY_PREFIX}${plugin.id}`,
+      label: plugin.id,
     }));
   const mainItems =
     pluginNavItems.length > 0
@@ -48,7 +48,7 @@ function App() {
     : null;
   const currentPlugin =
     pluginSource !== null
-      ? plugins.find((plugin) => plugin.source === pluginSource)
+      ? plugins.find((plugin) => plugin.id === pluginSource)
       : null;
 
   return (
@@ -74,7 +74,12 @@ function App() {
         <Content className="app-content">
           {current === "providers" && <ProvidersPage />}
           {current === "plugins" && <PluginsPage />}
-          {currentPlugin && <PluginConfigPage plugin={currentPlugin} />}
+          {currentPlugin && (
+            <PluginConfigPage
+              key={currentPlugin.source}
+              plugin={currentPlugin}
+            />
+          )}
         </Content>
       </Layout>
     </Layout>

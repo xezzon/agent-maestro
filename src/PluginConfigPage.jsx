@@ -36,12 +36,12 @@ export default function PluginConfigPage({ plugin }) {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [config, variables] = await Promise.all([
+      const [nextConfig, nextVariables] = await Promise.all([
         getPluginConfig(plugin.source),
         listVariables(),
       ]);
-      setConfig(config);
-      setVariables(variables);
+      setConfig(nextConfig);
+      setVariables(nextVariables);
       setLoadError(null);
     } catch (err) {
       setLoadError(String(err));
