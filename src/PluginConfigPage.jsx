@@ -57,11 +57,7 @@ export default function PluginConfigPage({ plugin }) {
   if (loadError) {
     return (
       <div className="page">
-        <div className="page-header">
-          <Typography.Title level={4} style={{ margin: 0 }}>
-            {plugin.id || plugin.source}
-          </Typography.Title>
-        </div>
+        <PageHeader plugin={plugin} />
         <Alert
           type="error"
           showIcon
@@ -74,11 +70,7 @@ export default function PluginConfigPage({ plugin }) {
 
   return (
     <div className="page">
-      <div className="page-header">
-        <Typography.Title level={4} style={{ margin: 0 }}>
-          {plugin.id || plugin.source}
-        </Typography.Title>
-      </div>
+      <PageHeader plugin={plugin} />
       {loading && config === null ? (
         <div className="page-loading">
           <Spin />
@@ -117,6 +109,44 @@ export default function PluginConfigPage({ plugin }) {
       )}
     </div>
   );
+}
+
+/**
+ * 页头：插件标识（加载失败与正常两个分支共用）。
+ * @param {Object} param0
+ * @param {import("./api/plugins").PluginView} param0.plugin
+ */
+function PageHeader({ plugin }) {
+  return (
+    <div className="page-header">
+      <Typography.Title level={4} style={{ margin: 0 }}>
+        {plugin.id || plugin.source}
+      </Typography.Title>
+    </div>
+  );
+}
+
+/**
+ * 插件配置保存的共享样板：saving 状态 + 整包写回 + 失败 message.error。
+ * 返回 [saving, save]；save(config, patch, onSaved) 把 patch 并入 config
+ * 整包写回该插件的配置（ADR 0018），成功后调用 onSaved（由调用方决定是否刷新）。
+ * @param {string} source 插件来源（条目身份，同 PluginEntry::source）
+ * @returns {[boolean, (config: import("./api/plugins").PluginConfig, patch: Object, onSaved: () => void) => Promise<void>]}
+ */
+function usePluginConfigSave(source) {
+  const [saving, setSaving] = useState(false);
+  async function save(config, patch, onSaved) {
+    setSaving(true);
+    try {
+      await setPluginConfig(source, { ...config, ...patch });
+      onSaved();
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return [saving, save];
 }
 
 /**
@@ -184,6 +214,9 @@ function PluginVariablesCard({ plugin, config, variables, onReload }) {
  * @param {(refresh: boolean) => void} param0.onFinish
  */
 function PluginVariablesForm({ plugin, config, variables, onFinish }) {
+  const [form] = Form.useForm();
+  const [saving, saveConfig] = usePluginConfigSave(plugin.source);
+
   const NAME_RULES = [
     { required: true, message: "请输入变量名" },
     {
@@ -208,25 +241,17 @@ function PluginVariablesForm({ plugin, config, variables, onFinish }) {
     { whitespace: true, message: "覆盖值不能为空白" },
   ];
 
-  const [form] = Form.useForm();
-  const [saving, setSaving] = useState(false);
-
   // 命令成功即已落盘，由父组件刷新配置。
   async function handleSubmit(values) {
-    setSaving(true);
-    try {
-      await setPluginConfig(plugin.source, {
-        ...config,
+    await saveConfig(
+      config,
+      {
         variables: Object.fromEntries(
           values.variables.map((variable) => [variable.name, variable.value]),
         ),
-      });
-      onFinish(true);
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setSaving(false);
-    }
+      },
+      () => onFinish(true),
+    );
   }
 
   return (
@@ -306,21 +331,10 @@ function PluginVariablesForm({ plugin, config, variables, onFinish }) {
  * @param {() => void} param0.onReload
  */
 function PluginSettingsForm({ plugin, config, onReload }) {
-  const [saving, setSaving] = useState(false);
+  const [saving, saveConfig] = usePluginConfigSave(plugin.source);
 
   async function handleSubmit({ formData }) {
-    setSaving(true);
-    try {
-      await setPluginConfig(plugin.source, {
-        ...config,
-        form: formData ?? null,
-      });
-      onReload();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setSaving(false);
-    }
+    await saveConfig(config, { form: formData ?? null }, onReload);
   }
 
   return (

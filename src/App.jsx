@@ -23,7 +23,11 @@ function App() {
   // 都取最新列表（list_plugins 是本地命令，代价可忽略）；取不到时保留旧列表，
   // 避免正在展示的插件配置页被清空。
   useEffect(() => {
-    listPlugins().then(setPlugins).catch(() => {});
+    listPlugins()
+      .then(setPlugins)
+      .catch((err) => {
+        console.warn("failed to refresh plugins for navigation", err);
+      });
   }, [current]);
 
   // 分隔线之后每个已启用且加载成功的插件各占一个菜单项，直达其插件配置页；
