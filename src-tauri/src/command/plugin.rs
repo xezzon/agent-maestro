@@ -5,7 +5,7 @@ use tauri::{AppHandle, Manager, State};
 use super::log_outcome;
 use crate::{
     AppStore,
-    plugin::{PluginApplyReport, PluginService, PluginView},
+    plugin::{PluginApplyReport, PluginConfig, PluginService, PluginView},
     provider::Provider,
 };
 
@@ -82,6 +82,40 @@ pub(crate) fn remove_plugin(
 ) -> Result<(), String> {
     let outcome = service.remove_plugin(&store, &source);
     log_outcome("remove_plugin", &format!("source={source}"), &outcome);
+    outcome
+}
+
+/// 读取插件配置（ADR 0018）：该插件对全局变量的覆盖与私有表单数据。
+/// 配置不存在返回空配置（新装插件开箱即用），损坏则报错。
+#[tauri::command]
+pub(crate) fn get_plugin_config(
+    store: State<'_, AppStore>,
+    service: State<'_, PluginService>,
+    source: String,
+) -> Result<PluginConfig, String> {
+    let outcome = service.get_config(&store, &source);
+    log_outcome("get_plugin_config", &format!("source={source}"), &outcome);
+    outcome
+}
+
+/// 写入插件配置（整包替换，ADR 0018）：与安装/重载/移除共用安装锁互斥，
+/// 写路径可能在临界区等待含网络下载的安装类命令，故走阻塞线程池执行。
+/// 识别参数（source）进日志；变量值与表单内容不进日志（ADR 0008）。
+#[tauri::command]
+pub(crate) async fn set_plugin_config(
+    app: AppHandle,
+    source: String,
+    config: PluginConfig,
+) -> Result<(), String> {
+    // 安装类命令另加进入行：「有进入、无结果」正是定位卡住的证据（如 #46）。
+    log::info!("set_plugin_config start: source={source}");
+    // 识别参数在闭包 move 前格式化；payload 本身不进日志。
+    let context = format!("source={source}");
+    let outcome = on_install_pool(app, move |store, service| {
+        service.set_config(store, &source, &config)
+    })
+    .await;
+    log_outcome("set_plugin_config", &context, &outcome);
     outcome
 }
 

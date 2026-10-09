@@ -7,9 +7,9 @@ mod provider;
 mod store;
 
 use command::{
-    add_plugin, apply_providers, create_provider, delete_provider, list_plugins, list_providers,
-    list_variables, reload_plugin, remove_plugin, set_plugin_enabled, set_provider_enabled,
-    set_variables, update_provider,
+    add_plugin, apply_providers, create_provider, delete_provider, get_plugin_config, list_plugins,
+    list_providers, list_variables, reload_plugin, remove_plugin, set_plugin_config,
+    set_plugin_enabled, set_provider_enabled, set_variables, update_provider,
 };
 use plugin::PluginService;
 use std::sync::RwLock;
@@ -131,6 +131,8 @@ pub fn run() {
             add_plugin,
             reload_plugin,
             remove_plugin,
+            get_plugin_config,
+            set_plugin_config,
             apply_providers
         ])
         .run(tauri::generate_context!())
