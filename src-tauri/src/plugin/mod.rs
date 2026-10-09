@@ -88,15 +88,14 @@ impl PlacedPlugin {
         fs::create_dir_all(&self.plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
         // 先 manifest、后 wasm：写 wasm 失败会停在「新 manifest + 旧 wasm」的
         // 混合态，恢复手段是从来源重新加载（备份回滚的既有保证已取消，见 ADR 0018）。
-        self.write_placed_file(PLACED_MANIFEST, self.raw_manifest.as_bytes())?;
-        self.write_placed_file(PLACED_WASM, &self.wasm)?;
+        write_placed_file(
+            &self.plugin_dir,
+            PLACED_MANIFEST,
+            self.raw_manifest.as_bytes(),
+        )?;
+        write_placed_file(&self.plugin_dir, PLACED_WASM, &self.wasm)?;
         log::debug!("placed plugin: {}", self.plugin_dir.display());
         Ok(())
-    }
-
-    /// 逐文件覆盖一个落位产物：同目录临时文件 + 原子改名（tmp + rename）。
-    fn write_placed_file(&self, name: &str, contents: &[u8]) -> Result<(), String> {
-        write_placed_file(&self.plugin_dir, name, contents)
     }
 
     fn uninstall(&self) -> Result<(), String> {
@@ -795,7 +794,8 @@ fn read_plugin_config(plugin_dir: &Path) -> Result<PluginConfig, String> {
     })
 }
 
-/// 把插件返回的相对路径拼成宿主绝对路径；越界路径一律报错（fail-loud）：/// 绝对路径与 `..` 都指向预开放目录之外，不得被回报成一次成功投影。
+/// 把插件返回的相对路径拼成宿主绝对路径；越界路径一律报错（fail-loud）：
+/// 绝对路径与 `..` 都指向预开放目录之外，不得被回报成一次成功投影。
 fn project_files(config_dir: &Path, files: Vec<String>) -> Result<Vec<String>, String> {
     files
         .into_iter()
