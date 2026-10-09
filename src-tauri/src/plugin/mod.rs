@@ -169,6 +169,9 @@ pub(crate) struct PluginView {
     id: String,
     /// manifest 声明并解析出的配置目录（宿主绝对路径）。
     config_dir: Option<String>,
+    /// manifest 内联的 settings_schema（ADR 0017），透传给前端渲染表单；
+    /// 缺省即该插件无需用户填写。
+    settings_schema: Option<serde_json::Value>,
     error: Option<String>,
 }
 
@@ -330,6 +333,7 @@ impl PluginService {
                     enabled: entry.enabled,
                     id: entry.id.clone(),
                     config_dir: manifest.map(|m| m.config_dir.display().to_string()),
+                    settings_schema: manifest.and_then(|m| m.settings_schema.clone()),
                     error,
                 }
             };
