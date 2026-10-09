@@ -36,6 +36,9 @@ const PLACED_MANIFEST: &str = "manifest.json";
 /// 落位目录中的 wasm 文件名；上游资源内容固定落到该名。装载时 `entry` 仍会被
 /// 反序列化，但其指向的路径不再被解析——落位产物只认这个固定文件名。
 const PLACED_WASM: &str = "plugin.wasm";
+/// 落位目录中的插件配置文件名（ADR 0018）：与两个宿主产物混居，逐文件覆盖的
+/// 落位替换与重载完全不碰它。
+const PLACED_CONFIG: &str = "config.json";
 
 struct PlacedPlugin {
     plugin_dir: PathBuf,
@@ -93,13 +96,7 @@ impl PlacedPlugin {
 
     /// 逐文件覆盖一个落位产物：同目录临时文件 + 原子改名（tmp + rename）。
     fn write_placed_file(&self, name: &str, contents: &[u8]) -> Result<(), String> {
-        let tmp = tempfile::Builder::new()
-            .prefix(&format!(".{name}.tmp-"))
-            .tempfile_in(&self.plugin_dir)
-            .map_err(|e| format!("创建落位临时文件失败：{e}"))?;
-        fs::write(tmp.path(), contents).map_err(|e| format!("写入 {name} 失败：{e}"))?;
-        fs::rename(tmp.path(), self.plugin_dir.join(name))
-            .map_err(|e| format!("覆盖 {name} 失败：{e}"))
+        write_placed_file(&self.plugin_dir, name, contents)
     }
 
     fn uninstall(&self) -> Result<(), String> {
@@ -121,6 +118,17 @@ impl PlacedPlugin {
             plugin: self,
         })
     }
+}
+
+/// 落位目录内逐文件覆盖一个文件：同目录临时文件 + 原子改名（tmp + rename）。
+/// 落位产物（manifest/wasm）与插件配置共用这一条原子写路径。
+fn write_placed_file(dir: &Path, name: &str, contents: &[u8]) -> Result<(), String> {
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!(".{name}.tmp-"))
+        .tempfile_in(dir)
+        .map_err(|e| format!("创建落位临时文件失败：{e}"))?;
+    fs::write(tmp.path(), contents).map_err(|e| format!("写入 {name} 失败：{e}"))?;
+    fs::rename(tmp.path(), dir.join(name)).map_err(|e| format!("覆盖 {name} 失败：{e}"))
 }
 
 /// 删除落位目录；目录已不存在同样成功（幂等）。
@@ -174,6 +182,18 @@ pub(crate) struct PluginApplyReport {
     pub(crate) files: Vec<String>,
     pub(crate) skipped: Vec<SkippedProvider>,
     pub(crate) reason: Option<String>,
+}
+
+/// 插件配置（落位目录 `<id>/config.json`，ADR 0018）：该插件对全局变量的覆盖
+/// 与它私有的表单数据，与插件一一对应、随插件存在。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PluginConfig {
+    /// 变量覆盖：键必须是全局变量表中已声明的变量名（写入时校验，见 `set_config`）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) variables: Variables,
+    /// 表单数据：形状由 manifest 的 `settings_schema` 声明（ADR 0017），宿主不解释。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) form: Option<serde_json::Value>,
 }
 
 /// 注册表条目的装载状态；装载失败进错误态并携带人类可读原因。
@@ -538,6 +558,70 @@ impl PluginService {
 
         // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
         remove_placed_dir(&MaestroPaths::get().plugin_dir(&entry.id))
+    }
+
+    /// 读取插件配置（ADR 0018）：返回该插件对全局变量的覆盖与私有表单数据。
+    /// 配置文件不存在视为「无覆盖、无表单」——新装插件开箱即用；文件损坏则
+    /// 报错并给出可读原因，绝不静默降级为空配置。
+    pub(crate) fn get_config(
+        &self,
+        store: &AppStore,
+        source: &str,
+    ) -> Result<PluginConfig, String> {
+        let entry = store.read()?.plugin_by_source(source)?;
+        let path = MaestroPaths::get()
+            .plugin_dir(&entry.id)
+            .join(PLACED_CONFIG);
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(PluginConfig::default()),
+            Err(e) => {
+                return Err(format!("读取插件配置失败：{}\n原因：{e}", path.display()));
+            }
+        };
+        serde_json::from_str(&raw).map_err(|e| {
+            format!(
+                "插件配置已损坏：{}\n原因：{e}\n请修复或删除该文件后重试；在此之前该插件的配置不可用。",
+                path.display()
+            )
+        })
+    }
+
+    /// 写入插件配置（整包替换，ADR 0018）：`variables` 覆盖与 `form` 表单整体
+    /// 覆盖到 `<id>/config.json`。覆盖的变量名必须已在全局变量表中声明（声明的
+    /// 真相源是 `Config.variables`），未声明即报错——覆盖一个未声明的变量无意义，
+    /// 且易掩盖拼写错误。落盘经同目录临时文件 + 原子改名；整个流程在
+    /// `install_lock` 内独占，与安装/重载/移除互斥。变量值与表单内容不进日志
+    /// （ADR 0008），日志只带 id。
+    pub(crate) fn set_config(
+        &self,
+        store: &AppStore,
+        source: &str,
+        plugin_config: &PluginConfig,
+    ) -> Result<(), String> {
+        let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
+
+        // 短锁内完成条目读取与校验：声明的真相源就是当前全局变量表。
+        let entry = {
+            let guard = store.read()?;
+            let config = guard.get()?;
+            for name in plugin_config.variables.keys() {
+                if !config.variables.contains_key(name) {
+                    return Err(format!(
+                        "变量「{name}」未在全局变量表中声明，不能写入插件配置的覆盖项；请先在全局变量中声明。"
+                    ));
+                }
+            }
+            guard.plugin_by_source(source)?
+        };
+
+        let plugin_dir = MaestroPaths::get().plugin_dir(&entry.id);
+        fs::create_dir_all(&plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
+        let raw = serde_json::to_string_pretty(plugin_config)
+            .map_err(|e| format!("序列化插件配置失败：{e}"))?;
+        write_placed_file(&plugin_dir, PLACED_CONFIG, format!("{raw}\n").as_bytes())?;
+        log::debug!("plugin config written: id={}", entry.id);
+        Ok(())
     }
 
     /// 对注册表中的每个插件执行投影，返回逐插件报告：
@@ -1701,6 +1785,158 @@ mod tests {
         assert_eq!(reports[0].skipped.len(), 1);
         assert_eq!(reports[0].skipped[0].slug, "gateway");
         assert_eq!(reports[0].skipped[0].reason, "未配置任何协议端点");
+    }
+
+    /// 新装插件开箱即用（ADR 0018）：config.json 不存在视为「无覆盖、无表单」，
+    /// 而非报错。
+    #[test]
+    fn get_plugin_config_returns_no_overrides_and_no_form_for_a_freshly_installed_plugin() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+
+        let config = service
+            .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+            .unwrap();
+
+        assert!(config.variables.is_empty(), "{:?}", config.variables);
+        assert_eq!(config.form, None);
+    }
+
+    /// 写入即整包替换（ADR 0018）：variables 覆盖与 form 落到 `<id>/config.json`，
+    /// 结构为 `{ "variables": {…}, "form": {…} }`，经读命令原样回读。
+    #[test]
+    fn set_plugin_config_persists_variables_and_form_and_reads_back() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let maestro_paths = MaestroPaths::get();
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+        store
+            .write()
+            .unwrap()
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+            .unwrap();
+
+        let config = PluginConfig {
+            variables: BTreeMap::from([("HOST".to_owned(), "gateway.local".to_owned())]),
+            form: Some(serde_json::json!({"model": "kimi"})),
+        };
+        service
+            .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+            .unwrap();
+
+        let config_path = maestro_paths.plugin_dir("pi").join(PLACED_CONFIG);
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(raw["variables"]["HOST"], "gateway.local");
+        assert_eq!(raw["form"]["model"], "kimi");
+        assert_eq!(
+            service
+                .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+                .unwrap(),
+            config
+        );
+    }
+
+    /// 覆盖的变量名必须已在全局变量表中声明：未声明即报错，且不落盘；
+    /// 报错含变量名（标识符），不含变量值。
+    #[test]
+    fn set_plugin_config_rejects_variables_not_declared_in_the_global_table() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let maestro_paths = MaestroPaths::get();
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+
+        let config = PluginConfig {
+            variables: BTreeMap::from([("UNDECLARED".to_owned(), "sk-canary".to_owned())]),
+            form: None,
+        };
+        let err = service
+            .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+            .unwrap_err();
+
+        assert!(err.contains("未在全局变量表中声明"), "{err}");
+        assert!(err.contains("UNDECLARED"), "{err}");
+        assert!(!err.contains("sk-canary"), "报错不得携带变量值：{err}");
+        assert!(
+            !maestro_paths.plugin_dir("pi").join(PLACED_CONFIG).exists(),
+            "被拒绝的写入不得落盘"
+        );
+    }
+
+    /// 插件配置损坏时报错并给出可读原因（含文件路径），不静默降级为「无覆盖」。
+    #[test]
+    fn get_plugin_config_reports_corruption_instead_of_degrading() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let maestro_paths = MaestroPaths::get();
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+        fs::write(
+            maestro_paths.plugin_dir("pi").join(PLACED_CONFIG),
+            "{ not json",
+        )
+        .unwrap();
+
+        let err = service
+            .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+            .unwrap_err();
+
+        assert!(err.contains("插件配置已损坏"), "{err}");
+        assert!(
+            err.contains(
+                &maestro_paths
+                    .plugin_dir("pi")
+                    .join(PLACED_CONFIG)
+                    .display()
+                    .to_string()
+            ),
+            "报错应含文件路径：{err}"
+        );
+    }
+
+    /// 端到端（真实内置 pi 产物）：经写命令落盘的插件配置在重载后仍在——
+    /// 逐文件覆盖只替换 manifest.json 与 plugin.wasm 两个宿主产物（ADR 0018），
+    /// 本测试覆盖「经服务层写入」的完整路径。
+    #[test]
+    fn set_plugin_config_survives_a_plugin_reload() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+        store
+            .write()
+            .unwrap()
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+            .unwrap();
+
+        let config = PluginConfig {
+            variables: BTreeMap::from([("HOST".to_owned(), "gateway.local".to_owned())]),
+            form: Some(serde_json::json!({"model": "kimi"})),
+        };
+        service
+            .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+            .unwrap();
+        service
+            .reload_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+            .unwrap();
+
+        assert_eq!(
+            service
+                .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+                .unwrap(),
+            config,
+            "重载不冲掉经命令写入的插件配置"
+        );
     }
 
     /// 插件返回的路径必须是 config_dir 内的相对路径：绝对路径与 `..` 一律拒绝（fail-loud），

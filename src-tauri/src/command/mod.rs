@@ -3,7 +3,8 @@ mod provider;
 mod variables;
 
 pub(crate) use plugin::{
-    add_plugin, apply_providers, list_plugins, reload_plugin, remove_plugin, set_plugin_enabled,
+    add_plugin, apply_providers, get_plugin_config, list_plugins, reload_plugin, remove_plugin,
+    set_plugin_config, set_plugin_enabled,
 };
 pub(crate) use provider::{
     create_provider, delete_provider, list_providers, set_provider_enabled, update_provider,
