@@ -13,11 +13,14 @@ import {
   message,
 } from "antd";
 import { DeleteOutlined } from "@ant-design/icons";
+import RjsfForm from "@rjsf/antd";
+import validator from "@rjsf/validator-ajv8";
 import { getPluginConfig, setPluginConfig } from "./api/plugins";
 import { listVariables } from "./api/variables";
 
 /**
- * 插件配置页（ticket #91）：分「变量覆盖」「表单」两个 Tab（表单 Tab 由 #92 接手）。
+ * 插件配置页：分「变量覆盖」「表单」两个 Tab。表单按 manifest 的
+ * settings_schema（ADR 0017）渲染，写入插件配置的 form 段。
  * 保存只写该插件的配置（ADR 0018），不触发投影——投影仍由 Provider 页的
  * 「应用到工具」显式发起。
  * @param {Object} param0
@@ -99,7 +102,15 @@ export default function PluginConfigPage({ plugin }) {
             {
               key: "form",
               label: "表单",
-              children: <Empty description="暂未支持" />,
+              children: plugin.settings_schema ? (
+                <PluginSettingsForm
+                  plugin={plugin}
+                  config={config}
+                  onReload={reload}
+                />
+              ) : (
+                <Empty description="该插件没有需要填写的配置项" />
+              ),
             },
           ]}
         />
@@ -282,5 +293,50 @@ function PluginVariablesForm({ plugin, config, variables, onFinish }) {
         </Button>
       </div>
     </Form>
+  );
+}
+
+/**
+ * 插件表单：按 manifest 的 settings_schema（内联 JSON Schema，ADR 0017）用
+ * @rjsf/antd 渲染，输入期校验由 rjsf 按 schema 完成（宿主不校验 form）。
+ * 保存整包写回插件配置（form 段写入提交的表单数据，variables 段原样带回）。
+ * @param {Object} param0
+ * @param {import("./api/plugins").PluginView} param0.plugin
+ * @param {import("./api/plugins").PluginConfig} param0.config
+ * @param {() => void} param0.onReload
+ */
+function PluginSettingsForm({ plugin, config, onReload }) {
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit({ formData }) {
+    setSaving(true);
+    try {
+      await setPluginConfig(plugin.source, {
+        ...config,
+        form: formData ?? null,
+      });
+      onReload();
+    } catch (err) {
+      message.error(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card title="表单">
+      <RjsfForm
+        schema={plugin.settings_schema}
+        formData={config.form ?? undefined}
+        validator={validator}
+        onSubmit={handleSubmit}
+      >
+        <div className="card-actions">
+          <Button type="primary" htmlType="submit" loading={saving}>
+            保存
+          </Button>
+        </div>
+      </RjsfForm>
+    </Card>
   );
 }

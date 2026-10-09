@@ -5,6 +5,8 @@
  * @property {boolean} enabled
  * @property {string=} id 插件 id（条目在安装成功后写入；内置插件由启动补装），界面展示用它。
  * @property {string=} config_dir manifest 声明的写入目录，已解析为宿主绝对路径（`$HOME` 等变量已展开）。
+ * @property {Object=} settings_schema manifest 内联的 JSON Schema（draft 2020-12，ADR 0017），
+ *   描述 form 段的形状，原样透传不校验；缺省即该插件无需用户填写。
  * @property {string=} error 加载/启动失败的原因（如落位文件损坏 / manifest 不合法 / 接口不兼容）。
  */
 /**
