@@ -212,7 +212,7 @@ mod tests {
         providers: &BTreeMap<String, Provider>,
     ) -> serde_json::Value {
         let (plugin, config_dir) = loaded_plugin(root, builtin::PI_WASM);
-        let mut plugin = plugin.instantiate_component(&build_engine()).unwrap();
+        let mut plugin = plugin.instantiate_component(&build_engine(), None).unwrap();
 
         let (files, _) = plugin.write_provider(providers).unwrap();
 
