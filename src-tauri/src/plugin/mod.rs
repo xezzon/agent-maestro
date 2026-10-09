@@ -665,8 +665,14 @@ impl PluginService {
                 // 按插件读取插件配置（ADR 0018）：读取或解析失败即整插件失败，不静默降级。
                 let plugin_config = read_plugin_config(&MaestroPaths::get().plugin_dir(&id))?;
                 // 全局变量表 ⊕ 该插件的变量覆盖：覆盖键优先，只影响本插件的插值。
+                // config.json 容许残留全局表中已不存在的键，但不参与插值。
                 let mut merged = variables.clone();
-                merged.extend(plugin_config.variables);
+                merged.extend(
+                    plugin_config
+                        .variables
+                        .into_iter()
+                        .filter(|(name, _)| variables.contains_key(name)),
+                );
                 // form 段以原始 JSON 文本在实例化之前就位（宿主不解释其内容，ADR 0017）。
                 let form = plugin_config
                     .form
