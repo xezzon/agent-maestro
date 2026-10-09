@@ -8,5 +8,5 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-maestro-plugin-sdk = { path = "../../crates/maestro-plugin-sdk", version = "2.0.0" }
+maestro-plugin-sdk = { path = "../../crates/maestro-plugin-sdk", version = "2.1.0" }
 serde_json = "1"

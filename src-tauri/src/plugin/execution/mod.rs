@@ -1,3 +1,4 @@
+mod config;
 mod logger;
 mod provider;
 mod bindings {
@@ -50,6 +51,10 @@ struct HostState {
     limits: StoreLimits,
     /// 插件 id：应用日志行的归属标识（`log` import 无法从调用方推断）。
     plugin_id: String,
+    /// 插件配置的 `form` 段原始 JSON 文本（ADR 0018）：实例化之前由宿主就位，
+    /// 组件经 `get-config` import 读取。当前尚未接线读取 config.json，恒为 none
+    /// （真实读取由 #88/#89 接线）。
+    form: Option<String>,
 }
 
 impl WasiView for HostState {
@@ -73,6 +78,7 @@ impl HostState {
             ctx: builder.build(),
             limits: build_store_limits(),
             plugin_id,
+            form: None,
         })
     }
 }
@@ -86,7 +92,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<HostState>, String> {
     let mut linker: Linker<HostState> = Linker::new(engine);
     p2::add_to_linker_sync(&mut linker).map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
     bindings::PluginWorld::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |state| state)
-        .map_err(|e| format!("初始化插件日志 import 失败：{e}"))?;
+        .map_err(|e| format!("初始化插件 import 失败：{e}"))?;
     Ok(linker)
 }
 

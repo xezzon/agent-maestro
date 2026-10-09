@@ -203,6 +203,25 @@ log(Level::Warning, "模型 x 已弃用，仍继续投影");
 - **message 不得携带 API Key 等凭证**——宿主不做内容审查，上报即落盘进日志文件（该文件定位是「发给维护者」的现场证据）。
 - 插件不调用 `log` 时行为与 1.0.0 合同完全一致；宿主恒定提供该 import，但 WIT 包版本升级（1.0.0 → 1.1.0）后宿主只注册当前版本，按旧合同编译的组件需以新版 SDK 重编译。
 
+## 插件配置（get-config import）
+
+`maestro:plugin` 2.1.0 起提供 `config` import（见 [ADR 0018](../../docs/adr/0018-plugin-config-in-placed-dir.md)）：宿主在实例化之前把插件配置中 `form` 段的原始 JSON 文本就位，插件经 SDK 一行读取：
+
+```rust
+use maestro_plugin_sdk::get_config;
+
+if let Some(form) = get_config() {
+    // form 是 `form` 段的原始 JSON 文本，由插件自行解析。
+}
+```
+
+语义要点：
+
+- 组件 init 与 `write-providers` 期间均可调用；宿主在实例化之前就位，同一实例内返回值不变。
+- `form` 段缺省时返回 `None`，不是错误。
+- 宿主只透传原始文本，不解析也不审查；`form` 是插件私有数据，形状由作者自定义，建议配合 manifest 的 `settings_schema`（见 ADR 0017）定义。
+- `write-providers` 签名不变；包版本升级即要求以新版 SDK 重编译（见「过程性日志」节末的兼容约定）。
+
 ## 配置值的插值（ADR 0014 / ADR 0015）
 
 `write-providers` 收到的 `base-url` 等字符串值，是宿主在投影前把**占位符**替换为全局变量（`variables`）实际值后的**字面值**——插件不需要、也无法感知变量。宿主侧的书写约束：
