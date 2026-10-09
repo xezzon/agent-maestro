@@ -569,22 +569,7 @@ impl PluginService {
         source: &str,
     ) -> Result<PluginConfig, String> {
         let entry = store.read()?.plugin_by_source(source)?;
-        let path = MaestroPaths::get()
-            .plugin_dir(&entry.id)
-            .join(PLACED_CONFIG);
-        let raw = match fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(PluginConfig::default()),
-            Err(e) => {
-                return Err(format!("读取插件配置失败：{}\n原因：{e}", path.display()));
-            }
-        };
-        serde_json::from_str(&raw).map_err(|e| {
-            format!(
-                "插件配置已损坏：{}\n原因：{e}\n请修复或删除该文件后重试；在此之前该插件的配置不可用。",
-                path.display()
-            )
-        })
+        read_plugin_config(&MaestroPaths::get().plugin_dir(&entry.id))
     }
 
     /// 写入插件配置（整包替换，ADR 0018）：`variables` 覆盖与 `form` 表单整体
@@ -629,9 +614,11 @@ impl PluginService {
     /// 单个插件的失败不影响其它插件，失败原因写入该插件的报告。
     ///
     /// 传入的每个 Provider 都参与投影：是否禁用由调用方先行剔除（#94 在命令层
-    /// `enabled_providers` 完成），本函数不感知 `enabled`。投影前做占位符插值
-    /// （ADR 0015：先插值、后映射端点；端点选择见 ADR 0016）：按插件合并变量表（插件配置落地前即全局
-    /// 变量表，见 #89）；任一字段失败即该插件整体 `failed`——不实例化、不调用插件、
+    /// `enabled_providers` 完成），本函数不感知 `enabled`。投影按插件读取插件配置
+    /// （ADR 0018）：全局变量表 ⊕ 该插件的 `variables` 覆盖后插值（同一占位符可按
+    /// 插件解析出不同值），`form` 段在组件实例化之前就位、经 `get-config` import
+    /// 递送；先插值、后映射端点（ADR 0015）、端点选择见 ADR 0016。插件配置读取或
+    /// 解析失败、任一字段插值失败即该插件整体 `failed`——不实例化、不调用插件、
     /// 不写任何文件。
     ///
     /// 插件执行时长不受应用控制：注册表锁只在快照阶段短暂持有（克隆 Arc 与
@@ -671,12 +658,27 @@ impl PluginService {
 
         for (id, loaded_plugin) in loaded {
             log::debug!("projecting providers: id={id}");
-            let report = match crate::interpolate::interpolate_providers(providers, variables)
-                .and_then(|projected| {
-                    loaded_plugin
-                        .instantiate_component(&self.engine)
-                        .and_then(|mut instantiated| instantiated.write_provider(&projected))
-                }) {
+            let report = match (|| -> Result<(Vec<String>, Vec<SkippedProvider>), String> {
+                // 按插件读取插件配置（ADR 0018）：读取或解析失败即整插件失败，不静默降级。
+                let plugin_config = read_plugin_config(&MaestroPaths::get().plugin_dir(&id))?;
+                // 全局变量表 ⊕ 该插件的变量覆盖：覆盖键优先，只影响本插件的插值。
+                let mut merged = variables.clone();
+                merged.extend(plugin_config.variables);
+                // form 段以原始 JSON 文本在实例化之前就位（宿主不解释其内容，ADR 0017）。
+                let form = plugin_config
+                    .form
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|e| format!("序列化插件 form 失败：{e}"))?;
+                crate::interpolate::interpolate_providers(providers, &merged).and_then(
+                    |projected| {
+                        loaded_plugin
+                            .instantiate_component(&self.engine, form)
+                            .and_then(|mut instantiated| instantiated.write_provider(&projected))
+                    },
+                )
+            })() {
                 // 插件返回的是相对 config_dir 的路径：拼成宿主绝对路径回报给界面。
                 Ok((files, skipped)) => {
                     match project_files(&loaded_plugin.manifest.config_dir, files) {
@@ -769,8 +771,27 @@ impl PluginService {
     }
 }
 
-/// 把插件返回的相对路径拼成宿主绝对路径；越界路径一律报错（fail-loud）：
-/// 绝对路径与 `..` 都指向预开放目录之外，不得被回报成一次成功投影。
+/// 读取落位目录中的插件配置（ADR 0018）：文件不存在视为「无覆盖、无表单」，
+/// 损坏则报错并给出可读原因，绝不静默降级为空配置。get-config 命令与投影路径
+/// 共用同一份读取与失败语义。
+fn read_plugin_config(plugin_dir: &Path) -> Result<PluginConfig, String> {
+    let path = plugin_dir.join(PLACED_CONFIG);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(PluginConfig::default()),
+        Err(e) => {
+            return Err(format!("读取插件配置失败：{}\n原因：{e}", path.display()));
+        }
+    };
+    serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "插件配置已损坏：{}\n原因：{e}\n请修复或删除该文件后重试；在此之前该插件的配置不可用。",
+            path.display()
+        )
+    })
+}
+
+/// 把插件返回的相对路径拼成宿主绝对路径；越界路径一律报错（fail-loud）：/// 绝对路径与 `..` 都指向预开放目录之外，不得被回报成一次成功投影。
 fn project_files(config_dir: &Path, files: Vec<String>) -> Result<Vec<String>, String> {
     files
         .into_iter()
@@ -1240,11 +1261,38 @@ mod tests {
         let maestro_paths = MaestroPaths::get();
         let service = stub_service(home.path(), https_stub("pi2"));
         service.add_plugin(&store, MANIFEST_URL).unwrap();
+        // 插件配置随插件存在（ADR 0018）：移除连落位目录带 config.json 一并删除。
+        store
+            .write()
+            .unwrap()
+            .set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+            .unwrap();
+        service
+            .set_config(
+                &store,
+                MANIFEST_URL,
+                &PluginConfig {
+                    variables: BTreeMap::from([("HOST".to_owned(), "gateway.local".to_owned())]),
+                    form: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            maestro_paths.plugin_dir("pi2").join(PLACED_CONFIG).exists(),
+            "前置：插件配置已落盘"
+        );
 
         service.remove_plugin(&store, MANIFEST_URL).unwrap();
 
         assert!(snapshot(&store).plugins.is_empty(), "配置条目已删除");
         assert!(!maestro_paths.plugin_dir("pi2").exists(), "落位目录已删除");
+        assert!(
+            !maestro_paths.plugin_dir("pi2").join(PLACED_CONFIG).exists(),
+            "插件配置随落位目录一并消失"
+        );
         assert!(
             service.entries.read().unwrap().is_empty(),
             "内存注册表已卸载"
@@ -1717,6 +1765,76 @@ mod tests {
         );
     }
 
+    /// 投影按插件读取插件配置（ADR 0018）：全局变量表 ⊕ 该插件的 `variables` 覆盖
+    /// 后再插值——同一占位符在不同插件下解析出不同值，未覆盖的沿用全局默认；
+    /// `form` 段的存在不影响投影（宿主只把它递送给组件，不参与插值）。
+    #[test]
+    fn write_providers_merges_plugin_variable_overrides_per_plugin() {
+        use crate::provider::Protocol;
+
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = stub_service(home.path(), https_stub("pi2"));
+        service.startup(&store).unwrap();
+        // https 来源由替身 fetcher 显式安装；startup 只补装缺失的内置插件。
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+        let variables = BTreeMap::from([("HOST".to_owned(), "api.example.com".to_owned())]);
+        store
+            .write()
+            .unwrap()
+            .set_variables(variables.clone())
+            .unwrap();
+
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${HOST}/v1".to_owned(),
+                )]),
+                ..Provider::default()
+            },
+        )]);
+
+        // 未覆盖的内置 pi 沿用全局默认；pi2 覆盖同一变量解析出不同值。
+        service
+            .set_config(
+                &store,
+                MANIFEST_URL,
+                &PluginConfig {
+                    variables: BTreeMap::from([("HOST".to_owned(), "gateway.local".to_owned())]),
+                    form: Some(serde_json::json!({"model": "kimi"})),
+                },
+            )
+            .unwrap();
+
+        let reports = service.write_providers(&providers, &variables).unwrap();
+
+        let by_id: HashMap<&str, &PluginApplyReport> = reports
+            .iter()
+            .map(|report| (report.id.as_str(), report))
+            .collect();
+        assert_eq!(by_id.get("pi").unwrap().status, "applied", "{:?}", reports);
+        assert_eq!(by_id.get("pi2").unwrap().status, "applied", "{:?}", reports);
+        let written: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            written["providers"]["gateway"]["baseUrl"], "https://api.example.com/v1",
+            "未覆盖的插件沿用全局变量表"
+        );
+        let overridden: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(home.path().join(".pi2").join("agent").join("models.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            overridden["providers"]["gateway"]["baseUrl"], "https://gateway.local/v1",
+            "同一占位符在覆盖插件下解析出不同值"
+        );
+    }
+
     /// 任一字段解析失败即整插件 failed：不调用插件、不写任何文件，
     /// 原因含 slug + 字段名 + 变量名，不含值与密钥（ADR 0015）。
     #[test]
@@ -1756,6 +1874,57 @@ mod tests {
         assert!(
             !home.path().join(".pi").join("agent").exists(),
             "插值失败不得实例化插件、不得写任何文件"
+        );
+    }
+
+    /// 插件配置读取/解析失败即整插件 failed（ADR 0018，不静默降级为空配置）：
+    /// 不实例化、不调用插件、不写任何文件，原因含损坏文件的路径。
+    #[test]
+    fn write_providers_fails_the_whole_plugin_when_its_plugin_config_is_corrupt() {
+        use crate::provider::Protocol;
+
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+        let maestro_paths = MaestroPaths::get();
+        fs::write(
+            maestro_paths.plugin_dir("pi").join(PLACED_CONFIG),
+            "{ not json",
+        )
+        .unwrap();
+
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://api.example.com/v1".to_owned(),
+                )]),
+                ..Provider::default()
+            },
+        )]);
+
+        let reports = service
+            .write_providers(&providers, &BTreeMap::new())
+            .unwrap();
+
+        assert_eq!(reports[0].status, "failed");
+        let reason = reports[0].reason.as_deref().unwrap();
+        assert!(reason.contains("插件配置已损坏"), "{reason}");
+        assert!(
+            reason.contains(
+                &maestro_paths
+                    .plugin_dir("pi")
+                    .join(PLACED_CONFIG)
+                    .display()
+                    .to_string()
+            ),
+            "失败原因应含损坏文件的路径：{reason}"
+        );
+        assert!(
+            !home.path().join(".pi").join("agent").exists(),
+            "插件配置损坏不得实例化插件、不得写任何文件"
         );
     }
 

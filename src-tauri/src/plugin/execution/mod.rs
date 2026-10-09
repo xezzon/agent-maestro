@@ -52,8 +52,7 @@ struct HostState {
     /// 插件 id：应用日志行的归属标识（`log` import 无法从调用方推断）。
     plugin_id: String,
     /// 插件配置的 `form` 段原始 JSON 文本（ADR 0018）：实例化之前由宿主就位，
-    /// 组件经 `get-config` import 读取。当前尚未接线读取 config.json，恒为 none
-    /// （真实读取由 #88/#89 接线）。
+    /// 组件经 `get-config` import 读取；无 form 段则 none。
     form: Option<String>,
 }
 
@@ -67,8 +66,9 @@ impl WasiView for HostState {
 }
 
 impl HostState {
-    /// 预开放指定配置目录为写入面，配套资源限制；用于实投影阶段。
-    fn new(tool_dir: &Path, plugin_id: String) -> Result<Self, String> {
+    /// 预开放指定配置目录为写入面，配套资源限制，并在实例化之前就位插件配置的
+    /// `form` 段（ADR 0018：组件 init 即可经 `get-config` import 读取）；用于实投影阶段。
+    fn new(tool_dir: &Path, plugin_id: String, form: Option<String>) -> Result<Self, String> {
         let mut builder = WasiCtxBuilder::new();
         builder
             .preopened_dir(tool_dir, "/", FsPerms::ReadWrite)
@@ -78,7 +78,7 @@ impl HostState {
             ctx: builder.build(),
             limits: build_store_limits(),
             plugin_id,
-            form: None,
+            form,
         })
     }
 }
@@ -123,6 +123,7 @@ impl LoadedPlugin {
     pub(crate) fn instantiate_component(
         &self,
         engine: &Engine,
+        form: Option<String>,
     ) -> Result<InstantiatedPlugin, String> {
         let component =
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
@@ -130,7 +131,7 @@ impl LoadedPlugin {
         let tool_path = self.manifest.config_dir.clone();
         let mut store = wasmtime::Store::new(
             engine,
-            HostState::new(&tool_path, self.manifest.id.clone())?,
+            HostState::new(&tool_path, self.manifest.id.clone(), form)?,
         );
         store.limiter(|s| &mut s.limits);
         store
@@ -183,7 +184,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
 
         let (plugin, _) = loaded_plugin(root.path(), b"not a wasm component");
-        let Err(err) = plugin.instantiate_component(&build_engine()) else {
+        let Err(err) = plugin.instantiate_component(&build_engine(), None) else {
             panic!("非组件字节不应通过实例化校验");
         };
 
@@ -232,11 +233,29 @@ mod tests {
         );
     }
 
+    /// form 在实例化之前就位 HostState（ADR 0018）：组件 init 即可经 `get-config`
+    /// import 读取，递送语义由 `execution::config` 的宿主实现单测钉住。
+    #[test]
+    fn instantiate_component_places_the_form_into_host_state_before_instantiation() {
+        let root = tempfile::tempdir().unwrap();
+        let (plugin, _) = loaded_plugin(root.path(), builtin::PI_WASM);
+
+        let instantiated = plugin
+            .instantiate_component(&build_engine(), Some(r#"{"model":"kimi"}"#.to_owned()))
+            .unwrap();
+
+        assert_eq!(
+            instantiated.store.data().form.as_deref(),
+            Some(r#"{"model":"kimi"}"#),
+            "form 应在实例化前写入宿主状态"
+        );
+    }
+
     #[test]
     fn wasm_call_is_interrupted_when_fuel_exhausted() {
         let root = tempfile::tempdir().unwrap();
         let (plugin, _) = loaded_plugin(root.path(), builtin::PI_WASM);
-        let mut plugin = plugin.instantiate_component(&build_engine()).unwrap();
+        let mut plugin = plugin.instantiate_component(&build_engine(), None).unwrap();
 
         // 预算归零：第一条 guest 指令即触发 fuel 耗尽中断，调用转错误路径。
         plugin.store.set_fuel(0).unwrap();
