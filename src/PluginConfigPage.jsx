@@ -161,7 +161,7 @@ function usePluginConfigSave(source) {
  */
 function PluginVariablesCard({ plugin, config, variables, onReload }) {
   const [editing, setEditing] = useState(false);
-  const names = Object.keys(config.variables);
+  const names = Object.keys(config.variables ?? {});
 
   return (
     <Card title="变量覆盖">
@@ -259,7 +259,7 @@ function PluginVariablesForm({ plugin, config, variables, onFinish }) {
       form={form}
       layout="vertical"
       initialValues={{
-        variables: Object.entries(config.variables).map(([name, value]) => ({
+        variables: Object.entries(config.variables ?? {}).map(([name, value]) => ({
           name,
           value,
         })),

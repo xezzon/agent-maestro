@@ -27,7 +27,8 @@
 /**
  * 插件配置（ADR 0018）：该插件对全局变量的覆盖与它私有的表单数据，整包读写。
  * @typedef {Object} PluginConfig
- * @property {Record<string, string>} variables 变量覆盖：键必须是全局变量表中已声明的变量名（写入时校验）
+ * @property {Record<string, string>=} variables 变量覆盖：键必须是全局变量表中已声明的变量名（写入时校验）；
+ *   后端空表时省略该字段（skip_serializing_if），读取侧须容忍缺失
  * @property {Object=} form 表单数据，形状由 manifest 的 settings_schema 声明（ADR 0017），宿主不解释
  */
 import { invoke } from "@tauri-apps/api/core";
