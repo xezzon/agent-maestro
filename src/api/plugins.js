@@ -22,6 +22,12 @@
  * @property {SkippedProvider[]} skipped
  * @property {string=} reason
  */
+/**
+ * 插件配置（ADR 0018）：该插件对全局变量的覆盖与它私有的表单数据，整包读写。
+ * @typedef {Object} PluginConfig
+ * @property {Record<string, string>} variables 变量覆盖：键必须是全局变量表中已声明的变量名（写入时校验）
+ * @property {Object=} form 表单数据，形状由 manifest 的 settings_schema 声明（ADR 0017），宿主不解释
+ */
 import { invoke } from "@tauri-apps/api/core";
 
 /**
@@ -64,6 +70,25 @@ export async function reloadPlugin(source) {
  */
 export async function removePlugin(source) {
   await invoke("remove_plugin", { source });
+}
+
+/**
+ * 读取插件配置：配置不存在返回空配置（新装插件开箱即用），损坏则报错。
+ * @param {string} source
+ * @returns {Promise<PluginConfig>}
+ */
+export async function getPluginConfig(source) {
+  return invoke("get_plugin_config", { source });
+}
+
+/**
+ * 写入插件配置（整包替换，ADR 0018）：variables 覆盖与 form 表单整体覆盖，
+ * 未在全局变量表中声明的变量名会被拒绝。只写配置，不触发投影。
+ * @param {string} source
+ * @param {PluginConfig} config
+ */
+export async function setPluginConfig(source, config) {
+  await invoke("set_plugin_config", { source, config });
 }
 
 /**
