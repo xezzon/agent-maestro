@@ -80,37 +80,26 @@ impl PlacedPlugin {
     }
 
     fn save(&self) -> Result<(), String> {
-        // 插件根目录
-        let plugins_dir = self
-            .plugin_dir
-            .parent()
-            .ok_or_else(|| format!("落位目录不合法：{}", self.plugin_dir.display()))?;
-        fs::create_dir_all(plugins_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
-        // 写入临时目录
-        let staging = tempfile::Builder::new()
-            .prefix(".staging-")
-            .tempdir_in(plugins_dir)
-            .map_err(|e| format!("创建临时落位目录失败：{e}"))?;
-        let staging_path = staging.path().to_owned();
-        let io_error = |what: &str| {
-            let what = what.to_owned();
-            move |e: std::io::Error| format!("写入{what}失败：{e}")
-        };
-        fs::write(staging_path.join(PLACED_MANIFEST), &self.raw_manifest)
-            .map_err(io_error(PLACED_MANIFEST))?;
-        fs::write(staging_path.join(PLACED_WASM), self.wasm.clone())
-            .map_err(io_error(PLACED_WASM))?;
+        // 首次安装即建目录；已存在则逐文件覆盖，目录中宿主产物以外的文件
+        // （如插件配置，见 ADR 0018）完全不受影响。
+        fs::create_dir_all(&self.plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
+        // 先 manifest、后 wasm：写 wasm 失败会停在「新 manifest + 旧 wasm」的
+        // 混合态，恢复手段是从来源重新加载（备份回滚的既有保证已取消，见 ADR 0018）。
+        self.write_placed_file(PLACED_MANIFEST, self.raw_manifest.as_bytes())?;
+        self.write_placed_file(PLACED_WASM, &self.wasm)?;
+        log::debug!("placed plugin: {}", self.plugin_dir.display());
+        Ok(())
+    }
 
-        match swap_placed(&staging_path, &self.plugin_dir) {
-            Ok(()) => {
-                // 替换成功后 staging 已改名为目标目录，交由 TempDir 的清理逻辑空跑。
-                let _ = staging.keep();
-                log::debug!("placed plugin: {}", self.plugin_dir.display());
-                Ok(())
-            }
-            // 替换失败：staging 仍留在磁盘上，随 TempDir 一并清理。
-            Err(e) => Err(e),
-        }
+    /// 逐文件覆盖一个落位产物：同目录临时文件 + 原子改名（tmp + rename）。
+    fn write_placed_file(&self, name: &str, contents: &[u8]) -> Result<(), String> {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!(".{name}.tmp-"))
+            .tempfile_in(&self.plugin_dir)
+            .map_err(|e| format!("创建落位临时文件失败：{e}"))?;
+        fs::write(tmp.path(), contents).map_err(|e| format!("写入 {name} 失败：{e}"))?;
+        fs::rename(tmp.path(), self.plugin_dir.join(name))
+            .map_err(|e| format!("覆盖 {name} 失败：{e}"))
     }
 
     fn uninstall(&self) -> Result<(), String> {
@@ -131,33 +120,6 @@ impl PlacedPlugin {
             wasm,
             plugin: self,
         })
-    }
-}
-
-/// 用 staging 目录替换目标目录；目标不存在即直接改名。
-///
-/// 目标已存在时先备份旧目录，替换成功才删除备份、失败则恢复备份——因此「重新加载」
-/// 失败时旧版本保持可用。staging 与目标同父目录，保证替换是一次改名而非跨设备拷贝。
-fn swap_placed(staging: &Path, target: &Path) -> Result<(), String> {
-    if !target.exists() {
-        return fs::rename(staging, target).map_err(|e| format!("落位插件目录失败：{e}"));
-    }
-    // 插件 id 仅允许 [a-z0-9-_]，故 `<id>.old` 不会与其它插件的落位目录同名。
-    let backup = target.with_extension("old");
-    if backup.exists() {
-        fs::remove_dir_all(&backup).map_err(|e| format!("清理上次落位的备份目录失败：{e}"))?;
-    }
-    fs::rename(target, &backup).map_err(|e| format!("备份旧版本失败：{e}"))?;
-    match fs::rename(staging, target) {
-        Ok(()) => {
-            // 替换已成功：旧版本删除失败不影响新版本可用。
-            let _ = fs::remove_dir_all(&backup);
-            Ok(())
-        }
-        Err(e) => {
-            let _ = fs::rename(&backup, target);
-            Err(format!("替换插件目录失败：{e}"))
-        }
     }
 }
 
@@ -663,8 +625,10 @@ impl PluginService {
         Ok(reports)
     }
 
-    /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，成功才替换落位
-    /// 目录——失败时旧版本保持可用。每次只作用于一个来源（见 ADR 0006）。
+    /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，按「先
+    /// manifest、后 wasm」逐文件覆盖落位产物（见 ADR 0018）。写失败可能留下
+    /// 「新 manifest + 旧 wasm」的混合态，恢复手段是从来源重新加载。
+    /// 每次只作用于一个来源（见 ADR 0006）。
     ///
     /// 内置来源的“重新获取”即从内嵌字节重新构造落位副本，用于恢复被改动或
     /// 损坏的宿主副本（无上游新版本可言，但 ID 一致性校验仍执行）。
@@ -687,10 +651,10 @@ impl PluginService {
                 entry.id, loaded.manifest.id
             ));
         }
-        // 链接期校验先于替换：wasm 不是组件或接口不兼容时旧版本保持可用。
+        // 链接期校验先于落位：wasm 不是组件或接口不兼容时不落位、注册表保持旧状态。
         // 不触发组件 init、不预开放真实配置目录，避免未授权写入。
         loaded.validate(&self.engine)?;
-        // 替换落位目录：swap_placed 先备份旧版本，替换失败即恢复，旧版本保持可用。
+        // 逐文件覆盖落位产物：不触碰目录中宿主产物以外的文件（见 ADR 0018）。
         loaded.plugin.save()?;
 
         // 条目（id 与 enabled）不变，仅把内存注册表同步为新装载的版本。
@@ -1282,31 +1246,68 @@ mod tests {
         );
     }
 
+    /// 逐文件覆盖（见 ADR 0018）：重新加载只替换 manifest.json 与 plugin.wasm
+    /// 两个宿主产物，落位目录中的其余文件（如插件配置）保持原样。
     #[test]
-    fn reload_failure_keeps_the_old_placed_version_usable() {
+    fn reload_plugin_keeps_unrelated_files_in_the_placed_dir() {
         let home = temp_home();
         let store = store_at(home.path());
         let maestro_paths = MaestroPaths::get();
         let fetcher = Arc::new(https_stub("pi2"));
         let service = fetcher_service(home.path(), fetcher.clone());
         service.add_plugin(&store, MANIFEST_URL).unwrap();
-        fetcher.fail(MANIFEST_URL, "网络不可达");
+
+        let user_file = maestro_paths.plugin_dir("pi2").join("config.json");
+        fs::write(&user_file, r#"{"variables":{}}"#).unwrap();
+
+        fetcher.serve(MANIFEST_URL, manifest_json("pi2", "$HOME/.pi3", WASM_URL));
+        service.reload_plugin(&store, MANIFEST_URL).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&user_file).unwrap(),
+            r#"{"variables":{}}"#,
+            "落位目录中的非宿主产物文件不被重载冲掉"
+        );
+        assert_eq!(
+            fs::read_to_string(maestro_paths.plugin_dir("pi2").join(PLACED_MANIFEST)).unwrap(),
+            manifest_json("pi2", "$HOME/.pi3", WASM_URL),
+            "宿主产物照常覆盖为新版本"
+        );
+    }
+
+    /// 「重载失败旧版本保持可用」的保证已取消（见 ADR 0018）：先 manifest、后 wasm
+    /// 的逐文件覆盖在写 wasm 失败时停在「新 manifest + 旧 wasm」的混合态，
+    /// 错误直接返回、注册表保持旧状态，恢复手段是从来源重新加载。
+    #[test]
+    fn reload_plugin_write_failure_leaves_a_mixed_placed_state() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let maestro_paths = MaestroPaths::get();
+        let fetcher = Arc::new(https_stub("pi2"));
+        let service = fetcher_service(home.path(), fetcher.clone());
+        service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+        // 上游改版后，把落位的 plugin.wasm 换成同名目录：覆盖 wasm 必然失败。
+        fetcher.serve(MANIFEST_URL, manifest_json("pi2", "$HOME/.pi3", WASM_URL));
+        let placed_wasm = maestro_paths.plugin_dir("pi2").join(PLACED_WASM);
+        fs::remove_file(&placed_wasm).unwrap();
+        fs::create_dir(&placed_wasm).unwrap();
 
         let err = service.reload_plugin(&store, MANIFEST_URL).unwrap_err();
 
-        assert!(err.contains("网络不可达"), "{err}");
-        let dir = maestro_paths.plugin_dir("pi2");
+        assert!(err.contains(PLACED_WASM), "{err}");
         assert_eq!(
-            fs::read_to_string(dir.join(PLACED_MANIFEST)).unwrap(),
-            manifest_json("pi2", "$HOME/.pi2", WASM_URL),
-            "获取失败时旧版本保持可用"
+            fs::read_to_string(maestro_paths.plugin_dir("pi2").join(PLACED_MANIFEST)).unwrap(),
+            manifest_json("pi2", "$HOME/.pi3", WASM_URL),
+            "manifest 已覆盖为新版本，落位处于混合态"
         );
+        assert!(placed_wasm.is_dir(), "覆盖失败的 wasm 保持原样");
         let view = &service.list(&store).unwrap()[0];
         assert_eq!(view.error, None);
         assert_eq!(view.id, "pi2");
         assert!(
             view.config_dir.as_deref().unwrap().ends_with(".pi2"),
-            "注册表保持旧版本：{:?}",
+            "注册表保持旧状态：{:?}",
             view.config_dir
         );
     }
@@ -1722,28 +1723,5 @@ mod tests {
             let err = project_files(&config_dir, vec![file.to_owned()]).unwrap_err();
             assert!(err.contains(file), "{file} 应被拒绝：{err}");
         }
-    }
-
-    /// 替换落位目录失败时，旧目录必须从备份恢复原位。
-    #[test]
-    fn swap_placed_restores_the_backup_when_replacement_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("pi");
-        fs::create_dir_all(&target).unwrap();
-        fs::write(target.join("marker"), "old").unwrap();
-
-        // staging 不存在：替换必然失败，走备份恢复路径。
-        let err = swap_placed(&dir.path().join("missing-staging"), &target).unwrap_err();
-
-        assert!(err.contains("替换插件目录失败"), "{err}");
-        assert_eq!(
-            fs::read_to_string(target.join("marker")).unwrap(),
-            "old",
-            "替换失败后旧版本恢复原位"
-        );
-        assert!(
-            !target.with_extension("old").exists(),
-            "备份已恢复回目标位置，不残留备份目录"
-        );
     }
 }

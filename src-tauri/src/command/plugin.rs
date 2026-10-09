@@ -59,8 +59,8 @@ pub(crate) async fn add_plugin(app: AppHandle, source: String) -> Result<(), Str
     outcome
 }
 
-/// 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，成功才替换落位目录
-/// （失败时旧版本保持可用）。
+/// 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，按「先 manifest、
+/// 后 wasm」逐文件覆盖落位产物（写失败可能留下混合态，见 ADR 0018）。
 #[tauri::command]
 pub(crate) async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String> {
     log::info!("reload_plugin start: source={source}");

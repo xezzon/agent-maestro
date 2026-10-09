@@ -50,8 +50,8 @@ export async function addPlugin(source) {
 }
 
 /**
- * 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，成功才替换旧版本
- * （失败时旧版本保持可用）。
+ * 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，逐文件覆盖落位产物
+ * （写失败可能留下混合态，见 ADR 0018）。
  * @param {string} source
  */
 export async function reloadPlugin(source) {
