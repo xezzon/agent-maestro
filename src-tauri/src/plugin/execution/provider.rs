@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 
 use super::InstantiatedPlugin;
 use super::bindings::exports::maestro::plugin::plugin::{
-    Endpoint as WitEndpoint, Model as WitModel, Protocol as WitProtocol, Provider as WitProvider,
+    CustomHeader as WitCustomHeader, Endpoint as WitEndpoint, Model as WitModel,
+    ModelCapability as WitModelCapability, ModelLimit as WitModelLimit, Protocol as WitProtocol,
+    Provider as WitProvider,
 };
-use crate::provider::{ModelEntry, Protocol, Provider};
+use crate::provider::{ModelCapability, ModelEntry, Protocol, Provider};
 
 impl InstantiatedPlugin {
     pub(crate) fn write_provider(
@@ -51,6 +53,7 @@ fn to_wit_provider(
             selected_protocol: provider.selected_protocol.map(to_wit_protocol),
             // 空 api_key 由宿主归一化为 none（见 WIT 合同）。
             api_key: (!provider.api_key.is_empty()).then(|| provider.api_key.clone()),
+            custom_header: collect_custom_headers(provider),
             models: provider.models.iter().map(to_wit_model).collect(),
         });
     }
@@ -78,10 +81,44 @@ fn to_wit_protocol(protocol: Protocol) -> WitProtocol {
     }
 }
 
+/// 自定义 header 按名交给插件：记录层的映射（`BTreeMap`）已按键序迭代，
+/// 键即 header 名。
+fn collect_custom_headers(provider: &Provider) -> Vec<WitCustomHeader> {
+    provider
+        .custom_header
+        .iter()
+        .map(|(name, value)| WitCustomHeader {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
 fn to_wit_model(model: &ModelEntry) -> WitModel {
+    // 能力是集合语义：按枚举声明序（tool-use → image-in → thinking）排序并去重。
+    // 记录层读入与落盘已归一，这里再归一一次，内存构造的 Provider 也是同一形状。
+    // 排序在记录层枚举上做（WIT 枚举不派生 Ord），两侧变体一一对应、声明序一致。
+    let mut capabilities = model.capabilities.clone();
+    capabilities.sort_unstable();
+    capabilities.dedup();
     WitModel {
         id: model.id.clone(),
         display_name: model.display_name.clone(),
+        // 上限是声明值：未设置的子项原样传给插件（none），不填默认值。
+        limit: WitModelLimit {
+            context_window: model.limit.context_window,
+            max_input: model.limit.max_input,
+            max_output: model.limit.max_output,
+        },
+        capabilities: capabilities.into_iter().map(to_wit_capability).collect(),
+    }
+}
+
+fn to_wit_capability(capability: ModelCapability) -> WitModelCapability {
+    match capability {
+        ModelCapability::ToolUse => WitModelCapability::ToolUse,
+        ModelCapability::ImageIn => WitModelCapability::ImageIn,
+        ModelCapability::Thinking => WitModelCapability::Thinking,
     }
 }
 
@@ -92,7 +129,7 @@ mod tests {
     use super::*;
     use crate::plugin::execution::testutil::loaded_plugin;
     use crate::plugin::{build_engine, builtin};
-    use crate::provider::Endpoints;
+    use crate::provider::{Endpoints, ModelLimit};
 
     fn provider(openai: Option<&str>, anthropic: Option<&str>) -> Provider {
         let mut base_url = Endpoints::default();
@@ -209,6 +246,90 @@ mod tests {
         assert_eq!(mapped[0].models[1].display_name, None);
     }
 
+    /// 自定义 header 按名（字节序）交给插件；值原样映射。
+    #[test]
+    fn to_wit_provider_maps_custom_headers_sorted_by_name() {
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                custom_header: BTreeMap::from([
+                    ("X-Zeta".to_owned(), "z".to_owned()),
+                    ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+                    ("X-Alpha".to_owned(), "a".to_owned()),
+                ]),
+                ..provider(Some("https://api.example.com/v1"), None)
+            },
+        )]);
+
+        let (mapped, _) = to_wit_provider(&providers);
+
+        let headers: Vec<(&str, &str)> = mapped[0]
+            .custom_header
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_str()))
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                ("X-Alpha", "a"),
+                ("X-Zeta", "z"),
+                ("anthropic-version", "2023-06-01"),
+            ]
+        );
+
+        let (unset, _) = to_wit_provider(&BTreeMap::from([(
+            "gateway".to_owned(),
+            provider(Some("https://api.example.com/v1"), None),
+        )]));
+        assert!(unset[0].custom_header.is_empty(), "未设置即空列表");
+    }
+
+    /// 上限三项原样映射：未设置的子项交给插件的是 none，不填默认值。
+    #[test]
+    fn to_wit_model_maps_limit_subfields_and_passes_unset_as_none() {
+        let mapped = to_wit_model(&ModelEntry {
+            limit: ModelLimit {
+                context_window: Some(200_000),
+                max_input: Some(180_000),
+                max_output: Some(8_192),
+            },
+            ..ModelEntry::default()
+        });
+
+        assert_eq!(mapped.limit.context_window, Some(200_000));
+        assert_eq!(mapped.limit.max_input, Some(180_000));
+        assert_eq!(mapped.limit.max_output, Some(8_192));
+
+        let unset = to_wit_model(&ModelEntry::default());
+
+        assert_eq!(unset.limit.context_window, None);
+        assert_eq!(unset.limit.max_input, None);
+        assert_eq!(unset.limit.max_output, None);
+    }
+
+    /// 能力按枚举声明序（tool-use → image-in → thinking）排序并去重。
+    #[test]
+    fn to_wit_model_sorts_and_deduplicates_capabilities() {
+        let mapped = to_wit_model(&ModelEntry {
+            capabilities: vec![
+                ModelCapability::Thinking,
+                ModelCapability::ToolUse,
+                ModelCapability::ImageIn,
+                ModelCapability::Thinking,
+            ],
+            ..ModelEntry::default()
+        });
+
+        assert_eq!(
+            mapped.capabilities,
+            vec![
+                WitModelCapability::ToolUse,
+                WitModelCapability::ImageIn,
+                WitModelCapability::Thinking
+            ]
+        );
+    }
+
     fn write_and_read(
         root: &std::path::Path,
         providers: &BTreeMap<String, Provider>,
@@ -311,6 +432,48 @@ mod tests {
         assert_eq!(
             written["providers"]["gateway"]["baseUrl"],
             "https://anthropic.example.com"
+        );
+    }
+
+    /// 新字段随合同交给插件时，真实内置插件的既有投影不受扰动
+    /// （新字段的投影落点在 #110/#111）。
+    #[test]
+    fn write_provider_keeps_existing_projection_with_new_fields_present() {
+        let root = tempfile::tempdir().unwrap();
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                api_key: "sk-plain".to_owned(),
+                custom_header: BTreeMap::from([(
+                    "X-Gateway-Key".to_owned(),
+                    "gw-plain".to_owned(),
+                )]),
+                models: vec![ModelEntry {
+                    id: "gpt-4o".to_owned(),
+                    display_name: Some("GPT-4o".to_owned()),
+                    limit: ModelLimit {
+                        context_window: Some(128_000),
+                        max_input: None,
+                        max_output: Some(16_384),
+                    },
+                    capabilities: vec![ModelCapability::ToolUse, ModelCapability::ImageIn],
+                }],
+                ..provider(Some("https://api.example.com/v1"), None)
+            },
+        )]);
+
+        let written = write_and_read(root.path(), &providers);
+
+        assert_eq!(written["providers"]["gateway"]["api"], "openai-completions");
+        assert_eq!(
+            written["providers"]["gateway"]["baseUrl"],
+            "https://api.example.com/v1"
+        );
+        assert_eq!(written["providers"]["gateway"]["apiKey"], "sk-plain");
+        assert_eq!(written["providers"]["gateway"]["models"][0]["id"], "gpt-4o");
+        assert_eq!(
+            written["providers"]["gateway"]["models"][0]["name"],
+            "GPT-4o"
         );
     }
 }

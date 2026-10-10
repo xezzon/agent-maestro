@@ -28,15 +28,26 @@
  * @property {ModelCapability[]} capabilities 集合语义，界面归一为枚举序去重。
  */
 /**
+ * Provider 的一条自定义 HTTP header（界面形态）：一行一条，名与值都必填。
+ * 名的非空、HTTP token 字符集与忽略大小写的唯一性都只在界面内校验
+ * （记录层存大小写敏感的原名，见 issue #58 决定 11）；值是凭证，
+ * 只读卡片只列名、不显示值。
+ * @typedef {Object} CustomHeader
+ * @property {string} name
+ * @property {string} value
+ */
+/**
  * 后端 `list_providers` 返回的记录形态：`api_key` 为明文凭证，
  * 空串即未设置；第一期凭证随配置文件落盘，不做密钥链（ADR 0002 推迟采纳）。
  * `base_url` 只包含已配置的槽位，缺键即未配置。
+ * `custom_header` 是名→值映射（无序），缺键即空映射。
  * @typedef {Object} ProviderRequest
  * @property {string} slug
  * @property {boolean} enabled 禁用后不参与投影；旧配置缺此字段视为启用。
  * @property {Partial<Endpoints>} base_url
  * @property {ProviderProtocol|null} selected_protocol 界面所选端点；未选为 `null`。
  * @property {string=} api_key
+ * @property {Record<string, string>=} custom_header 值是明文凭证。
  * @property {Model[]} models 保序模型列表。
  */
 /**
@@ -48,6 +59,7 @@
  * @property {Endpoints} base_url
  * @property {ProviderProtocol|null} selected_protocol 投影使用的协议；未选为 `null`。
  * @property {Model[]} models
+ * @property {CustomHeader[]} custom_header 界面形态的行列表；读入时按名排序展开。
  * @property {string=} api_key
  */
 import { invoke } from "@tauri-apps/api/core";
@@ -93,7 +105,8 @@ function normalizeModel(model) {
 /**
  * 创建/更新命令共用的 `provider` 负载：`base_url` 只携带已填写的槽位，
  * `selected_protocol` 归一化为已填槽位之一（否则 `null`，投影时由插件兜底）。
- * `api_key` 与模型列表随整包替换回传（保序）。
+ * `api_key` 与模型列表随整包替换回传（保序）；`custom_header` 由行列表还原为
+ * 名→值映射。归一化归前端：映射本无序，按名排序后落盘才能让产物确定（issue #58 决定 21）。
  * @param {Provider} provider
  */
 function toProviderPayload(provider) {
@@ -106,10 +119,17 @@ function toProviderPayload(provider) {
     provider.selected_protocol && base_url[provider.selected_protocol]
       ? provider.selected_protocol
       : null;
+  // 按字节序比较（而非 localeCompare），与记录层 BTreeMap 的排序一致。
+  const custom_header = Object.fromEntries(
+    (provider.custom_header ?? [])
+      .map(({ name, value }) => [name, value])
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
   return {
     ...provider,
     base_url,
     selected_protocol,
+    custom_header,
     models: (provider.models ?? []).map(normalizeModel),
   };
 }
@@ -147,6 +167,10 @@ export async function listProviders() {
       slug,
       base_url: normalizeEndpoints(provider.base_url),
       selected_protocol: provider.selected_protocol ?? null,
+      // 记录层是无序映射，展开成按名排序的行列表，与表单的 Form.List 对齐。
+      custom_header: Object.entries(provider.custom_header ?? {}).map(
+        ([name, value]) => ({ name, value }),
+      ),
       api_key_set: !!provider.api_key,
       models: (provider.models ?? []).map(normalizeModel),
     }))

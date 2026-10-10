@@ -51,6 +51,15 @@
 //! 配置缺省或无该段时返回 [`Option::None`]。宿主只透传原始文本，不解析
 //! 也不审查。
 //!
+//! # Provider 自定义 header 与模型上限、能力
+//!
+//! `maestro:plugin` v2.2.0 起，`Provider` 多带一份跨协议、跨模型共享的自定义
+//! HTTP header（`custom-header`，宿主按名排序），`Model` 多带声明式的 token
+//! 上限（`limit`，三个子项各自可缺省，未设置即 `none`）与能力集合
+//! （`capabilities`，宿主按枚举声明序排序并去重）。这些字段只作声明：宿主不
+//! 据此推断、不裁剪请求、不做跨字段一致性校验，怎么投影进工具配置由插件裁定
+//! （见 ADR 0019）。header 的值已完成宿主插值且**可能含凭证**，不得写进日志。
+//!
 //! # 依赖方式
 //!
 //! 本 crate 不发布到 crates.io，插件作者以 git 依赖引用本仓库中的 `crates/maestro-plugin-sdk`，
@@ -78,7 +87,9 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 /// `maestro:plugin` v2 合同的全部 WIT 类型与 `Guest` trait。
 ///
 /// 类型与合同 v2 一一对应：加字段/加协议 = 合同升包版本 + 插件重编译。
-pub use exports::maestro::plugin::plugin::{Endpoint, Guest, Model, Protocol, Provider};
+pub use exports::maestro::plugin::plugin::{
+    CustomHeader, Endpoint, Guest, Model, ModelCapability, ModelLimit, Protocol, Provider,
+};
 
 /// 过程性日志 import 绑定（`maestro:plugin` v1.1.0 起，见 [`log`]）：
 /// [`Level`] 枚举与 [`log`] 函数 re-export 到 crate 根，方便插件一行引入。
