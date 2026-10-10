@@ -1,6 +1,6 @@
 // Maestro 插件接口合同（单一来源：宿主 bindgen! 与插件 crate 共用，见 issue #34）。
 // Provider 领域模型焊进接口版本：加字段/加协议 = 升级包版本 + 插件重编译。
-package maestro:plugin@2.1.0;
+package maestro:plugin@2.2.0;
 
 /// 插件过程性日志（issue #82）：投影期间插件可向用户外显非致命事件
 /// （逐条容错跳过、降级提示等）。宿主把每条消息按 level 写入应用日志
@@ -43,7 +43,18 @@ interface plugin {
         selected-protocol: option<protocol>,
         /// 凭证可有可无；空串由宿主归一化为 none。
         api-key: option<string>,
+        /// 跨协议、跨模型共享的自定义 HTTP header；宿主按名（name）排序后
+        /// 交给插件。值是宿主插值后的字面值且**可能含凭证**，插件不得把它
+        /// 写进日志（见本 crate 的 README）。
+        custom-header: list<custom-header>,
         models: list<model>,
+    }
+
+    /// 一个自定义 HTTP header：名是标识符（与 api-key、模型 id 同级，宿主
+    /// 不插值也不改写），值是配置值（宿主已完成插值）。
+    record custom-header {
+        name: string,
+        value: string,
     }
 
     /// 单协议端点：一个协议对应一个 Base URL。
@@ -60,6 +71,25 @@ interface plugin {
     record model {
         id: string,
         display-name: option<string>,
+        /// 声明式的 token 能力上限；未设置的子项为 none。只作声明：Maestro
+        /// 不据此推断、不裁剪请求、不做跨字段一致性校验。
+        limit: model-limit,
+        /// 能力集合；宿主按枚举声明序排序并去重后交给插件。
+        capabilities: list<model-capability>,
+    }
+
+    /// 模型的声明式 token 能力上限：三项互相独立、可缺省，未设置即 none。
+    record model-limit {
+        context-window: option<u32>,
+        max-input: option<u32>,
+        max-output: option<u32>,
+    }
+
+    /// 模型能力。声明顺序即宿主的排序序（tool-use → image-in → thinking）。
+    enum model-capability {
+        tool-use,
+        image-in,
+        thinking,
     }
 }
 
