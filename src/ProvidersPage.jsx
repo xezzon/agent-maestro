@@ -163,6 +163,15 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
         ))}
       </ul>
     )}
+    {(provider.custom_header?.length ?? 0) > 0 && (
+      // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
+      <div className="provider-headers">
+        <Typography.Text type="secondary">Header</Typography.Text>
+        {provider.custom_header.map((header) => (
+          <Tag key={header.name}>{header.name}</Tag>
+        ))}
+      </div>
+    )}
     <div className="card-actions">
       <Button disabled={deleting} onClick={onEdit}>
         编辑
@@ -247,6 +256,33 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
       },
     },
   ];
+  // HTTP token 字符集（RFC 9110 的 tchar）：header 名必须是合法 token，工具侧才能解析。
+  const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+  // header 名非空、限 HTTP token 字符集、同一 Provider 内忽略大小写唯一。
+  // 后端存大小写敏感的原名（issue #58 决定 11），这三条校验只在前端内联，不在 Rust 侧重复。
+  const HEADER_NAME_RULES = [
+    { required: true, message: "请输入 Header 名" },
+    {
+      pattern: HEADER_NAME_PATTERN,
+      message: "Header 名仅允许字母、数字与 !#$%&'*+-.^_`|~",
+    },
+    {
+      validator: (_, value) => {
+        if (!value) return Promise.resolve();
+        // 唯一性校验依赖当前表单内全部 header 行的实时值。
+        const occurrences = (form.getFieldValue("custom_header") ?? []).filter(
+          (header) => header?.name?.toLowerCase() === value.toLowerCase(),
+        ).length;
+        return occurrences > 1
+          ? Promise.reject(
+            new Error(`Header 名「${value}」在当前 Provider 内重复（忽略大小写）`),
+          )
+          : Promise.resolve();
+      },
+    },
+  ];
+  // 值可能含凭证，必填但不在前端展示明文（掩码输入）。
+  const HEADER_VALUE_RULES = [{ required: true, message: "请输入 Header 值" }];
   // 模型 ID 非空（空白串视为空）且同一 Provider 内唯一（大小写敏感）；
   // 唯一性校验依赖当前表单内全部模型行的实时值。
   const MODEL_ID_RULES = [
@@ -371,6 +407,46 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
         autoComplete="new-password"
         visibilityToggle={false}
       />
+    </Form.Item>
+
+    <Form.Item
+      label="自定义 Header"
+      extra="可选；随该 Provider 下所有模型与协议共享。值以明文保存在本地配置文件中"
+    >
+      <Form.List name="custom_header">
+        {(fields, { add, remove }) => (
+          <div className="header-rows">
+            {fields.map((field) => (
+              <Flex key={field.key} align="flex-start" gap={8}>
+                <Form.Item
+                  name={[field.name, "name"]}
+                  rules={HEADER_NAME_RULES}
+                  className="header-field"
+                >
+                  <Input placeholder="Header 名，例如 anthropic-version" />
+                </Form.Item>
+                <Form.Item
+                  name={[field.name, "value"]}
+                  rules={HEADER_VALUE_RULES}
+                  className="header-field"
+                >
+                  <Input.Password
+                    placeholder="Header 值"
+                    autoComplete="new-password"
+                    visibilityToggle={false}
+                  />
+                </Form.Item>
+                <Button disabled={saving} onClick={() => remove(field.name)}>
+                  删除
+                </Button>
+              </Flex>
+            ))}
+            <Button type="dashed" block disabled={saving} onClick={() => add()}>
+              添加 Header
+            </Button>
+          </div>
+        )}
+      </Form.List>
     </Form.Item>
 
     <Form.Item label="模型">
