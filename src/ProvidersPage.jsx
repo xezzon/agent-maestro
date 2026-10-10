@@ -23,6 +23,9 @@ import {
 import { CheckCircleTwoTone, FileTextOutlined } from "@ant-design/icons";
 import {
   ANTHROPIC_MESSAGES,
+  CAPABILITY_IMAGE_IN,
+  CAPABILITY_THINKING,
+  CAPABILITY_TOOL_USE,
   OPENAI_COMPLETIONS,
   PROVIDER_PROTOCOLS,
   createProvider,
@@ -53,9 +56,9 @@ const MODEL_LIMIT_FIELDS = [
 
 /** 能力枚举串与界面标签：分组（能力 / 输入模态）只是排版，落盘仍是枚举串。 */
 const CAPABILITY_LABELS = {
-  tool_use: "工具调用",
-  image_in: "视觉",
-  thinking: "推理",
+  [CAPABILITY_TOOL_USE]: "工具调用",
+  [CAPABILITY_IMAGE_IN]: "视觉",
+  [CAPABILITY_THINKING]: "推理",
 };
 
 /** 只读展示一项 token 上限：未设置就显示「未设置」，不编造默认值。 */
@@ -538,8 +541,12 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
                                     能力
                                   </Typography.Text>
                                   <Flex gap={16}>
-                                    <Checkbox value="tool_use">工具调用</Checkbox>
-                                    <Checkbox value="thinking">推理</Checkbox>
+                                    <Checkbox value={CAPABILITY_TOOL_USE}>
+                                      工具调用
+                                    </Checkbox>
+                                    <Checkbox value={CAPABILITY_THINKING}>
+                                      推理
+                                    </Checkbox>
                                   </Flex>
                                 </Flex>
                                 <Flex vertical gap={4}>
@@ -547,7 +554,9 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
                                     输入模态
                                   </Typography.Text>
                                   <Flex gap={16}>
-                                    <Checkbox value="image_in">视觉</Checkbox>
+                                    <Checkbox value={CAPABILITY_IMAGE_IN}>
+                                      视觉
+                                    </Checkbox>
                                   </Flex>
                                 </Flex>
                               </Flex>

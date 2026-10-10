@@ -118,10 +118,15 @@ pub(crate) fn attach(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<taur
 /// 累计到 GB 级并被永久保留，足以把整机压进 swap。金丝雀要证的是「本 crate 的
 /// 日志语句不泄露 api_key」——api_key 只经 WIT 结构进 sandbox，wasmtime / wiggle
 /// 不打印 guest 数据——因此按 target 过滤不损失断言强度。
+///
+/// 捕获窗口按**线程**隔离：窗口只收本线程在窗口存续期间发出的日志，因此并发
+/// 的捕获测试各有各的窗口（互不清空、互不污染），窗口外测试的日志也落不进任何
+/// 窗口；不需要全局缓冲，也就没有「清空与读取之间被别人插一杠」的窗口。
 #[cfg(test)]
 pub(crate) mod capture {
+    use std::{cell::RefCell, rc::Rc, sync::OnceLock};
+
     use log::{LevelFilter, Log, Metadata, Record};
-    use std::sync::{Mutex, OnceLock};
 
     /// 本 crate 的日志 target 前缀（`module_path!()` 以 crate 根名开头）。
     /// 用 `CARGO_CRATE_NAME` 而非字面量：lib target 改名时不会静默失配。
@@ -130,7 +135,12 @@ pub(crate) mod capture {
     /// 本 crate 全部测试的日志量远小于该值，正常不会触及。
     const MAX_LINES: usize = 8 * 1024;
 
-    static BUFFER: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+
+    thread_local! {
+        /// 本线程当前的活动捕获窗口；`None` 即本线程不在窗口内，日志被丢弃。
+        static WINDOW: RefCell<Option<Rc<RefCell<Vec<String>>>>> = const { RefCell::new(None) };
+    }
 
     struct Capture;
 
@@ -144,34 +154,61 @@ pub(crate) mod capture {
             if !record.target().starts_with(CRATE_TARGET) {
                 return;
             }
-            if let Some(buffer) = BUFFER.get() {
-                let mut buffer = buffer.lock().unwrap();
-                if buffer.len() < MAX_LINES {
-                    buffer.push(format!(
-                        "[{}][{}] {}",
-                        record.level(),
-                        record.target(),
-                        record.args()
-                    ));
-                }
+            // 只收本线程窗口内的记录：窗口外的输出（含并发测试）不落进任何窗口。
+            let Ok(window) = WINDOW.try_with(|slot| slot.borrow().clone()) else {
+                return;
+            };
+            let Some(window) = window else {
+                return;
+            };
+            let mut lines = window.borrow_mut();
+            if lines.len() < MAX_LINES {
+                lines.push(format!(
+                    "[{}][{}] {}",
+                    record.level(),
+                    record.target(),
+                    record.args()
+                ));
             }
         }
 
         fn flush(&self) {}
     }
 
-    /// 安装进程内捕获 logger（仅安装一次，重复调用复用）并清空缓冲，返回共享缓冲。
-    /// 清空而非累积：金丝雀断言只关心本次测试窗口内的输出，并发测试的日志也会被
-    /// 限制在各自的窗口上。
-    pub(crate) fn captured_logs() -> &'static Mutex<Vec<String>> {
-        let buffer = BUFFER.get_or_init(|| {
+    /// 打开一个捕获窗口：安装进程内捕获 logger（仅安装一次，重复调用复用），
+    /// 并把本线程标记为在窗口内，返回该窗口。窗口随 [`CaptureWindow`] 一起丢弃。
+    pub(crate) fn capture_window() -> CaptureWindow {
+        INSTALLED.get_or_init(|| {
             let _ = log::set_boxed_logger(Box::new(Capture));
             // `Debug` 足够：本 crate 最低只用 `debug!`，`Trace` 只会放进第三方逐指令日志。
             log::set_max_level(LevelFilter::Debug);
-            Mutex::new(Vec::new())
         });
-        buffer.lock().unwrap().clear();
-        buffer
+        let lines = Rc::new(RefCell::new(Vec::new()));
+        WINDOW.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&lines)));
+        CaptureWindow { lines }
+    }
+
+    /// 一次捕获测试的窗口；存续期间本线程发出的本 crate 日志记入 [`Self::lines`]。
+    ///
+    /// 窗口只持有缓冲的所有权、不持有它的借用：捕获 logger 与投影跑在同一线程，
+    /// 每条记录只短暂借出一次。窗口若把借用占满整个投影，投影途中同一线程上的
+    /// 捕获 logger 就会撞上已借出的 `RefCell`。
+    pub(crate) struct CaptureWindow {
+        lines: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl CaptureWindow {
+        /// 窗口内捕获到的行，格式 `[LEVEL][target] 消息`。
+        pub(crate) fn lines(&self) -> Vec<String> {
+            self.lines.borrow().clone()
+        }
+    }
+
+    impl Drop for CaptureWindow {
+        fn drop(&mut self) {
+            // 关闭本线程窗口；TLS 已析构时无从清理，忽略即可。
+            let _ = WINDOW.try_with(|slot| *slot.borrow_mut() = None);
+        }
     }
 }
 
@@ -200,5 +237,45 @@ mod tests {
         assert_eq!(parse_level("verbose"), None);
         // EnvFilter 指令语法不支持：假装支持只会静默误解析。
         assert_eq!(parse_level("agent_maestro_lib=debug"), None);
+    }
+
+    /// 捕获窗口按线程隔离：另一线程开自己的窗口既不进本窗口，也清空不了它。
+    /// 这条把「窗口断言不可被并发测试弄空/弄脏」钉成可执行断言。
+    #[test]
+    fn capture_windows_are_isolated_per_thread() {
+        let window = capture::capture_window();
+        log::debug!("capture probe: main");
+        let other = std::thread::spawn(|| {
+            let window = capture::capture_window();
+            log::debug!("capture probe: spawned");
+            window.lines()
+        })
+        .join()
+        .unwrap();
+
+        let main = window.lines();
+        assert!(
+            main.iter()
+                .any(|line| line.ends_with("capture probe: main")),
+            "本线程窗口捕获本线程日志：{main:?}"
+        );
+        assert!(
+            !main
+                .iter()
+                .any(|line| line.ends_with("capture probe: spawned")),
+            "其它线程的日志不落进本窗口：{main:?}"
+        );
+        assert!(
+            other
+                .iter()
+                .any(|line| line.ends_with("capture probe: spawned")),
+            "另一线程的窗口捕获它自己的日志：{other:?}"
+        );
+        assert!(
+            !other
+                .iter()
+                .any(|line| line.ends_with("capture probe: main")),
+            "另一线程的窗口不受本线程影响：{other:?}"
+        );
     }
 }

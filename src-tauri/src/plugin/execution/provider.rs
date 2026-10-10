@@ -660,12 +660,12 @@ mod tests {
     }
 
     /// 非正值兜底（issue #111）：手工改出的 0 不写进 models.json，且刻意不记日志
-    /// （与本文件「无可用端点即跳过」那条会记警告的防御分支不同）。静默由捕获日志
+    /// （与本文件「无可用端点即跳过」那条会记警告的防御分支不同）。静默由捕获窗口
     /// 断言，且该断言不是空断言：让插件在跳过时记一条日志（临时改一下即可复现），
     /// 本测试随即失败。
     #[test]
     fn write_provider_skips_non_positive_model_limits_without_logging() {
-        let logs = crate::logging::capture::captured_logs();
+        let window = crate::logging::capture::capture_window();
         let root = tempfile::tempdir().unwrap();
         let providers = BTreeMap::from([(
             "zero-limit-gateway".to_owned(),
@@ -692,7 +692,7 @@ mod tests {
         assert!(model.get("contextWindow").is_none());
         assert!(model.get("maxTokens").is_none());
 
-        let logs = logs.lock().unwrap();
+        let logs = window.lines();
         // 两层断言：`[plugin pi log]` 只可能出自真实 pi 组件（本次投影里它一条都不该发），
         // 而本文件里唯一会写 provider 名的是「无可用端点」那条警告分支。
         assert!(
