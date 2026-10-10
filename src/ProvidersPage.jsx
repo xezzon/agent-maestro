@@ -189,14 +189,14 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
     {(provider.custom_header?.length ?? 0) > 0 && (
       // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
       <div className="provider-headers">
-        <Typography.Text type="secondary">Header</Typography.Text>
+        <Typography.Text>Header</Typography.Text>
         {provider.custom_header.map((header) => (
           <Tag key={header.name}>{header.name}</Tag>
         ))}
       </div>
     )}
     <Flex align="center" gap={8} className="provider-models-title">
-      <Typography.Title level={3} type="secondary" style={{ margin: 0 }}>
+      <Typography.Title level={3} style={{ margin: 0 }}>
         模型
       </Typography.Title>
       <Badge count={provider.models?.length ?? 0} showZero color={token.colorPrimary} />
