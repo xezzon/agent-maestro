@@ -476,4 +476,154 @@ mod tests {
             "GPT-4o"
         );
     }
+
+    /// 写出条目的完整键集：钉住「投影了什么」的同时也钉住「没投影什么」。
+    fn keys(value: &serde_json::Value) -> Vec<&str> {
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// token 上限与能力投影进 pi models[]（issue #111）：limit.context_window →
+    /// contextWindow、limit.max_output → maxTokens、capabilities.image_in →
+    /// input（text + image 两种模态）、capabilities.thinking → reasoning。
+    /// pi 无对应字段的 limit.max_input 与 capabilities.tool_use 不投影。
+    #[test]
+    fn write_provider_projects_model_limits_and_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                models: vec![
+                    ModelEntry {
+                        id: "claude-sonnet".to_owned(),
+                        display_name: Some("Sonnet".to_owned()),
+                        limit: ModelLimit {
+                            context_window: Some(200_000),
+                            max_input: Some(180_000),
+                            max_output: Some(8_192),
+                        },
+                        capabilities: vec![
+                            ModelCapability::ToolUse,
+                            ModelCapability::ImageIn,
+                            ModelCapability::Thinking,
+                        ],
+                    },
+                    ModelEntry {
+                        id: "claude-haiku".to_owned(),
+                        limit: ModelLimit {
+                            context_window: None,
+                            max_input: None,
+                            max_output: Some(4_096),
+                        },
+                        capabilities: vec![ModelCapability::Thinking],
+                        ..ModelEntry::default()
+                    },
+                ],
+                ..provider(Some("https://api.example.com/v1"), None)
+            },
+        )]);
+
+        let written = write_and_read(root.path(), &providers);
+
+        let models = &written["providers"]["gateway"]["models"];
+        assert_eq!(
+            keys(&models[0]),
+            vec![
+                "contextWindow",
+                "id",
+                "input",
+                "maxTokens",
+                "name",
+                "reasoning"
+            ],
+            "四项映射落盘、max_input 与 tool_use 不留痕：{}",
+            models[0]
+        );
+        assert_eq!(models[0]["contextWindow"], 200_000);
+        assert_eq!(models[0]["maxTokens"], 8_192);
+        assert_eq!(models[0]["input"], serde_json::json!(["text", "image"]));
+        assert_eq!(models[0]["reasoning"], true);
+        // 上限与能力各自独立：只有 thinking + max_output 的模型不多写 input。
+        assert_eq!(
+            keys(&models[1]),
+            vec!["id", "maxTokens", "reasoning"],
+            "{}",
+            models[1]
+        );
+    }
+
+    /// 未设置一律省略（issue #111）：不写 null / false / 空数组；缺
+    /// context_window 是合法状态——不发明默认值，也不告警。
+    #[test]
+    fn write_provider_omits_unset_model_limits_and_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                // 上限全未设置；能力只有 pi 无对应字段的 tool_use。
+                models: vec![ModelEntry {
+                    id: "gpt-4o".to_owned(),
+                    display_name: None,
+                    limit: ModelLimit::default(),
+                    capabilities: vec![ModelCapability::ToolUse],
+                }],
+                ..provider(Some("https://api.example.com/v1"), None)
+            },
+        )]);
+
+        let written = write_and_read(root.path(), &providers);
+
+        let model = &written["providers"]["gateway"]["models"][0];
+        assert_eq!(keys(model), vec!["id"], "未设置即省略：{model}");
+    }
+
+    /// 非正值兜底（issue #111）：手工改出的 0 不写进 models.json，且刻意不记日志
+    /// （与本文件「无可用端点即跳过」那条会记警告的防御分支不同）。静默由捕获日志
+    /// 断言，且该断言不是空断言：让插件在跳过时记一条日志（临时改一下即可复现），
+    /// 本测试随即失败。
+    #[test]
+    fn write_provider_skips_non_positive_model_limits_without_logging() {
+        let logs = crate::logging::capture::captured_logs();
+        let root = tempfile::tempdir().unwrap();
+        let providers = BTreeMap::from([(
+            "zero-limit-gateway".to_owned(),
+            Provider {
+                models: vec![ModelEntry {
+                    id: "gpt-4o".to_owned(),
+                    limit: ModelLimit {
+                        context_window: Some(0),
+                        max_input: Some(0),
+                        max_output: Some(0),
+                    },
+                    capabilities: vec![ModelCapability::ImageIn],
+                    ..ModelEntry::default()
+                }],
+                ..provider(Some("https://api.example.com/v1"), None)
+            },
+        )]);
+
+        let written = write_and_read(root.path(), &providers);
+
+        // 三项上限都是 0：全部跳过；能力不受影响，照常投影。
+        let model = &written["providers"]["zero-limit-gateway"]["models"][0];
+        assert_eq!(keys(model), vec!["id", "input"], "0 不投影：{model}");
+        assert!(model.get("contextWindow").is_none());
+        assert!(model.get("maxTokens").is_none());
+
+        let logs = logs.lock().unwrap();
+        // 两层断言：`[plugin pi log]` 只可能出自真实 pi 组件（本次投影里它一条都不该发），
+        // 而本文件里唯一会写 provider 名的是「无可用端点」那条警告分支。
+        assert!(
+            !logs.iter().any(|line| line.contains("[plugin pi log]")),
+            "非正值跳过刻意不记日志：{logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|line| line.contains("zero-limit-gateway")),
+            "本次投影不得出现该 Provider 的任何字样：{logs:?}"
+        );
+    }
 }
