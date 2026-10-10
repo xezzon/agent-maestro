@@ -664,6 +664,7 @@ mod tests {
                     models: vec![ModelEntry {
                         id: "old-model".to_owned(),
                         display_name: Option::None,
+                        ..ModelEntry::default()
                     }],
                     ..Provider::default()
                 },
@@ -683,6 +684,7 @@ mod tests {
                     models: vec![ModelEntry {
                         id: "new-model".to_owned(),
                         display_name: Option::None,
+                        ..ModelEntry::default()
                     }],
                     ..Provider::default()
                 },
@@ -1131,14 +1133,17 @@ mod tests {
             ModelEntry {
                 id: "accounts/fireworks/models/llama3.1".to_owned(),
                 display_name: Option::None,
+                ..ModelEntry::default()
             },
             ModelEntry {
                 id: "Z-model".to_owned(),
                 display_name: Option::Some("Z Model".to_owned()),
+                ..ModelEntry::default()
             },
             ModelEntry {
                 id: "gpt-4o".to_owned(),
                 display_name: Option::None,
+                ..ModelEntry::default()
             },
         ];
 
@@ -1172,6 +1177,7 @@ mod tests {
         let gpt_4o = || ModelEntry {
             id: "gpt-4o".to_owned(),
             display_name: Option::None,
+            ..ModelEntry::default()
         };
 
         store
@@ -1200,6 +1206,7 @@ mod tests {
                         ModelEntry {
                             id: "gpt-4o-mini".to_owned(),
                             display_name: Option::None,
+                            ..ModelEntry::default()
                         },
                     ],
                     ..Provider::default()
@@ -1217,6 +1224,7 @@ mod tests {
                 ModelEntry {
                     id: "gpt-4o-mini".to_owned(),
                     display_name: Option::None,
+                    ..ModelEntry::default()
                 }
             ]
         );
@@ -1241,14 +1249,17 @@ mod tests {
                         ModelEntry {
                             id: "gpt-4o".to_owned(),
                             display_name: Option::None,
+                            ..ModelEntry::default()
                         },
                         ModelEntry {
                             id: "GPT-4O".to_owned(),
                             display_name: Option::None,
+                            ..ModelEntry::default()
                         },
                         ModelEntry {
                             id: String::new(),
                             display_name: Option::None,
+                            ..ModelEntry::default()
                         },
                     ],
                     ..Provider::default()
@@ -1806,6 +1817,93 @@ mod tests {
         );
         assert_eq!(reopened.get().unwrap().variables["HOST"], "api.example.com");
         assert_eq!(reopened.get().unwrap().variables["EXTRA"], "1");
+    }
+
+    /// 新字段随记录落盘并原样读回：custom_header / limit / capabilities 往返一致。
+    #[test]
+    fn provider_with_custom_header_limit_and_capabilities_round_trips_through_disk() {
+        use crate::provider::{ModelCapability, ModelLimit};
+
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        let provider = Provider {
+            base_url: BTreeMap::from([(
+                Protocol::OpenaiCompletions,
+                "https://api.example.com/v1".to_owned(),
+            )]),
+            custom_header: BTreeMap::from([("X-Gateway-Key".to_owned(), "gw-plain".to_owned())]),
+            models: vec![ModelEntry {
+                id: "gpt-4o".to_owned(),
+                display_name: Some("GPT-4o".to_owned()),
+                limit: ModelLimit {
+                    context_window: Some(128_000),
+                    max_input: None,
+                    max_output: Some(16_384),
+                },
+                capabilities: vec![ModelCapability::ToolUse, ModelCapability::ImageIn],
+            }],
+            ..Provider::default()
+        };
+
+        store.create_provider("gateway", provider.clone()).unwrap();
+
+        let reopened = Store::new();
+        assert_eq!(
+            reopened.get().unwrap().providers["gateway"],
+            provider,
+            "含新字段的 Provider 落盘后原样读回"
+        );
+    }
+
+    /// 旧配置文件（无 custom_header / limit / capabilities）：读入即空映射、
+    /// 空 limit、空能力集合；随后任一次落盘补齐固定形状。
+    #[test]
+    fn legacy_config_without_new_fields_reads_as_unset_and_writes_fixed_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let path = MaestroPaths::get().config_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "providers": {
+                    "ollama": {
+                        "base_url": {"openai-completions": "http://localhost:11434/v1"},
+                        "models": [{"id": "deepseek-chat", "display_name": "DeepSeek Chat"}]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut store = Store::new();
+        let provider = &store.get().unwrap().providers["ollama"];
+        assert!(provider.custom_header.is_empty(), "旧配置读作空映射");
+        assert_eq!(
+            provider.models[0].limit,
+            crate::provider::ModelLimit::default()
+        );
+        assert!(provider.models[0].capabilities.is_empty());
+
+        // 一次无关的落盘：新字段补齐固定形状，原数据一字不丢。
+        let mut variables = store.get().unwrap().variables.clone();
+        variables.insert("EXTRA".to_owned(), "1".to_owned());
+        store.set_variables(variables).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let provider = &written["providers"]["ollama"];
+        assert_eq!(
+            provider["custom_header"],
+            serde_json::json!({}),
+            "{written}"
+        );
+        let model = &provider["models"][0];
+        assert_eq!(model["id"], "deepseek-chat");
+        assert_eq!(model["limit"], serde_json::json!({}), "{written}");
+        assert_eq!(model["capabilities"], serde_json::json!([]), "{written}");
     }
 
     #[test]
