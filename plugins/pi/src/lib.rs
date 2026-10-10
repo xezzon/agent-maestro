@@ -11,12 +11,15 @@
 use std::fs;
 use std::path::Path;
 
-use maestro_plugin_sdk::{Endpoint, Guest, Level, Model, Protocol, Provider, export, log};
+use maestro_plugin_sdk::{
+    CustomHeader, Endpoint, Guest, Level, Model, Protocol, Provider, export, log,
+};
 
 /// pi 的 models.json 中 provider 条目的字段名。
 const KEY_API: &str = "api";
 const KEY_API_KEY: &str = "apiKey";
 const KEY_BASE_URL: &str = "baseUrl";
+const KEY_HEADERS: &str = "headers";
 const KEY_MODELS: &str = "models";
 const KEY_MODEL_ID: &str = "id";
 const KEY_MODEL_NAME: &str = "name";
@@ -53,7 +56,14 @@ fn write_models_json(providers: &[Provider]) -> Result<(), String> {
         entry.insert(KEY_API.to_owned(), protocol_api(&endpoint.protocol).into());
         entry.insert(KEY_BASE_URL.to_owned(), endpoint.base_url.as_str().into());
         if let Some(api_key) = &provider.api_key {
-            entry.insert(KEY_API_KEY.to_owned(), escape_api_key(api_key).into());
+            entry.insert(KEY_API_KEY.to_owned(), escape_config_value(api_key).into());
+        }
+        // 没有自定义 header 时省略整段，不写空对象。
+        if !provider.custom_header.is_empty() {
+            entry.insert(
+                KEY_HEADERS.to_owned(),
+                headers_json(&provider.custom_header),
+            );
         }
         entry.insert(KEY_MODELS.to_owned(), models_json(&provider.models));
         root.insert(provider.slug.clone(), entry.into());
@@ -104,14 +114,33 @@ fn protocol_api(protocol: &Protocol) -> &'static str {
     }
 }
 
-/// pi 的值解析规则：以 `$` 或 `!` 开头的字面值需要转义为 `$$` / `$!`。
-/// 无凭证时宿主传 None，本地网关模型在 pi 中可见，用户可 /login 兜底。
-fn escape_api_key(api_key: &str) -> String {
-    if api_key.starts_with('$') || api_key.starts_with('!') {
-        format!("${api_key}")
+/// 把宿主插值后的值转义成 pi 眼中的字面量（`parseConfigValueTemplate`）：
+/// `$` 在值的**任意位置**都特殊，每个 `$` 写成 `$$`；值以 `!` 开头时 pi 会
+/// 当作 shell 命令，故再补一个 `$` 前缀（`$!` 表示字面前导 `!`）。
+/// `api_key` 与 header 值共用。无凭证时宿主传 None，本地网关模型在 pi 中可见，
+/// 用户可 /login 兜底。
+fn escape_config_value(value: &str) -> String {
+    let escaped = value.replace('$', "$$");
+    if value.starts_with('!') {
+        format!("${escaped}")
     } else {
-        api_key.to_owned()
+        escaped
     }
+}
+
+/// 自定义 header：键原样（标识符，不参与插值），值按与 `api_key` 相同的规则转义。
+/// 宿主已按名排序后交给插件，此处不再重排。
+fn headers_json(headers: &[CustomHeader]) -> serde_json::Value {
+    headers
+        .iter()
+        .map(|header| {
+            (
+                header.name.clone(),
+                escape_config_value(&header.value).into(),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into()
 }
 
 /// 模型列表：display-name 有值且非空才写 name 字段，否则省略。
