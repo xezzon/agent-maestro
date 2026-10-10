@@ -435,8 +435,7 @@ mod tests {
         );
     }
 
-    /// 新字段随合同交给插件时，真实内置插件的既有投影不受扰动
-    /// （新字段的投影落点在 #110/#111）。
+    /// 新字段随合同交给插件时，真实内置插件的既有投影不受扰动。
     #[test]
     fn write_provider_keeps_existing_projection_with_new_fields_present() {
         let root = tempfile::tempdir().unwrap();
