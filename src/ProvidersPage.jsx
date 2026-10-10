@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
+  Badge,
   Button,
   Card,
   Checkbox,
@@ -39,6 +40,7 @@ import { applyProviders, listPlugins } from "./api/plugins";
 import { listVariables } from "./api/variables";
 import VariablesCard from "./components/VariablesCard";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { theme } from "antd";
 
 /** token 上限的预设快捷值：K/M 按十进制（128K = 128000），留空即「未设置」。 */
 const LIMIT_PRESETS = [
@@ -137,6 +139,8 @@ function ProviderCard({ provider, onReload }) {
  */
 function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
   const [deleting, setDeleting] = useState(false);
+  const { useToken } = theme;
+  const { token } = useToken();
 
   async function handleDelete() {
     setDeleting(true);
@@ -181,8 +185,22 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
       <span>
         API Key <Tag>{provider.api_key_set ? "已设置" : "未设置"}</Tag>
       </span>
-      <span>模型数：{provider.models?.length ?? 0}</span>
     </div>
+    {(provider.custom_header?.length ?? 0) > 0 && (
+      // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
+      <div className="provider-headers">
+        <Typography.Text type="secondary">Header</Typography.Text>
+        {provider.custom_header.map((header) => (
+          <Tag key={header.name}>{header.name}</Tag>
+        ))}
+      </div>
+    )}
+    <Flex align="center" gap={8} className="provider-models-title">
+      <Typography.Title level={3} type="secondary" style={{ margin: 0 }}>
+        模型
+      </Typography.Title>
+      <Badge count={provider.models?.length ?? 0} showZero color={token.colorPrimary} />
+    </Flex>
     {(provider.models?.length ?? 0) > 0 && (
       <ul className="provider-models">
         {provider.models.map((model, index) => (
@@ -210,15 +228,6 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
           </li>
         ))}
       </ul>
-    )}
-    {(provider.custom_header?.length ?? 0) > 0 && (
-      // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
-      <div className="provider-headers">
-        <Typography.Text type="secondary">Header</Typography.Text>
-        {provider.custom_header.map((header) => (
-          <Tag key={header.name}>{header.name}</Tag>
-        ))}
-      </div>
     )}
     <div className="card-actions">
       <Button disabled={deleting} onClick={onEdit}>
