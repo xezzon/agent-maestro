@@ -21,7 +21,7 @@
 | Model `limit.max_input`、`capabilities.tool_use` | —— | pi 无对应字段，**不投影**。 |
 | 保留字段 `cost.*` / `modalities.*` / `options` | —— | 本期不实现，不投影（pi 的对应物是 `cost`、`input`、`samplingParams`）。 |
 
-**未设置一律省略**，绝不写 `null` / `false` / 空数组：pi 的 schema 里这些字段都是 optional，且 `contextWindow` / `maxTokens` 是 `exclusiveMinimum: 0` 的数字。若某模型的 `limit` 出现非正值（只可能来自手工改过的 `config.json`），跳过该值并用 `log(Warning, ...)` 提示，不把非法值写进 pi。
+**未设置一律省略**，绝不写 `null` / `false` / 空数组：pi 的 schema 里这些字段都是 optional，且 `contextWindow` / `maxTokens` 是 `exclusiveMinimum: 0` 的数字。若某模型的 `limit` 出现非正值（只可能来自手工改过的 `config.json`），**静默跳过**该值——不写进 pi，也不记日志（与本插件「无可用端点即跳过」那条会记警告的防御分支刻意不同）。
 
 `context_window` 与 `max_output` 都未设置时不写相应键，pi 会据此降级（`contextWindow <= 0` 时关闭上下文压缩、不做裁剪）——Maestro 不编造默认值。这类「缺值」不视为错误，插件不发警告。
 

@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use maestro_plugin_sdk::{
-    CustomHeader, Endpoint, Guest, Level, Model, Protocol, Provider, export, log,
+    CustomHeader, Endpoint, Guest, Level, Model, ModelCapability, Protocol, Provider, export, log,
 };
 
 /// pi 的 models.json 中 provider 条目的字段名。
@@ -21,8 +21,12 @@ const KEY_API_KEY: &str = "apiKey";
 const KEY_BASE_URL: &str = "baseUrl";
 const KEY_HEADERS: &str = "headers";
 const KEY_MODELS: &str = "models";
+const KEY_MODEL_CONTEXT_WINDOW: &str = "contextWindow";
 const KEY_MODEL_ID: &str = "id";
+const KEY_MODEL_INPUT: &str = "input";
+const KEY_MODEL_MAX_TOKENS: &str = "maxTokens";
 const KEY_MODEL_NAME: &str = "name";
+const KEY_MODEL_REASONING: &str = "reasoning";
 const KEY_PROVIDERS: &str = "providers";
 
 struct PiPlugin;
@@ -144,6 +148,14 @@ fn headers_json(headers: &[CustomHeader]) -> serde_json::Value {
 }
 
 /// 模型列表：display-name 有值且非空才写 name 字段，否则省略。
+///
+/// token 上限与能力（issue #111）同样有值才写：未设置一律省略，绝不写
+/// null / false / 空数组——pi 的 contextWindow / maxTokens 是
+/// `exclusiveMinimum: 0` 的数字，0 会被 pi 判为非法。非正值只可能来自手工
+/// 改过的 config.json，跳过时刻意不记日志（与本文件「无可用端点即跳过」那条
+/// 会记警告的防御分支不同）。pi 无对应字段的 limit.max_input 与
+/// capabilities.tool_use 不投影；maestro 的 header 只落在 provider 级，
+/// pi 的 model 级 headers 不使用。
 fn models_json(models: &[Model]) -> serde_json::Value {
     models
         .iter()
@@ -155,9 +167,31 @@ fn models_json(models: &[Model]) -> serde_json::Value {
             {
                 entry.insert(KEY_MODEL_NAME.to_owned(), name.as_str().into());
             }
+            if let Some(context_window) = positive(model.limit.context_window) {
+                entry.insert(KEY_MODEL_CONTEXT_WINDOW.to_owned(), context_window.into());
+            }
+            if let Some(max_output) = positive(model.limit.max_output) {
+                entry.insert(KEY_MODEL_MAX_TOKENS.to_owned(), max_output.into());
+            }
+            // 能收图即两种模态都写：pi 的 input 是完整列表，没有「只收图不收字」的模型。
+            if model.capabilities.contains(&ModelCapability::ImageIn) {
+                entry.insert(
+                    KEY_MODEL_INPUT.to_owned(),
+                    serde_json::json!(["text", "image"]),
+                );
+            }
+            if model.capabilities.contains(&ModelCapability::Thinking) {
+                entry.insert(KEY_MODEL_REASONING.to_owned(), true.into());
+            }
             entry.into()
         })
         .collect()
+}
+
+/// 声明式上限只在为正时才投影：0 是唯一可能的非正取值（`u32` 承载，
+/// 负值在记录层即被类型拒绝），跳过且不记日志。
+fn positive(limit: Option<u32>) -> Option<u32> {
+    limit.filter(|limit| *limit > 0)
 }
 
 export!(PiPlugin);
