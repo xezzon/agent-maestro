@@ -6,7 +6,8 @@
 //!
 //! 本模块是 ADR 0014 的换库接缝：`interpolate_value` 是唯一接触 subst 的纯函数，
 //! 测试钉住其语义（升级或更换库改变行为即红，换库成本因此可控）；逐字段的
-//! 结构知识在 `Provider::interpolate`，跨 Provider 的编排在 `interpolate_providers`。
+//! 结构知识在各自的配置类型（`Provider::interpolate`／`ModelEntry::interpolate`），
+//! 跨 Provider 的编排在 `interpolate_providers`。
 
 use std::collections::BTreeMap;
 
@@ -20,7 +21,8 @@ pub(crate) fn interpolate_value(template: &str, variables: &Variables) -> Result
 
 /// 对传入的每个 Provider 插值，返回替换后的字面值副本。
 ///
-/// 作用域＝Provider 中除 `api_key` 与模型 `id` 外的字符串值（ADR 0015）。
+/// 作用域＝Provider 中除 `api_key`、模型 `id` 与 header **键**外的字符串值
+/// （ADR 0015；header 的值是配置值、参与插值）。
 /// 是否参与投影由调用方决定：本函数不感知 `enabled`，对传入的每一项都插值；
 /// 任一字段失败即整体失败，原因含 slug + 字段名 + 库报错，不含值与密钥。
 pub fn interpolate_providers(

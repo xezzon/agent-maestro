@@ -11,15 +11,22 @@
 use std::fs;
 use std::path::Path;
 
-use maestro_plugin_sdk::{Endpoint, Guest, Level, Model, Protocol, Provider, export, log};
+use maestro_plugin_sdk::{
+    CustomHeader, Endpoint, Guest, Level, Model, ModelCapability, Protocol, Provider, export, log,
+};
 
 /// pi 的 models.json 中 provider 条目的字段名。
 const KEY_API: &str = "api";
 const KEY_API_KEY: &str = "apiKey";
 const KEY_BASE_URL: &str = "baseUrl";
+const KEY_HEADERS: &str = "headers";
 const KEY_MODELS: &str = "models";
+const KEY_MODEL_CONTEXT_WINDOW: &str = "contextWindow";
 const KEY_MODEL_ID: &str = "id";
+const KEY_MODEL_INPUT: &str = "input";
+const KEY_MODEL_MAX_TOKENS: &str = "maxTokens";
 const KEY_MODEL_NAME: &str = "name";
+const KEY_MODEL_REASONING: &str = "reasoning";
 const KEY_PROVIDERS: &str = "providers";
 
 struct PiPlugin;
@@ -53,7 +60,14 @@ fn write_models_json(providers: &[Provider]) -> Result<(), String> {
         entry.insert(KEY_API.to_owned(), protocol_api(&endpoint.protocol).into());
         entry.insert(KEY_BASE_URL.to_owned(), endpoint.base_url.as_str().into());
         if let Some(api_key) = &provider.api_key {
-            entry.insert(KEY_API_KEY.to_owned(), escape_api_key(api_key).into());
+            entry.insert(KEY_API_KEY.to_owned(), escape_config_value(api_key).into());
+        }
+        // 没有自定义 header 时省略整段，不写空对象。
+        if !provider.custom_header.is_empty() {
+            entry.insert(
+                KEY_HEADERS.to_owned(),
+                headers_json(&provider.custom_header),
+            );
         }
         entry.insert(KEY_MODELS.to_owned(), models_json(&provider.models));
         root.insert(provider.slug.clone(), entry.into());
@@ -104,17 +118,44 @@ fn protocol_api(protocol: &Protocol) -> &'static str {
     }
 }
 
-/// pi 的值解析规则：以 `$` 或 `!` 开头的字面值需要转义为 `$$` / `$!`。
-/// 无凭证时宿主传 None，本地网关模型在 pi 中可见，用户可 /login 兜底。
-fn escape_api_key(api_key: &str) -> String {
-    if api_key.starts_with('$') || api_key.starts_with('!') {
-        format!("${api_key}")
+/// 把宿主插值后的值转义成 pi 眼中的字面量（`parseConfigValueTemplate`）：
+/// `$` 在值的**任意位置**都特殊，每个 `$` 写成 `$$`；值以 `!` 开头时 pi 会
+/// 当作 shell 命令，故再补一个 `$` 前缀（`$!` 表示字面前导 `!`）。
+/// `api_key` 与 header 值共用。无凭证时宿主传 None，本地网关模型在 pi 中可见，
+/// 用户可 /login 兜底。
+fn escape_config_value(value: &str) -> String {
+    let escaped = value.replace('$', "$$");
+    if value.starts_with('!') {
+        format!("${escaped}")
     } else {
-        api_key.to_owned()
+        escaped
     }
 }
 
+/// 自定义 header：键原样（标识符，不参与插值），值按与 `api_key` 相同的规则转义。
+/// 宿主已按名排序后交给插件，此处不再重排。
+fn headers_json(headers: &[CustomHeader]) -> serde_json::Value {
+    headers
+        .iter()
+        .map(|header| {
+            (
+                header.name.clone(),
+                escape_config_value(&header.value).into(),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into()
+}
+
 /// 模型列表：display-name 有值且非空才写 name 字段，否则省略。
+///
+/// token 上限与能力（issue #111）同样有值才写：未设置一律省略，绝不写
+/// null / false / 空数组——pi 的 contextWindow / maxTokens 是
+/// `exclusiveMinimum: 0` 的数字，0 会被 pi 判为非法。非正值只可能来自手工
+/// 改过的 config.json，跳过时刻意不记日志（与本文件「无可用端点即跳过」那条
+/// 会记警告的防御分支不同）。pi 无对应字段的 limit.max_input 与
+/// capabilities.tool_use 不投影；maestro 的 header 只落在 provider 级，
+/// pi 的 model 级 headers 不使用。
 fn models_json(models: &[Model]) -> serde_json::Value {
     models
         .iter()
@@ -126,9 +167,31 @@ fn models_json(models: &[Model]) -> serde_json::Value {
             {
                 entry.insert(KEY_MODEL_NAME.to_owned(), name.as_str().into());
             }
+            if let Some(context_window) = positive(model.limit.context_window) {
+                entry.insert(KEY_MODEL_CONTEXT_WINDOW.to_owned(), context_window.into());
+            }
+            if let Some(max_output) = positive(model.limit.max_output) {
+                entry.insert(KEY_MODEL_MAX_TOKENS.to_owned(), max_output.into());
+            }
+            // 能收图即两种模态都写：pi 的 input 是完整列表，没有「只收图不收字」的模型。
+            if model.capabilities.contains(&ModelCapability::ImageIn) {
+                entry.insert(
+                    KEY_MODEL_INPUT.to_owned(),
+                    serde_json::json!(["text", "image"]),
+                );
+            }
+            if model.capabilities.contains(&ModelCapability::Thinking) {
+                entry.insert(KEY_MODEL_REASONING.to_owned(), true.into());
+            }
             entry.into()
         })
         .collect()
+}
+
+/// 声明式上限只在为正时才投影：0 是唯一可能的非正取值（`u32` 承载，
+/// 负值在记录层即被类型拒绝），跳过且不记日志。
+fn positive(limit: Option<u32>) -> Option<u32> {
+    limit.filter(|limit| *limit > 0)
 }
 
 export!(PiPlugin);

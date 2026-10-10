@@ -32,13 +32,93 @@ impl Display for Protocol {
 }
 
 /// Provider 下跨协议共享的一个模型条目。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ModelEntry {
     #[serde(default)]
     pub(crate) id: String,
     /// 无显示名时为 `None`，序列化为 `null`，界面回退显示 id。
     #[serde(default)]
     pub(crate) display_name: Option<String>,
+    /// 声明式的 token 能力上限：**恒落盘**（缺省即 `{}`），子项未设置即不落盘。
+    /// 只作声明：Maestro 不据此推断、不裁剪请求、不做跨字段一致性校验。
+    #[serde(default)]
+    pub(crate) limit: ModelLimit,
+    /// 能力集合：**恒落盘**（缺省即 `[]`），按枚举声明序排序并去重。
+    /// 读入与落盘都归一，手工改过的配置文件读回同样是稳定形状。
+    #[serde(
+        default,
+        serialize_with = "serialize_capabilities",
+        deserialize_with = "deserialize_capabilities"
+    )]
+    pub(crate) capabilities: Vec<ModelCapability>,
+}
+
+impl ModelEntry {
+    /// 插值（ADR 0015）：作用域＝本条目参与插值的字符串值，当前只有 `display_name`。
+    /// 模型 ID 是标识符、原样保留；`limit` 与 `capabilities` 非字符串值、原样透传。
+    /// 返回的字段名以本条目为根（`display_name`），所处的数组下标由调用方补齐。
+    pub(crate) fn interpolate(
+        &self,
+        variables: &BTreeMap<String, String>,
+    ) -> Result<ModelEntry, FieldError> {
+        let display_name = self
+            .display_name
+            .as_deref()
+            .map(|name| interpolate_value(name, variables))
+            .transpose()
+            .map_err(|reason| ("display_name".to_owned(), reason))?;
+        Ok(ModelEntry {
+            id: self.id.clone(),
+            display_name,
+            limit: self.limit,
+            capabilities: self.capabilities.clone(),
+        })
+    }
+}
+
+/// 模型的声明式 token 能力上限；三项互相独立、可缺省，未设置即不落盘。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ModelLimit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_input: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output: Option<u32>,
+}
+
+/// 模型能力：声明顺序即落盘排序（`tool_use` → `image_in` → `thinking`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ModelCapability {
+    ToolUse,
+    ImageIn,
+    Thinking,
+}
+
+/// 落盘前归一：按枚举声明序排序并去重（集合语义）。
+fn serialize_capabilities<S>(
+    capabilities: &[ModelCapability],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut normalized = capabilities.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized.serialize(serializer)
+}
+
+/// 读入时归一：手工写进配置文件的顺序/重复同样被规整。
+fn deserialize_capabilities<'de, D>(deserializer: D) -> Result<Vec<ModelCapability>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut capabilities = Vec::<ModelCapability>::deserialize(deserializer)?;
+    capabilities.sort_unstable();
+    capabilities.dedup();
+    Ok(capabilities)
 }
 
 /// 一条 LLM API 接入；以 slug 为 key 存于 providers 之下（见 CONTEXT.md）。
@@ -59,6 +139,11 @@ pub(crate) struct Provider {
     /// ADR 0002 已修订为推迟采纳）。
     #[serde(default)]
     pub(crate) api_key: String,
+    /// 跨协议、跨模型共享的自定义 HTTP header：**恒落盘**（缺省即 `{}`）。
+    /// 键是标识符（与 api_key、模型 ID 同级，不参与插值）；值是配置值
+    /// （参与宿主插值），且**可能含凭证**——Debug 只渲染键名，见下方手工 `Debug`。
+    #[serde(default)]
+    pub(crate) custom_header: BTreeMap<String, String>,
     /// 保序数组：模型 ID 不做字符集限制，且同一 Provider 内不重复（大小写敏感）。
     #[serde(default)]
     pub(crate) models: Vec<ModelEntry>,
@@ -80,8 +165,19 @@ impl Default for Provider {
             base_url: Endpoints::default(),
             selected_protocol: None,
             api_key: String::new(),
+            custom_header: BTreeMap::new(),
             models: Vec::new(),
         }
+    }
+}
+
+/// Debug 视图：自定义 header 只渲染**键名**，绝不渲染任何值——值可能含凭证
+/// （ADR 0008：凭证绝不落盘进日志）。
+struct HeaderKeyNames<'a>(&'a BTreeMap<String, String>);
+
+impl Debug for HeaderKeyNames<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.keys()).finish()
     }
 }
 
@@ -102,6 +198,7 @@ impl Debug for Provider {
                     "<set>"
                 },
             )
+            .field("custom_header", &HeaderKeyNames(&self.custom_header))
             .field("models", &self.models)
             .finish()
     }
@@ -115,13 +212,14 @@ impl Provider {
     /// 替换为变量实际值，返回字面值副本；失败返回（字段名, 库报错）。
     ///
     /// 占位符语法与转义由 `crate::interpolate` 的纯函数执行（ADR 0014 换库哨兵）；
-    /// 本方法只负责收集自身的字符串值。
+    /// 本方法负责收集自身的字符串值，`models` 的字符串值交由
+    /// [`ModelEntry::interpolate`] 逐条插值、本方法只补数组下标路径。
     ///
-    /// 作用域＝除 `api_key` 与模型 `id` 外的一切字符串值（ADR 0015）。端点表按
-    /// 协议遍历，新增协议自动纳入插值；不再有「新增字符串字段即编译失败」的哨兵，
+    /// 作用域＝除 `api_key`、模型 `id` 与 header **键**外的一切字符串值（ADR 0015）。
+    /// 端点表按协议遍历，新增协议自动纳入插值；不再有「新增字符串字段即编译失败」的哨兵，
     /// 但新增协议仍须补 `to_wit_protocol` 的穷举 match，否则插件侧收不到该端点。
     /// `enabled` 与 `selected_protocol` 是状态/枚举而非字符串值，原样透传、
-    /// 不参与插值。
+    /// 不参与插值；`limit` 是数字、`capabilities` 是枚举，同样原样透传。
     pub(crate) fn interpolate(
         &self,
         variables: &BTreeMap<String, String>,
@@ -134,20 +232,20 @@ impl Provider {
         }
         // api_key 原样保留，不参与插值。
         let api_key = self.api_key.clone();
+        // header 的值参与插值；键是标识符（同 api_key、模型 ID），原样保留。
+        let mut custom_header = BTreeMap::new();
+        for (name, value) in &self.custom_header {
+            let field = format!("custom_header.{name}");
+            let value = interpolate_value(value, variables).map_err(|reason| (field, reason))?;
+            custom_header.insert(name.clone(), value);
+        }
         let mut models = Vec::with_capacity(self.models.len());
         for (index, model) in self.models.iter().enumerate() {
-            let field = format!("models[{index}].display_name");
-            let display_name = model
-                .display_name
-                .as_deref()
-                .map(|name| interpolate_value(name, variables))
-                .transpose()
-                .map_err(|reason| (field, reason))?;
-            // 模型 ID 是标识符：原样保留，不参与插值。
-            models.push(ModelEntry {
-                id: model.id.clone(),
-                display_name,
-            });
+            models.push(
+                model
+                    .interpolate(variables)
+                    .map_err(|(field, reason)| (format!("models[{index}].{field}"), reason))?,
+            );
         }
         Ok(Provider {
             // enabled 是状态而非配置值：原样透传，不参与插值。
@@ -156,6 +254,7 @@ impl Provider {
             // selected_protocol 是枚举选择而非字符串值：原样透传，不参与插值。
             selected_protocol: self.selected_protocol,
             api_key,
+            custom_header,
             models,
         })
     }
@@ -235,11 +334,15 @@ mod tests {
         let entry = ModelEntry {
             id: "deepseek-chat".to_owned(),
             display_name: None,
+            ..ModelEntry::default()
         };
 
         let text = serde_json::to_string(&entry).unwrap();
 
-        assert_eq!(text, r#"{"id":"deepseek-chat","display_name":null}"#);
+        assert_eq!(
+            text,
+            r#"{"id":"deepseek-chat","display_name":null,"limit":{},"capabilities":[]}"#
+        );
         let parsed: ModelEntry = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed, entry);
     }
@@ -251,10 +354,12 @@ mod tests {
                 ModelEntry {
                     id: "z-model".to_owned(),
                     display_name: None,
+                    ..ModelEntry::default()
                 },
                 ModelEntry {
                     id: "a-model".to_owned(),
                     display_name: Some("A Model".to_owned()),
+                    ..ModelEntry::default()
                 },
             ],
             ..Provider::default()
@@ -283,9 +388,20 @@ mod tests {
                 ),
             ]),
             api_key: "sk-test".to_owned(),
+            custom_header: BTreeMap::from([
+                ("X-Gateway-Key".to_owned(), "gw-plain".to_owned()),
+                ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+            ]),
             models: vec![ModelEntry {
                 id: "gpt-4o".to_owned(),
                 display_name: Some("GPT-4o".to_owned()),
+                limit: ModelLimit {
+                    context_window: Some(128_000),
+                    max_input: None,
+                    max_output: Some(16_384),
+                },
+                // 已归一（枚举序、去重）的集合：round-trip 后逐字节相同。
+                capabilities: vec![ModelCapability::ToolUse, ModelCapability::ImageIn],
             }],
         };
 
@@ -393,8 +509,8 @@ mod tests {
             .collect()
     }
 
-    /// 插值（`Provider::interpolate`）输出全部字面值副本：除模型 ID 与 api_key
-    /// （原样保留）外逐字段替换，原值不动。
+    /// 插值（`Provider::interpolate`）输出全部字面值副本：除模型 ID、api_key 与
+    /// header 键（原样保留）外逐字段替换，原值不动。
     #[test]
     fn interpolate_replaces_strings_field_by_field_and_keeps_the_original() {
         let provider = Provider {
@@ -405,14 +521,26 @@ mod tests {
             )]),
             selected_protocol: Some(Protocol::OpenaiCompletions),
             api_key: "${KEY}".to_owned(),
+            // header 的值参与插值；键里的占位符是标识符，原样保留。
+            custom_header: BTreeMap::from([
+                ("X-Gateway-Key".to_owned(), "${KEY}".to_owned()),
+                ("${KEY}".to_owned(), "literal".to_owned()),
+            ]),
             models: vec![
                 ModelEntry {
                     id: "${MODEL}".to_owned(),
                     display_name: Some("Model ${MODEL}".to_owned()),
+                    limit: ModelLimit {
+                        context_window: Some(200_000),
+                        max_input: None,
+                        max_output: None,
+                    },
+                    capabilities: vec![ModelCapability::Thinking],
                 },
                 ModelEntry {
                     id: "plain-id".to_owned(),
                     display_name: None,
+                    ..ModelEntry::default()
                 },
             ],
         };
@@ -438,12 +566,33 @@ mod tests {
         );
         assert_eq!(projected.api_key, "${KEY}", "api_key 原样投影、不参与插值");
         assert_eq!(
+            projected.custom_header["X-Gateway-Key"], "sk-x",
+            "header 值是配置值，参与插值"
+        );
+        assert_eq!(
+            projected.custom_header["${KEY}"], "literal",
+            "header 键是标识符，不参与插值"
+        );
+        assert_eq!(
             projected.models[0].id, "${MODEL}",
             "模型 ID 是标识符，原样投影、不参与插值"
         );
         assert_eq!(
             projected.models[0].display_name.as_deref(),
             Some("Model gpt-4o")
+        );
+        assert_eq!(
+            projected.models[0].limit,
+            ModelLimit {
+                context_window: Some(200_000),
+                ..ModelLimit::default()
+            },
+            "limit 是数字，原样投影、不参与插值"
+        );
+        assert_eq!(
+            projected.models[0].capabilities,
+            vec![ModelCapability::Thinking],
+            "capabilities 是枚举，原样投影、不参与插值"
         );
         assert_eq!(projected.models[1].id, "plain-id");
         assert_eq!(projected.models[1].display_name, None);
@@ -466,5 +615,200 @@ mod tests {
 
         assert_eq!(field, "base_url.openai-completions");
         assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
+    }
+
+    /// custom_header 是记录的一部分且**恒落盘**：未设置时写出空映射，
+    /// 旧配置（无该字段）读入即空映射。
+    #[test]
+    fn custom_header_is_always_written_and_legacy_files_read_empty() {
+        let text = serde_json::to_string(&Provider::default()).unwrap();
+        assert!(
+            text.contains(r#""custom_header":{}"#),
+            "未设置时仍写出空映射：{text}"
+        );
+
+        let legacy: Provider = serde_json::from_str(r#"{"api_key":"sk-legacy"}"#).unwrap();
+        assert_eq!(legacy.custom_header, BTreeMap::new(), "旧配置读作空映射");
+        assert_eq!(legacy.api_key, "sk-legacy");
+    }
+
+    /// header 名按 BTreeMap 键序落盘（映射本无序，排序保证产物确定）。
+    #[test]
+    fn custom_header_entries_round_trip_sorted_by_name() {
+        let provider = Provider {
+            custom_header: BTreeMap::from([
+                ("X-Zeta".to_owned(), "z".to_owned()),
+                ("X-Alpha".to_owned(), "a".to_owned()),
+            ]),
+            ..Provider::default()
+        };
+
+        let text = serde_json::to_string(&provider).unwrap();
+        let alpha = text.find("X-Alpha").unwrap();
+        let zeta = text.find("X-Zeta").unwrap();
+        assert!(alpha < zeta, "键序稳定：{text}");
+
+        let parsed: Provider = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, provider);
+    }
+
+    /// L1 红线（ADR 0008）：Debug 只渲染 header 键名，绝不携带任何值。
+    #[test]
+    fn debug_output_never_contains_custom_header_values() {
+        let provider = Provider {
+            custom_header: BTreeMap::from([(
+                "X-Gateway-Key".to_owned(),
+                "gw-secret-canary-4d21".to_owned(),
+            )]),
+            ..Provider::default()
+        };
+
+        let rendered = format!("{provider:?}");
+
+        assert!(
+            !rendered.contains("gw-secret-canary-4d21"),
+            "Debug 输出不得包含 header 值：{rendered}"
+        );
+        assert!(
+            rendered.contains("X-Gateway-Key"),
+            "只保留键名这一排障信息：{rendered}"
+        );
+    }
+
+    /// header 插值失败：字段名用键名（标识符），不携带值。
+    #[test]
+    fn interpolate_failure_for_header_reports_key_only() {
+        let provider = Provider {
+            custom_header: BTreeMap::from([(
+                "X-Gateway-Key".to_owned(),
+                "${UNDEFINED_VAR}".to_owned(),
+            )]),
+            ..Provider::default()
+        };
+
+        let (field, reason) = provider.interpolate(&vars(&[])).unwrap_err();
+
+        assert_eq!(field, "custom_header.X-Gateway-Key");
+        assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
+    }
+
+    /// 模型 display_name 插值失败：字段名带数组下标（条目的字段名以自身为根，
+    /// 下标路径由 `Provider::interpolate` 补齐）。
+    #[test]
+    fn interpolate_failure_for_model_display_name_reports_indexed_field() {
+        let provider = Provider {
+            models: vec![
+                ModelEntry {
+                    id: "plain-id".to_owned(),
+                    ..ModelEntry::default()
+                },
+                ModelEntry {
+                    id: "gpt-4o".to_owned(),
+                    display_name: Some("${UNDEFINED_VAR}".to_owned()),
+                    ..ModelEntry::default()
+                },
+            ],
+            ..Provider::default()
+        };
+
+        let (field, reason) = provider.interpolate(&vars(&[])).unwrap_err();
+
+        assert_eq!(field, "models[1].display_name");
+        assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
+    }
+
+    /// limit 恒落盘（缺省即 `{}`），未设置的子项不落盘。
+    #[test]
+    fn model_limit_is_always_written_and_omits_unset_subfields() {
+        let unset = serde_json::to_string(&ModelEntry::default()).unwrap();
+        assert!(
+            unset.contains(r#""limit":{}"#),
+            "未设置时仍写出空对象：{unset}"
+        );
+
+        let partial = ModelEntry {
+            id: "gpt-4o".to_owned(),
+            limit: ModelLimit {
+                context_window: Some(128_000),
+                max_input: None,
+                max_output: Some(16_384),
+            },
+            ..ModelEntry::default()
+        };
+
+        let text = serde_json::to_string(&partial).unwrap();
+
+        assert_eq!(
+            text,
+            r#"{"id":"gpt-4o","display_name":null,"limit":{"context_window":128000,"max_output":16384},"capabilities":[]}"#,
+            "只落盘已设置的子项"
+        );
+        assert_eq!(serde_json::from_str::<ModelEntry>(&text).unwrap(), partial);
+    }
+
+    /// 旧配置缺新字段：limit 读作未设置、capabilities 读作空集合。
+    #[test]
+    fn legacy_model_entry_without_new_fields_reads_as_unset() {
+        let entry: ModelEntry =
+            serde_json::from_str(r#"{"id":"gpt-4o","display_name":"GPT-4o"}"#).unwrap();
+
+        assert_eq!(entry.limit, ModelLimit::default());
+        assert!(entry.capabilities.is_empty());
+    }
+
+    /// capabilities 恒落盘（缺省即 `[]`），落盘前按枚举声明序排序并去重。
+    #[test]
+    fn capabilities_are_always_written_sorted_and_deduplicated() {
+        assert!(
+            serde_json::to_string(&ModelEntry::default())
+                .unwrap()
+                .contains(r#""capabilities":[]"#),
+            "未设置时仍写出空数组"
+        );
+
+        let entry = ModelEntry {
+            capabilities: vec![
+                ModelCapability::Thinking,
+                ModelCapability::ToolUse,
+                ModelCapability::Thinking,
+                ModelCapability::ImageIn,
+            ],
+            ..ModelEntry::default()
+        };
+
+        let text = serde_json::to_string(&entry).unwrap();
+
+        assert!(
+            text.contains(r#""capabilities":["tool_use","image_in","thinking"]"#),
+            "落盘按枚举声明序、去重：{text}"
+        );
+    }
+
+    /// 手工写进配置文件的顺序与重复在**读入**时同样归一（读回即稳定形状）。
+    #[test]
+    fn hand_edited_capabilities_are_normalized_on_read() {
+        let text = r#"{"id":"m","capabilities":["thinking","tool_use","thinking","image_in"]}"#;
+
+        let parsed: ModelEntry = serde_json::from_str(text).unwrap();
+
+        assert_eq!(
+            parsed.capabilities,
+            vec![
+                ModelCapability::ToolUse,
+                ModelCapability::ImageIn,
+                ModelCapability::Thinking
+            ]
+        );
+        assert!(
+            serde_json::to_string(&parsed)
+                .unwrap()
+                .contains(r#""capabilities":["tool_use","image_in","thinking"]"#),
+            "读入归一后回写同一形状"
+        );
+    }
+
+    #[test]
+    fn unknown_capability_is_rejected() {
+        assert!(serde_json::from_str::<ModelEntry>(r#"{"capabilities":["telepathy"]}"#).is_err());
     }
 }

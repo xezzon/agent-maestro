@@ -3,10 +3,13 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
+  Collapse,
   Empty,
   Flex,
   Form,
   Input,
+  InputNumber,
   message,
   Modal,
   Popconfirm,
@@ -20,6 +23,9 @@ import {
 import { CheckCircleTwoTone, FileTextOutlined } from "@ant-design/icons";
 import {
   ANTHROPIC_MESSAGES,
+  CAPABILITY_IMAGE_IN,
+  CAPABILITY_THINKING,
+  CAPABILITY_TOOL_USE,
   OPENAI_COMPLETIONS,
   PROVIDER_PROTOCOLS,
   createProvider,
@@ -33,6 +39,32 @@ import { applyProviders, listPlugins } from "./api/plugins";
 import { listVariables } from "./api/variables";
 import VariablesCard from "./components/VariablesCard";
 import { openPath } from "@tauri-apps/plugin-opener";
+
+/** token 上限的预设快捷值：K/M 按十进制（128K = 128000），留空即「未设置」。 */
+const LIMIT_PRESETS = [
+  { label: "128K", value: 128000 },
+  { label: "200K", value: 200000 },
+  { label: "1M", value: 1000000 },
+];
+
+/** 三项 token 上限的字段名与界面标签。 */
+const MODEL_LIMIT_FIELDS = [
+  { key: "context_window", label: "上下文窗口" },
+  { key: "max_input", label: "最大输入" },
+  { key: "max_output", label: "最大输出" },
+];
+
+/** 能力枚举串与界面标签：分组（能力 / 输入模态）只是排版，落盘仍是枚举串。 */
+const CAPABILITY_LABELS = {
+  [CAPABILITY_TOOL_USE]: "工具调用",
+  [CAPABILITY_IMAGE_IN]: "视觉",
+  [CAPABILITY_THINKING]: "推理",
+};
+
+/** 只读展示一项 token 上限：未设置就显示「未设置」，不编造默认值。 */
+function formatLimit(value) {
+  return value == null ? "未设置" : String(value);
+}
 
 /**
  * @param {Object} param0
@@ -155,13 +187,38 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
       <ul className="provider-models">
         {provider.models.map((model, index) => (
           <li key={`${model.id}-${index}`}>
-            <Typography.Text>{model.display_name || model.id}</Typography.Text>
-            {model.display_name ? (
-              <Typography.Text type="secondary">{model.id}</Typography.Text>
-            ) : null}
+            <Flex vertical gap={4}>
+              <Flex align="baseline" gap={8}>
+                <Typography.Text>{model.display_name || model.id}</Typography.Text>
+                {model.display_name ? (
+                  <Typography.Text type="secondary">{model.id}</Typography.Text>
+                ) : null}
+              </Flex>
+              {(model.capabilities?.length ?? 0) > 0 ? (
+                <Flex align="center" gap={4}>
+                  {model.capabilities.map((capability) => (
+                    <Tag key={capability}>{CAPABILITY_LABELS[capability]}</Tag>
+                  ))}
+                </Flex>
+              ) : null}
+              <Typography.Text type="secondary">
+                上下文窗口 {formatLimit(model.limit?.context_window)}
+                ｜最大输入 {formatLimit(model.limit?.max_input)}
+                ｜最大输出 {formatLimit(model.limit?.max_output)}
+              </Typography.Text>
+            </Flex>
           </li>
         ))}
       </ul>
+    )}
+    {(provider.custom_header?.length ?? 0) > 0 && (
+      // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
+      <div className="provider-headers">
+        <Typography.Text type="secondary">Header</Typography.Text>
+        {provider.custom_header.map((header) => (
+          <Tag key={header.name}>{header.name}</Tag>
+        ))}
+      </div>
     )}
     <div className="card-actions">
       <Button disabled={deleting} onClick={onEdit}>
@@ -247,6 +304,33 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
       },
     },
   ];
+  // HTTP token 字符集（RFC 9110 的 tchar）：header 名必须是合法 token，工具侧才能解析。
+  const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+  // header 名非空、限 HTTP token 字符集、同一 Provider 内忽略大小写唯一。
+  // 后端存大小写敏感的原名（issue #58 决定 11），这三条校验只在前端内联，不在 Rust 侧重复。
+  const HEADER_NAME_RULES = [
+    { required: true, message: "请输入 Header 名" },
+    {
+      pattern: HEADER_NAME_PATTERN,
+      message: "Header 名仅允许字母、数字与 !#$%&'*+-.^_`|~",
+    },
+    {
+      validator: (_, value) => {
+        if (!value) return Promise.resolve();
+        // 唯一性校验依赖当前表单内全部 header 行的实时值。
+        const occurrences = (form.getFieldValue("custom_header") ?? []).filter(
+          (header) => header?.name?.toLowerCase() === value.toLowerCase(),
+        ).length;
+        return occurrences > 1
+          ? Promise.reject(
+            new Error(`Header 名「${value}」在当前 Provider 内重复（忽略大小写）`),
+          )
+          : Promise.resolve();
+      },
+    },
+  ];
+  // 值可能含凭证，必填但不在前端展示明文（掩码输入）。
+  const HEADER_VALUE_RULES = [{ required: true, message: "请输入 Header 值" }];
   // 模型 ID 非空（空白串视为空）且同一 Provider 内唯一（大小写敏感）；
   // 唯一性校验依赖当前表单内全部模型行的实时值。
   const MODEL_ID_RULES = [
@@ -373,28 +457,148 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
       />
     </Form.Item>
 
+    <Form.Item
+      label="自定义 Header"
+      extra="可选；随该 Provider 下所有模型与协议共享。值以明文保存在本地配置文件中"
+    >
+      <Form.List name="custom_header">
+        {(fields, { add, remove }) => (
+          <div className="header-rows">
+            {fields.map((field) => (
+              <Flex key={field.key} align="flex-start" gap={8}>
+                <Form.Item
+                  name={[field.name, "name"]}
+                  rules={HEADER_NAME_RULES}
+                  className="header-field"
+                >
+                  <Input placeholder="Header 名，例如 anthropic-version" />
+                </Form.Item>
+                <Form.Item
+                  name={[field.name, "value"]}
+                  rules={HEADER_VALUE_RULES}
+                  className="header-field"
+                >
+                  <Input.Password
+                    placeholder="Header 值"
+                    autoComplete="new-password"
+                    visibilityToggle={false}
+                  />
+                </Form.Item>
+                <Button disabled={saving} onClick={() => remove(field.name)}>
+                  删除
+                </Button>
+              </Flex>
+            ))}
+            <Button type="dashed" block disabled={saving} onClick={() => add()}>
+              添加 Header
+            </Button>
+          </div>
+        )}
+      </Form.List>
+    </Form.Item>
+
     <Form.Item label="模型">
       <Form.List name="models">
         {(fields, { add, remove }) => (
           <div className="model-rows">
             {fields.map((field) => (
-              <Flex key={field.key} align="flex-start" gap={8} className="model-row">
-                <Form.Item
-                  name={[field.name, "id"]}
-                  rules={MODEL_ID_RULES}
-                  className="model-field"
-                >
-                  <Input placeholder="模型 ID，例如 gpt-4o" />
-                </Form.Item>
-                <Form.Item
-                  name={[field.name, "display_name"]}
-                  className="model-field"
-                >
-                  <Input placeholder="显示名（可选，留空回退显示模型 ID）" />
-                </Form.Item>
-                <Button disabled={saving} onClick={() => remove(field.name)}>
-                  删除
-                </Button>
+              <Flex key={field.key} vertical gap={4}>
+                <Flex align="flex-start" gap={8} className="model-row">
+                  <Form.Item
+                    name={[field.name, "id"]}
+                    rules={MODEL_ID_RULES}
+                    className="model-field"
+                  >
+                    <Input placeholder="模型 ID，例如 gpt-4o" />
+                  </Form.Item>
+                  <Form.Item
+                    name={[field.name, "display_name"]}
+                    className="model-field"
+                  >
+                    <Input placeholder="显示名（可选，留空回退显示模型 ID）" />
+                  </Form.Item>
+                  <Button disabled={saving} onClick={() => remove(field.name)}>
+                    删除
+                  </Button>
+                </Flex>
+                <Collapse
+                  size="small"
+                  ghost
+                  items={[
+                    {
+                      key: "more",
+                      label: "更多设置",
+                      // 默认收起；forceRender 让面板内的 Form.Item 始终注册，
+                      // 否则没展开就保存会丢掉该模型的上限与能力（validateFields 只收已注册字段）。
+                      forceRender: true,
+                      children: (
+                        <>
+                          <Form.Item name={[field.name, "capabilities"]}>
+                            <Checkbox.Group>
+                              <Flex vertical gap={8}>
+                                <Flex vertical gap={4}>
+                                  <Typography.Text type="secondary">
+                                    能力
+                                  </Typography.Text>
+                                  <Flex gap={16}>
+                                    <Checkbox value={CAPABILITY_TOOL_USE}>
+                                      工具调用
+                                    </Checkbox>
+                                    <Checkbox value={CAPABILITY_THINKING}>
+                                      推理
+                                    </Checkbox>
+                                  </Flex>
+                                </Flex>
+                                <Flex vertical gap={4}>
+                                  <Typography.Text type="secondary">
+                                    输入模态
+                                  </Typography.Text>
+                                  <Flex gap={16}>
+                                    <Checkbox value={CAPABILITY_IMAGE_IN}>
+                                      视觉
+                                    </Checkbox>
+                                  </Flex>
+                                </Flex>
+                              </Flex>
+                            </Checkbox.Group>
+                          </Form.Item>
+                          {MODEL_LIMIT_FIELDS.map((limit) => (
+                            <Form.Item key={limit.key} label={limit.label}>
+                              <Flex gap={4}>
+                                <Form.Item
+                                  name={[field.name, "limit", limit.key]}
+                                  noStyle
+                                >
+                                  <InputNumber
+                                    min={1}
+                                    precision={0}
+                                    placeholder="未设置"
+                                    style={{ width: "100%" }}
+                                  />
+                                </Form.Item>
+                                {LIMIT_PRESETS.map((preset) => (
+                                  <Button
+                                    key={preset.label}
+                                    size="small"
+                                    disabled={disabled || saving}
+                                    onClick={() =>
+                                      form.setFieldValue(
+                                        ["models", field.name, "limit", limit.key],
+                                        preset.value,
+                                      )
+                                    }
+                                  >
+                                    {preset.label}
+                                  </Button>
+                                ))}
+                              </Flex>
+                            </Form.Item>
+                          ))}
+                        </>
+                      ),
+                    },
+                  ]}
+                />
               </Flex>
             ))}
             <Button type="dashed" block disabled={saving} onClick={() => add()}>
