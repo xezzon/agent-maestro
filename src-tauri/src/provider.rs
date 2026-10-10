@@ -53,6 +53,29 @@ pub(crate) struct ModelEntry {
     pub(crate) capabilities: Vec<ModelCapability>,
 }
 
+impl ModelEntry {
+    /// 插值（ADR 0015）：作用域＝本条目参与插值的字符串值，当前只有 `display_name`。
+    /// 模型 ID 是标识符、原样保留；`limit` 与 `capabilities` 非字符串值、原样透传。
+    /// 返回的字段名以本条目为根（`display_name`），所处的数组下标由调用方补齐。
+    pub(crate) fn interpolate(
+        &self,
+        variables: &BTreeMap<String, String>,
+    ) -> Result<ModelEntry, FieldError> {
+        let display_name = self
+            .display_name
+            .as_deref()
+            .map(|name| interpolate_value(name, variables))
+            .transpose()
+            .map_err(|reason| ("display_name".to_owned(), reason))?;
+        Ok(ModelEntry {
+            id: self.id.clone(),
+            display_name,
+            limit: self.limit,
+            capabilities: self.capabilities.clone(),
+        })
+    }
+}
+
 /// 模型的声明式 token 能力上限；三项互相独立、可缺省，未设置即不落盘。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ModelLimit {
@@ -189,7 +212,8 @@ impl Provider {
     /// 替换为变量实际值，返回字面值副本；失败返回（字段名, 库报错）。
     ///
     /// 占位符语法与转义由 `crate::interpolate` 的纯函数执行（ADR 0014 换库哨兵）；
-    /// 本方法只负责收集自身的字符串值。
+    /// 本方法负责收集自身的字符串值，`models` 的字符串值交由
+    /// [`ModelEntry::interpolate`] 逐条插值、本方法只补数组下标路径。
     ///
     /// 作用域＝除 `api_key`、模型 `id` 与 header **键**外的一切字符串值（ADR 0015）。
     /// 端点表按协议遍历，新增协议自动纳入插值；不再有「新增字符串字段即编译失败」的哨兵，
@@ -217,20 +241,11 @@ impl Provider {
         }
         let mut models = Vec::with_capacity(self.models.len());
         for (index, model) in self.models.iter().enumerate() {
-            let field = format!("models[{index}].display_name");
-            let display_name = model
-                .display_name
-                .as_deref()
-                .map(|name| interpolate_value(name, variables))
-                .transpose()
-                .map_err(|reason| (field, reason))?;
-            // 模型 ID 是标识符：原样保留，不参与插值；limit 与 capabilities 亦非字符串值。
-            models.push(ModelEntry {
-                id: model.id.clone(),
-                display_name,
-                limit: model.limit,
-                capabilities: model.capabilities.clone(),
-            });
+            models.push(
+                model
+                    .interpolate(variables)
+                    .map_err(|(field, reason)| (format!("models[{index}].{field}"), reason))?,
+            );
         }
         Ok(Provider {
             // enabled 是状态而非配置值：原样透传，不参与插值。
@@ -674,6 +689,31 @@ mod tests {
         let (field, reason) = provider.interpolate(&vars(&[])).unwrap_err();
 
         assert_eq!(field, "custom_header.X-Gateway-Key");
+        assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
+    }
+
+    /// 模型 display_name 插值失败：字段名带数组下标（条目的字段名以自身为根，
+    /// 下标路径由 `Provider::interpolate` 补齐）。
+    #[test]
+    fn interpolate_failure_for_model_display_name_reports_indexed_field() {
+        let provider = Provider {
+            models: vec![
+                ModelEntry {
+                    id: "plain-id".to_owned(),
+                    ..ModelEntry::default()
+                },
+                ModelEntry {
+                    id: "gpt-4o".to_owned(),
+                    display_name: Some("${UNDEFINED_VAR}".to_owned()),
+                    ..ModelEntry::default()
+                },
+            ],
+            ..Provider::default()
+        };
+
+        let (field, reason) = provider.interpolate(&vars(&[])).unwrap_err();
+
+        assert_eq!(field, "models[1].display_name");
         assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
     }
 
