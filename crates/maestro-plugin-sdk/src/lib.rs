@@ -34,6 +34,23 @@
 //! 才落盘），消息不进投影结果。message **不得携带 API Key 等凭证**——宿主
 //! 不做内容审查，秘密一旦上报即会进入日志文件（见 ADR 0008）。
 //!
+//! # 插件配置
+//!
+//! 宿主在实例化之前把插件配置中 `form` 段的原始 JSON 文本就位
+//! （`maestro:plugin` v2.1.0 起，见 ADR 0018），组件在 init 与
+//! write-providers 之前均可经 [`get_config`] 读取：
+//!
+//! ```ignore
+//! use maestro_plugin_sdk::get_config;
+//!
+//! if let Some(form) = get_config() {
+//!     // form 是插件配置 form 段的原始 JSON 文本，由插件自行解析。
+//! }
+//! ```
+//!
+//! 配置缺省或无该段时返回 [`Option::None`]。宿主只透传原始文本，不解析
+//! 也不审查。
+//!
 //! # 依赖方式
 //!
 //! 本 crate 不发布到 crates.io，插件作者以 git 依赖引用本仓库中的 `crates/maestro-plugin-sdk`，
@@ -66,3 +83,7 @@ pub use exports::maestro::plugin::plugin::{Endpoint, Guest, Model, Protocol, Pro
 /// 过程性日志 import 绑定（`maestro:plugin` v1.1.0 起，见 [`log`]）：
 /// [`Level`] 枚举与 [`log`] 函数 re-export 到 crate 根，方便插件一行引入。
 pub use maestro::plugin::logger::{Level, log};
+
+/// 插件配置 import 绑定（`maestro:plugin` v2.1.0 起，见 [`get_config`]）：
+/// `get_config` 函数 re-export 到 crate 根，方便插件一行引入。
+pub use maestro::plugin::config::get_config;

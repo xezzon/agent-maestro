@@ -55,6 +55,10 @@ pub(crate) struct Manifest {
     pub(crate) config_dir: PathBuf,
     /// 入口 wasm 的回源地址（约束按来源种类分列，见 ADR 0006）。
     pub(crate) entry: String,
+    /// 可选的内联 JSON Schema（draft 2020-12，ADR 0017）：描述该插件 `form`
+    /// 段的形状，原样透传给前端渲染，宿主不校验其内容；缺省即无需用户填写。
+    #[serde(default)]
+    pub(crate) settings_schema: Option<serde_json::Value>,
 }
 
 #[cfg(not(test))]
@@ -442,6 +446,37 @@ mod tests {
             root.path().join("home").canonicalize().unwrap().join(".pi")
         );
         assert_eq!(manifest.entry, "plugin.wasm");
+    }
+
+    /// `settings_schema`（ADR 0017）可选：存在即整段透传，宿主不校验其内容；
+    /// 缺省即 None（该插件无需用户填写表单）。
+    #[test]
+    fn manifest_settings_schema_is_passed_through_verbatim_and_optional() {
+        let (_root, _g) = platform_dirs_setup();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "model": { "type": "string", "title": "模型" } },
+            "required": ["model"]
+        });
+        let text = format!(
+            r#"{{
+                    "id": "zed",
+                    "config_dir": "$HOME/.zed",
+                    "entry": "p.wasm",
+                    "settings_schema": {schema}
+                }}"#
+        );
+
+        let manifest = parse_manifest(SourceKind::File, &text).unwrap();
+        assert_eq!(manifest.settings_schema, Some(schema));
+
+        let without_schema = manifest_text("zed", "p.wasm");
+        assert_eq!(
+            parse_manifest(SourceKind::File, &without_schema)
+                .unwrap()
+                .settings_schema,
+            None
+        );
     }
 
     #[test]

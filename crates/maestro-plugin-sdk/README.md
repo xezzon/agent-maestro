@@ -123,12 +123,12 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 1. 仓库 manifest 的 `entry` 指向 cargo 原生产物路径 `target/wasm32-wasip2/release/<crate>.wasm`（crate 名里的连字符在产物名中变为下划线，如 `maestro-plugin-pi` → `maestro_plugin_pi.wasm`）。不提交 wasm，仓库干净，产物也不会与源码漂移。
 2. `cargo build --release --target wasm32-wasip2`
 3. 在 Maestro「添加插件」里来源选「本地文件」，用文件选择器选中仓库根目录的 `manifest.json`。file 来源的来源身份是这个本机绝对路径。
-4. 改码后重新编译，点「重新加载」——宿主按来源重新读 manifest、按 `entry` 取 wasm，落位目录替换为最新产物。开发回路不需要在 Maestro 里重填来源。
+4. 改码后重新编译，点「重新加载」——宿主按来源重新读 manifest、按 `entry` 取 wasm，把落位目录中的 `manifest.json` 与 `plugin.wasm` 逐文件覆盖为最新产物。开发回路不需要在 Maestro 里重填来源。
 
 语义要点：
 
 - file 来源与 https 来源同构：添加与重新加载都会按 `entry` 取 wasm（相对路径读来源目录内文件，https URL 联网获取），一并落位 `~/.maestro/plugins/<id>/`（`manifest.json` 原文 + `plugin.wasm`）。
-- 「重新加载」成功才替换落位目录，失败时旧版本保持可用；上游 manifest 的 id 变更会报错并保持旧状态。
+- 「重新加载」按「先 manifest、后 wasm」逐文件覆盖落位目录中的两个宿主产物，目录中其余文件（如将来的插件配置）不受影响；写入失败可能留下「新 manifest + 旧 wasm」的混合态，再次「重新加载」即可恢复。上游 manifest 的 id 变更会报错并保持旧状态。
 - **没有单独的「更新」操作**：重新加载就是按来源重新获取，每次只作用于一个来源。
 - 应用启动只读落位目录、不联网、不读来源目录，因此 file 来源的插件离线也可装载。
 - 「移除」只删配置条目与落位副本、幂等，**不动你的插件项目目录与构建产物**。
@@ -202,6 +202,25 @@ log(Level::Warning, "模型 x 已弃用，仍继续投影");
 - 应用日志默认级别 INFO：debug 消息默认不落盘，`MAESTRO_LOG_LEVEL=debug` 时展开；日志按大小轮转（ADR 0008），不要用日志刷屏。
 - **message 不得携带 API Key 等凭证**——宿主不做内容审查，上报即落盘进日志文件（该文件定位是「发给维护者」的现场证据）。
 - 插件不调用 `log` 时行为与 1.0.0 合同完全一致；宿主恒定提供该 import，但 WIT 包版本升级（1.0.0 → 1.1.0）后宿主只注册当前版本，按旧合同编译的组件需以新版 SDK 重编译。
+
+## 插件配置（get-config import）
+
+`maestro:plugin` 2.1.0 起提供 `config` import（见 [ADR 0018](../../docs/adr/0018-plugin-config-in-placed-dir.md)）：宿主在实例化之前把插件配置中 `form` 段的原始 JSON 文本就位，插件经 SDK 一行读取：
+
+```rust
+use maestro_plugin_sdk::get_config;
+
+if let Some(form) = get_config() {
+    // form 是 `form` 段的原始 JSON 文本，由插件自行解析。
+}
+```
+
+语义要点：
+
+- 组件 init 与 `write-providers` 期间均可调用；宿主在实例化之前就位，同一实例内返回值不变。
+- `form` 段缺省时返回 `None`，不是错误。
+- 宿主只透传原始文本，不解析也不审查；`form` 是插件私有数据，形状由作者自定义，建议配合 manifest 的 `settings_schema`（见 ADR 0017）定义。
+- `write-providers` 签名不变；包版本升级即要求以新版 SDK 重编译（见「过程性日志」节末的兼容约定）。
 
 ## 配置值的插值（ADR 0014 / ADR 0015）
 
