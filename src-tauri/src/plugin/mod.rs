@@ -1691,13 +1691,13 @@ mod tests {
     }
 
     /// L2 金丝雀（ADR 0008）：以带唯一 canary key 的 provider 跑真实投影路径
-    /// （内置 pi 组件实例化 + 写投影），安装捕获 logger 断言全部捕获输出不含
-    /// 该值——把「api_key 绝不进日志」变成可执行断言。
+    /// （内置 pi 组件实例化 + 写投影），在捕获窗口内断言全部输出不含该值——
+    /// 把「api_key 绝不进日志」变成可执行断言。
     #[test]
     fn projection_path_never_logs_the_api_key() {
         use crate::provider::Protocol;
 
-        let logs = crate::logging::capture::captured_logs();
+        let window = crate::logging::capture::capture_window();
         let home = temp_home();
         let store = store_at(home.path());
         let service = test_service(home.path());
@@ -1721,8 +1721,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
-        let logs = logs.lock().unwrap();
-        // 先证捕获 logger 确实覆盖了这条真实投影路径，canary 断言才有意义。
+        let logs = window.lines();
+        // 先证捕获窗口确实覆盖了这条真实投影路径，canary 断言才有意义。
         assert!(
             logs.iter()
                 .any(|line| line.ends_with("projecting providers: id=pi")),
@@ -1731,6 +1731,50 @@ mod tests {
         assert!(
             !logs.iter().any(|line| line.contains(canary)),
             "api_key 绝不进入日志输出：{logs:?}"
+        );
+    }
+
+    /// L2 金丝雀（ADR 0008）：凭证不止 api_key——自定义 header 的**值**合同上也可含
+    /// 凭证（WIT 合同与 `crates/maestro-plugin-sdk/README.md` 同此声明）。同一条真实
+    /// 投影路径上换用唯一 canary header 值再跑一遍，窗口内断言输出不含该值。
+    #[test]
+    fn projection_path_never_logs_custom_header_values() {
+        use crate::provider::Protocol;
+
+        let window = crate::logging::capture::capture_window();
+        let home = temp_home();
+        let store = store_at(home.path());
+        let service = test_service(home.path());
+        service.startup(&store).unwrap();
+
+        let canary = "gw-canary-7c41d8e2";
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                custom_header: BTreeMap::from([("X-Gateway-Key".to_owned(), canary.to_owned())]),
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://api.example.com/v1".to_owned(),
+                )]),
+                ..Provider::default()
+            },
+        )]);
+
+        let reports = service
+            .write_providers(&providers, &BTreeMap::new())
+            .unwrap();
+
+        assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+        let logs = window.lines();
+        // 先证捕获窗口确实覆盖了这条真实投影路径，canary 断言才有意义。
+        assert!(
+            logs.iter()
+                .any(|line| line.ends_with("projecting providers: id=pi")),
+            "捕获输出应包含投影步骤的 DEBUG 行：{logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|line| line.contains(canary)),
+            "自定义 header 值绝不进入日志输出：{logs:?}"
         );
     }
 

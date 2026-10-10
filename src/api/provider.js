@@ -70,8 +70,18 @@ export const OPENAI_COMPLETIONS = "openai-completions";
 export const ANTHROPIC_MESSAGES = "anthropic-messages";
 /** @type {ProviderProtocol[]} */
 export const PROVIDER_PROTOCOLS = [OPENAI_COMPLETIONS, ANTHROPIC_MESSAGES];
+/** @type {ModelCapability} 工具调用。 */
+export const CAPABILITY_TOOL_USE = "tool_use";
+/** @type {ModelCapability} 视觉（输入模态）。 */
+export const CAPABILITY_IMAGE_IN = "image_in";
+/** @type {ModelCapability} 推理。 */
+export const CAPABILITY_THINKING = "thinking";
 /** @type {ModelCapability[]} 能力枚举的声明序（`normalizeModel` 按此序排序去重）。 */
-const MODEL_CAPABILITIES = ["tool_use", "image_in", "thinking"];
+const MODEL_CAPABILITIES = [
+  CAPABILITY_TOOL_USE,
+  CAPABILITY_IMAGE_IN,
+  CAPABILITY_THINKING,
+];
 
 /**
  * 把后端可能缺键的 `base_url` 补齐为两个槽位恒存在的形态，缺键补空串。
