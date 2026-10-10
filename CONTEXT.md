@@ -17,7 +17,7 @@ _避免_：类型、type、kind（语义模糊）
 _避免_：base url（作为泛指时）
 
 **Model（模型）**：
-某个 Provider 提供的 LLM 能力，以各 Agent 工具实际使用的模型 ID 字符串（如 `gpt-4o`）标识。模型不是全局实体——它从属于且仅从属于一个 Provider；同一个模型 ID 可以出现在多个 Provider 下（例如直连 OpenAI 与公司网关各有一条 `gpt-4o`）。可选的人类可读显示名只是元数据；模型还可声明自己的 token 能力上限（`limit`：上下文窗口、最大输入、最大输出）与能力集合（`capabilities`：`tool_use`、`image_in`、`thinking`）——这些是**声明式**元数据，Maestro 只保存与投影，不据此推断或裁剪请求。
+某个 Provider 提供的 LLM 能力，以各 Agent 工具实际使用的模型 ID 字符串（如 `gpt-4o`）标识。模型不是全局实体——它从属于且仅从属于一个 Provider；同一个模型 ID 可以出现在多个 Provider 下（例如直连 OpenAI 与公司网关各有一条 `gpt-4o`）。可选的人类可读显示名只是元数据；模型还可声明自己的 token 能力上限（`limit`：上下文窗口、单次最大输入、最大输出）与能力集合（`capabilities`：`tool_use`、`image_in`、`thinking`）——这些是**声明式**元数据，Maestro 只保存与投影，不据此推断或裁剪请求。
 _避免_：model id（当指条目本身、而非 ID 字符串时）
 
 **工具（tool）**：

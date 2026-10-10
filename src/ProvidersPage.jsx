@@ -50,7 +50,7 @@ const LIMIT_PRESETS = [
 /** 三项 token 上限的字段名与界面标签。 */
 const MODEL_LIMIT_FIELDS = [
   { key: "context_window", label: "上下文窗口" },
-  { key: "max_input", label: "最大输入" },
+  { key: "max_input", label: "单次最大输入" },
   { key: "max_output", label: "最大输出" },
 ];
 
@@ -203,7 +203,7 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
               ) : null}
               <Typography.Text type="secondary">
                 上下文窗口 {formatLimit(model.limit?.context_window)}
-                ｜最大输入 {formatLimit(model.limit?.max_input)}
+                ｜单次最大输入 {formatLimit(model.limit?.max_input)}
                 ｜最大输出 {formatLimit(model.limit?.max_output)}
               </Typography.Text>
             </Flex>
@@ -329,7 +329,7 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
       },
     },
   ];
-  // 值可能含凭证，必填但不在前端展示明文（掩码输入）。
+  // 值可能含凭证，必填；界面用普通输入框明文编辑。
   const HEADER_VALUE_RULES = [{ required: true, message: "请输入 Header 值" }];
   // 模型 ID 非空（空白串视为空）且同一 Provider 内唯一（大小写敏感）；
   // 唯一性校验依赖当前表单内全部模型行的实时值。
@@ -478,11 +478,7 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
                   rules={HEADER_VALUE_RULES}
                   className="header-field"
                 >
-                  <Input.Password
-                    placeholder="Header 值"
-                    autoComplete="new-password"
-                    visibilityToggle={false}
-                  />
+                  <Input placeholder="Header 值" />
                 </Form.Item>
                 <Button disabled={saving} onClick={() => remove(field.name)}>
                   删除

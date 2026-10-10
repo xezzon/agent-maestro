@@ -15,7 +15,7 @@
  * 未设置的子项缺键即未设置，不填任何默认值。
  * @typedef {Object} ModelLimit
  * @property {number=} context_window 上下文窗口。
- * @property {number=} max_input 最大输入。
+ * @property {number=} max_input 单次最大输入。
  * @property {number=} max_output 最大输出。
  */
 /**
