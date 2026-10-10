@@ -103,6 +103,27 @@ body {
   margin-bottom: 0;
 }
 
+/* Provider 表单里的自定义 header 行（src/ProvidersPage.jsx，issue #107），与模型行同构。 */
+.header-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.header-field {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+/* 只读卡片的 header 键名标签（只列名、不显示值）。 */
+.provider-headers {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .provider-models {
   display: flex;
   flex-direction: column;
