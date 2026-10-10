@@ -6,7 +6,8 @@
 //!
 //! 本模块是 ADR 0014 的换库接缝：`interpolate_value` 是唯一接触 subst 的纯函数，
 //! 测试钉住其语义（升级或更换库改变行为即红，换库成本因此可控）；逐字段的
-//! 结构知识在 `Provider::interpolate`，跨 Provider 的编排在 `interpolate_providers`。
+//! 结构知识在各自的配置类型（`Provider::interpolate`／`ModelEntry::interpolate`），
+//! 跨 Provider 的编排在 `interpolate_providers`。
 
 use std::collections::BTreeMap;
 
