@@ -124,11 +124,16 @@ body {
   margin-top: 12px;
 }
 
+/* 只读卡片的模型区标题行（「模型」+ 数量 Badge）。 */
+.provider-models-title {
+  margin-top: 12px;
+}
+
 .provider-models {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin: 12px 0 0;
+  margin: 8px 0 0;
   padding: 0;
   list-style: none;
 }

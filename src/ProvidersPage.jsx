@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
+  Badge,
   Button,
   Card,
   Checkbox,
@@ -39,6 +40,7 @@ import { applyProviders, listPlugins } from "./api/plugins";
 import { listVariables } from "./api/variables";
 import VariablesCard from "./components/VariablesCard";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { theme } from "antd";
 
 /** token 上限的预设快捷值：K/M 按十进制（128K = 128000），留空即「未设置」。 */
 const LIMIT_PRESETS = [
@@ -50,7 +52,7 @@ const LIMIT_PRESETS = [
 /** 三项 token 上限的字段名与界面标签。 */
 const MODEL_LIMIT_FIELDS = [
   { key: "context_window", label: "上下文窗口" },
-  { key: "max_input", label: "最大输入" },
+  { key: "max_input", label: "单次最大输入" },
   { key: "max_output", label: "最大输出" },
 ];
 
@@ -137,6 +139,8 @@ function ProviderCard({ provider, onReload }) {
  */
 function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
   const [deleting, setDeleting] = useState(false);
+  const { useToken } = theme;
+  const { token } = useToken();
 
   async function handleDelete() {
     setDeleting(true);
@@ -181,8 +185,22 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
       <span>
         API Key <Tag>{provider.api_key_set ? "已设置" : "未设置"}</Tag>
       </span>
-      <span>模型数：{provider.models?.length ?? 0}</span>
     </div>
+    {(provider.custom_header?.length ?? 0) > 0 && (
+      // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
+      <div className="provider-headers">
+        <Typography.Text>Header</Typography.Text>
+        {provider.custom_header.map((header) => (
+          <Tag key={header.name}>{header.name}</Tag>
+        ))}
+      </div>
+    )}
+    <Flex align="center" gap={8} className="provider-models-title">
+      <Typography.Title level={3} style={{ margin: 0 }}>
+        模型
+      </Typography.Title>
+      <Badge count={provider.models?.length ?? 0} showZero color={token.colorPrimary} />
+    </Flex>
     {(provider.models?.length ?? 0) > 0 && (
       <ul className="provider-models">
         {provider.models.map((model, index) => (
@@ -203,22 +221,13 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
               ) : null}
               <Typography.Text type="secondary">
                 上下文窗口 {formatLimit(model.limit?.context_window)}
-                ｜最大输入 {formatLimit(model.limit?.max_input)}
+                ｜单次最大输入 {formatLimit(model.limit?.max_input)}
                 ｜最大输出 {formatLimit(model.limit?.max_output)}
               </Typography.Text>
             </Flex>
           </li>
         ))}
       </ul>
-    )}
-    {(provider.custom_header?.length ?? 0) > 0 && (
-      // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
-      <div className="provider-headers">
-        <Typography.Text type="secondary">Header</Typography.Text>
-        {provider.custom_header.map((header) => (
-          <Tag key={header.name}>{header.name}</Tag>
-        ))}
-      </div>
     )}
     <div className="card-actions">
       <Button disabled={deleting} onClick={onEdit}>
@@ -329,7 +338,7 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
       },
     },
   ];
-  // 值可能含凭证，必填但不在前端展示明文（掩码输入）。
+  // 值可能含凭证，必填；界面用普通输入框明文编辑。
   const HEADER_VALUE_RULES = [{ required: true, message: "请输入 Header 值" }];
   // 模型 ID 非空（空白串视为空）且同一 Provider 内唯一（大小写敏感）；
   // 唯一性校验依赖当前表单内全部模型行的实时值。
@@ -478,11 +487,7 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
                   rules={HEADER_VALUE_RULES}
                   className="header-field"
                 >
-                  <Input.Password
-                    placeholder="Header 值"
-                    autoComplete="new-password"
-                    visibilityToggle={false}
-                  />
+                  <Input placeholder="Header 值" />
                 </Form.Item>
                 <Button disabled={saving} onClick={() => remove(field.name)}>
                   删除
