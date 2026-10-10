@@ -477,6 +477,85 @@ mod tests {
         );
     }
 
+    /// 端到端整链（issue #110）：用户写 `\$FOO` → 宿主插值得 `$FOO` →
+    /// 插件写出 `$$FOO` → pi 读回字面 `$FOO`。header 键原样写入。
+    #[test]
+    fn write_provider_projects_custom_headers_escaped_through_the_whole_chain() {
+        let root = tempfile::tempdir().unwrap();
+        let raw = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                custom_header: BTreeMap::from([
+                    ("X-Gateway-Key".to_owned(), r"\$FOO".to_owned()),
+                    ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+                ]),
+                ..provider(Some("https://api.example.com/v1"), None)
+            },
+        )]);
+
+        // 宿主插值：`\$` 还原为字面 `$`，值里仍是一个普通 `$`。
+        let interpolated =
+            crate::interpolate::interpolate_providers(&raw, &crate::store::Variables::new())
+                .unwrap();
+        assert_eq!(
+            interpolated["gateway"].custom_header["X-Gateway-Key"],
+            "$FOO"
+        );
+
+        let written = write_and_read(root.path(), &interpolated);
+
+        assert_eq!(
+            written["providers"]["gateway"]["headers"]["X-Gateway-Key"],
+            "$$FOO"
+        );
+        assert_eq!(
+            written["providers"]["gateway"]["headers"]["anthropic-version"],
+            "2023-06-01"
+        );
+    }
+
+    /// 没有自定义 header 时不写 `headers` 键（不写空对象）。
+    #[test]
+    fn write_provider_omits_headers_key_without_custom_headers() {
+        let root = tempfile::tempdir().unwrap();
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            provider(Some("https://api.example.com/v1"), None),
+        )]);
+
+        let written = write_and_read(root.path(), &providers);
+
+        assert!(written["providers"]["gateway"].get("headers").is_none());
+    }
+
+    /// 转义覆盖值中段的 `$` 与前导 `!`；api_key 与 header 值共用同一规则。
+    #[test]
+    fn write_provider_escapes_dollar_anywhere_and_leading_bang_for_api_key_and_headers() {
+        let root = tempfile::tempdir().unwrap();
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                api_key: "a$b".to_owned(),
+                custom_header: BTreeMap::from([
+                    ("X-Mid".to_owned(), "a$b".to_owned()),
+                    ("X-Bang".to_owned(), "!secret".to_owned()),
+                    ("X-Plain".to_owned(), "a!b".to_owned()),
+                ]),
+                ..provider(Some("https://api.example.com/v1"), None)
+            },
+        )]);
+
+        let written = write_and_read(root.path(), &providers);
+
+        assert_eq!(written["providers"]["gateway"]["apiKey"], "a$$b");
+        assert_eq!(written["providers"]["gateway"]["headers"]["X-Mid"], "a$$b");
+        assert_eq!(
+            written["providers"]["gateway"]["headers"]["X-Bang"],
+            "$!secret"
+        );
+        assert_eq!(written["providers"]["gateway"]["headers"]["X-Plain"], "a!b");
+    }
+
     /// 写出条目的完整键集：钉住「投影了什么」的同时也钉住「没投影什么」。
     fn keys(value: &serde_json::Value) -> Vec<&str> {
         value
