@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
+  AutoComplete,
   Button,
   Card,
   Empty,
@@ -206,7 +207,8 @@ function PluginVariablesCard({ plugin, config, variables, onReload }) {
 
 /**
  * 变量覆盖编辑表单：变量名必须已在全局变量表中声明（与后端 set_plugin_config
- * 的校验一致），同表内唯一（重复键会被整包替换静默合并）；覆盖值必填非空白。
+ * 的校验一致），输入时从全局变量表自动补全；同表内唯一（重复键会被整包替换
+ * 静默合并）；覆盖值必填非空白。
  * @param {Object} param0
  * @param {import("./api/plugins").PluginView} param0.plugin
  * @param {import("./api/plugins").PluginConfig} param0.config
@@ -277,7 +279,18 @@ function PluginVariablesForm({ plugin, config, variables, onFinish }) {
                     rules={NAME_RULES}
                     className="variable-name"
                   >
-                    <Input placeholder="全局变量表中已声明的变量名，例如 GATEWAY_ID" />
+                    <AutoComplete
+                      options={Object.keys(variables).map((name) => ({
+                        value: name,
+                      }))}
+                      showSearch={{
+                        filterOption: (inputValue, option) =>
+                          option.value
+                            .toUpperCase()
+                            .includes(inputValue.toUpperCase()),
+                      }}
+                      placeholder="全局变量表中已声明的变量名，例如 GATEWAY_ID"
+                    />
                   </Form.Item>
                   <Form.Item
                     name={[field.name, "value"]}
