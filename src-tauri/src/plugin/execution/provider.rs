@@ -176,10 +176,12 @@ mod tests {
                     ModelEntry {
                         id: "claude-sonnet".to_owned(),
                         display_name: Some("Sonnet".to_owned()),
+                        ..ModelEntry::default()
                     },
                     ModelEntry {
                         id: "claude-haiku".to_owned(),
                         display_name: None,
+                        ..ModelEntry::default()
                     },
                 ],
                 ..Provider::default()
