@@ -15,9 +15,18 @@ import {
 } from "antd";
 import { DeleteOutlined } from "@ant-design/icons";
 import RjsfForm from "@rjsf/antd";
-import validator from "@rjsf/validator-ajv8";
+import { customizeValidator } from "@rjsf/validator-ajv8";
+import Ajv2020 from "ajv/dist/2020";
 import { getPluginConfig, setPluginConfig } from "./api/plugins";
 import { listVariables } from "./api/variables";
+
+/**
+ * 表单校验器：settings_schema 声明的方言是 draft 2020-12（ADR 0017），而
+ * @rjsf/validator-ajv8 默认的 Ajv 只带 draft-07 的 meta-schema，编译这样的 schema
+ * 会抛 `no schema with key or ref "…/draft/2020-12/schema"`（保存时表现为校验失败）；
+ * 换成 Ajv2020 后 schema 里的 `$schema` 有对应的 meta-schema 可解析。
+ */
+const validator = customizeValidator({ AjvClass: Ajv2020 });
 
 /**
  * 插件配置页：分「变量覆盖」「表单」两个 Tab。表单按 manifest 的
