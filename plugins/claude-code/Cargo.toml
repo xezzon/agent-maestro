@@ -1,0 +1,11 @@
+[package]
+name = "maestro-plugin-claude-code"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+maestro-plugin-sdk = { path = "../../crates/maestro-plugin-sdk", version = "2.2.0" }
