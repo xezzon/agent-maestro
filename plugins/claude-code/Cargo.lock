@@ -93,6 +93,8 @@ name = "maestro-plugin-claude-code"
 version = "0.1.0"
 dependencies = [
  "maestro-plugin-sdk",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -149,6 +151,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -177,6 +180,7 @@ version = "1.0.152"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1741ab7a6cc54a03a89b5d563ed60075c277d9e3cfa73ad0c1f23f23974703c6"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

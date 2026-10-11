@@ -1,6 +1,6 @@
 # Claude Code 适配器（`plugins/claude-code`）
 
-> 状态：插件骨架（crate 与 manifest.json）已落地，`write-providers` 尚为 `todo!()`；本文冻结本插件的投影合同（决策见 [ADR 0020](../../docs/adr/0020-provider-selection-in-plugin-form.md)、[ADR 0021](../../docs/adr/0021-tool-decides-protocol.md)，背景见 issue #56）。
+> 状态：已实现（决策见 [ADR 0020](../../docs/adr/0020-provider-selection-in-plugin-form.md)、[ADR 0021](../../docs/adr/0021-tool-decides-protocol.md)，背景见 issue #56）。本文即本插件的投影合同，实现见 [`src/lib.rs`](src/lib.rs)。
 
 把 Maestro 的 Provider 投影进 Claude Code 的**用户级** `~/.claude/settings.json`，只维护其 `env` 块里的四个键：
 
