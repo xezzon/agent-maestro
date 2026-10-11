@@ -479,6 +479,33 @@ mod tests {
         );
     }
 
+    /// `settings_schema` 的字段顺序照抄 manifest（ADR 0017）：「原样透传」到前端后，
+    /// rjsf 按 `properties` 的顺序排布表单字段，序列化时不得按字典序重排。
+    #[test]
+    fn settings_schema_property_order_matches_the_manifest() {
+        let (_root, _g) = platform_dirs_setup();
+        let text = r#"{
+                "id": "zed",
+                "config_dir": "$HOME/.zed",
+                "entry": "p.wasm",
+                "settings_schema": {
+                    "type": "object",
+                    "properties": {
+                        "zz_later": { "type": "string" },
+                        "aa_earlier": { "type": "string" }
+                    }
+                }
+            }"#;
+
+        let manifest = parse_manifest(SourceKind::File, text).unwrap();
+
+        let serialized = serde_json::to_string(&manifest.settings_schema).unwrap();
+        assert!(
+            serialized.find("zz_later") < serialized.find("aa_earlier"),
+            "字段顺序应与 manifest 一致：{serialized}"
+        );
+    }
+
     #[test]
     fn manifest_missing_required_field_is_rejected() {
         // 只留 id：其余必填缺失即加载失败。
