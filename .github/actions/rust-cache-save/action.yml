@@ -77,9 +77,8 @@ runs:
       if: inputs.write == 'true' && inputs.artifact-hit != 'true'
       uses: actions/cache/save@v6
       with:
-        # 与 Restore build artifacts 保持同一组路径（同样不含 crates/maestro-plugin-sdk/target/）。
+        # 与 Restore build artifacts 保持同一组路径（同样不含 crates/maestro-plugin-sdk/target/
+        # 与 plugins/*/target/，理由见那里）。
         path: |
           src-tauri/target/
-          # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
-          plugins/pi/target/
         key: ${{ inputs.artifact-key }}

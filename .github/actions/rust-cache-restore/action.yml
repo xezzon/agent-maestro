@@ -59,9 +59,9 @@ runs:
         # （库 crate 不提交 lock），key 里只能放它的 Cargo.toml 哈希 —— 那是依赖范围而非
         # 解析结果，传递依赖发一个 patch 版就让缓存内容追不上；而 key 不变时保存会被跳过，
         # 缓存于是长期停留在过期状态。它的冷编代价约 1 分钟，不值得为此加机制。
+        # 同样不含 plugins/*/target/：插件 wasm 由宿主 build.rs 编一次，冷编仅数秒，
+        # 而每个插件的 target 目录在 CI 里也在数百 MiB 量级——撑大缓存条目不划算。
         path: |
           src-tauri/target/
-          # 插件 wasm 在宿主构建（build.rs）时编译，产物缓存在插件自己的 target 目录。
-          plugins/pi/target/
         key: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.profile }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml') }}
         restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.profile }}-
