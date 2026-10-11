@@ -1,0 +1,14 @@
+[package]
+name = "maestro-plugin-claude-code"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+maestro-plugin-sdk = { path = "../../crates/maestro-plugin-sdk", version = "2.2.0" }
+serde = { version = "1", features = ["derive"] }
+# preserve_order：settings.json 是用户文件，合并写入必须保住其余键的相对顺序。
+serde_json = { version = "1", features = ["preserve_order"] }

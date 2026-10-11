@@ -23,7 +23,7 @@ use wasmtime::Engine;
 
 use crate::{
     paths::MaestroPaths,
-    plugin::builtin::{BUILTIN_PI_ID, BUILTIN_PI_SOURCE},
+    plugin::builtin::BUILTINS,
     provider::Provider,
     store::{AppStore, StoreError, Variables},
 };
@@ -305,10 +305,10 @@ impl PluginService {
         }
 
         // 筛选出配置中缺失的内置插件：随后的安装管线会为其落位并补写条目。
-        let missing_builtins: Vec<&str> = [(BUILTIN_PI_SOURCE, BUILTIN_PI_ID)]
+        let missing_builtins: Vec<&str> = BUILTINS
             .iter()
-            .filter(|(_, plugin_id)| !plugin_entries.iter().any(|entry| entry.id == *plugin_id))
-            .map(|(plugin_source, _)| *plugin_source)
+            .filter(|plugin| !plugin_entries.iter().any(|entry| entry.id == plugin.id))
+            .map(|plugin| plugin.source)
             .collect();
 
         for builtin_source in missing_builtins {
@@ -438,6 +438,14 @@ impl PluginService {
         let source_kind = SourceKind::from_source(source).ok_or("unknown source kind")?;
         log::debug!("fetching plugin artifacts: source={source}");
 
+        // 内置来源按 source 精确查表分派（issue #56）：未知的 builtin:<id> 报错而非回落
+        // 到某个内置插件——回落会把别人的 manifest 与 wasm 落位到该来源名下。
+        let builtin = if source_kind == SourceKind::Builtin {
+            Some(builtin::find(source).ok_or_else(|| format!("未知的内置插件来源：{source}"))?)
+        } else {
+            None
+        };
+
         let raw_manifest = match source_kind {
             SourceKind::Https => {
                 let bytes = self
@@ -450,13 +458,16 @@ impl PluginService {
             SourceKind::File => {
                 fs::read_to_string(source).map_err(|e| format!("读取 {source} 失败：{e}"))?
             }
-            SourceKind::Builtin => builtin::PI_MANIFEST_JSON.to_string(),
+            SourceKind::Builtin => builtin
+                .expect("内置来源已在上面查表分派")
+                .manifest_json
+                .to_string(),
         };
 
         let manifest = manifest::parse_manifest(source_kind, &raw_manifest)?;
 
-        let wasm = if source_kind == SourceKind::Builtin {
-            Vec::from(builtin::PI_WASM)
+        let wasm = if let Some(builtin) = builtin {
+            Vec::from(builtin.wasm)
         } else if is_https_url(&manifest.entry) {
             self.fetcher.fetch(&manifest.entry)?
         } else {
@@ -894,9 +905,32 @@ mod tests {
     };
     use super::*;
     use crate::paths::MaestroPaths;
+    use std::collections::BTreeSet;
 
     const MANIFEST_URL: &str = "https://example.com/releases/download/v1/manifest.json";
     const WASM_URL: &str = "https://example.com/releases/download/v1/plugin.wasm";
+
+    /// 按 id 取配置条目：内置插件已不止一个，固定的下标不再可用。
+    fn plugin_entry<'a>(plugins: &'a [PluginEntry], id: &str) -> &'a PluginEntry {
+        plugins
+            .iter()
+            .find(|entry| entry.id == id)
+            .unwrap_or_else(|| panic!("配置条目「{id}」不存在"))
+    }
+
+    fn plugin_view<'a>(views: &'a [PluginView], id: &str) -> &'a PluginView {
+        views
+            .iter()
+            .find(|view| view.id == id)
+            .unwrap_or_else(|| panic!("插件「{id}」不在列表中"))
+    }
+
+    fn plugin_report<'a>(reports: &'a [PluginApplyReport], id: &str) -> &'a PluginApplyReport {
+        reports
+            .iter()
+            .find(|report| report.id == id)
+            .unwrap_or_else(|| panic!("插件「{id}」没有投影报告"))
+    }
 
     /// https 来源的替身：manifest 的 entry 指向 Release 资产，产物用内置 pi wasm 充当
     /// （内置 pi 即一份符合 WIT 合同的真实组件）。
@@ -1543,7 +1577,11 @@ mod tests {
         let service = test_service(home.path());
 
         service.startup(&store).unwrap();
-        assert_eq!(snapshot(&store).plugins.len(), 1);
+        assert_eq!(
+            snapshot(&store).plugins.len(),
+            builtin::BUILTINS.len(),
+            "启动补装全部内置插件"
+        );
 
         // 故意损坏宿主落位的 wasm：重新加载必须按内嵌字节还原。
         let placed_wasm = maestro_paths.plugin_dir("pi").join(PLACED_WASM);
@@ -1558,10 +1596,13 @@ mod tests {
             builtin::PI_WASM.to_vec(),
             "宿主副本已按内嵌字节恢复"
         );
-        let view = &service.list(&store).unwrap()[0];
+        let views = service.list(&store).unwrap();
+        let view = plugin_view(&views, builtin::BUILTIN_PI_ID);
         assert_eq!(view.error, None);
-        assert_eq!(view.id, builtin::BUILTIN_PI_ID, "注册表重新装载成功");
-        assert!(snapshot(&store).plugins[0].enabled, "配置条目未被改动");
+        assert!(
+            plugin_entry(&snapshot(&store).plugins, builtin::BUILTIN_PI_ID).enabled,
+            "配置条目未被改动"
+        );
     }
 
     /// 全新主目录：内置插件与其余来源同一安装管线（落位 + 写条目），且可重复启动。
@@ -1575,10 +1616,14 @@ mod tests {
         service.startup(&store).unwrap();
 
         let plugins = snapshot(&store).plugins;
-        assert_eq!(plugins.len(), 1, "启动时补装缺失的内置插件");
-        assert_eq!(plugins[0].source, builtin::BUILTIN_PI_SOURCE);
-        assert_eq!(plugins[0].id, builtin::BUILTIN_PI_ID);
-        assert!(plugins[0].enabled);
+        assert_eq!(
+            plugins.len(),
+            builtin::BUILTINS.len(),
+            "启动时补装缺失的内置插件"
+        );
+        let pi = plugin_entry(&plugins, builtin::BUILTIN_PI_ID);
+        assert_eq!(pi.source, builtin::BUILTIN_PI_SOURCE);
+        assert!(pi.enabled);
         assert!(
             maestro_paths
                 .plugin_dir("pi")
@@ -1589,14 +1634,66 @@ mod tests {
         );
 
         let views = service.list(&store).unwrap();
-        assert_eq!(views.len(), 1);
-        assert!(views[0].builtin);
-        assert_eq!(views[0].error, None, "{:?}", views[0].error);
+        assert_eq!(views.len(), builtin::BUILTINS.len());
+        let view = plugin_view(&views, builtin::BUILTIN_PI_ID);
+        assert!(view.builtin);
+        assert_eq!(view.error, None, "{:?}", view.error);
 
         // 再次启动：条目已存在，不重复安装，注册表照常重建。
         service.startup(&store).unwrap();
-        assert_eq!(snapshot(&store).plugins.len(), 1, "重复启动不产生重复条目");
-        assert_eq!(service.list(&store).unwrap()[0].error, None);
+        assert_eq!(
+            snapshot(&store).plugins.len(),
+            builtin::BUILTINS.len(),
+            "重复启动不产生重复条目"
+        );
+        let views = service.list(&store).unwrap();
+        assert_eq!(plugin_view(&views, builtin::BUILTIN_PI_ID).error, None);
+    }
+
+    /// 内置来源按 source 精确分派（issue #56）：此前任何 `builtin:` 来源都返回 pi 的
+    /// manifest 与 wasm，`builtin:claude-code` 会静默落位成 pi。这条回归钉住分派行为。
+    #[test]
+    fn builtin_source_dispatches_to_its_own_manifest_and_wasm() {
+        let home = temp_home();
+        let store = store_at(home.path());
+        let maestro_paths = MaestroPaths::get();
+        let service = test_service(home.path());
+
+        service.startup(&store).unwrap();
+
+        let plugins = snapshot(&store).plugins;
+        let ids: BTreeSet<&str> = plugins.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            BTreeSet::from(["pi", "claude-code"]),
+            "内置插件 id 集合"
+        );
+        assert_ne!(
+            builtin::CLAUDE_CODE_WASM,
+            builtin::PI_WASM,
+            "两个内置产物必须是各自编译的 wasm"
+        );
+
+        // builtin:claude-code 落位的是 Claude Code 自己的 manifest 与 wasm。
+        let dir = maestro_paths.plugin_dir(builtin::BUILTIN_CLAUDE_CODE_ID);
+        assert_eq!(
+            fs::read_to_string(dir.join(PLACED_MANIFEST)).unwrap(),
+            builtin::CLAUDE_CODE_MANIFEST_JSON,
+            "落位 manifest 为 Claude Code 自己的 manifest"
+        );
+        assert_eq!(
+            fs::read(dir.join(PLACED_WASM)).unwrap(),
+            builtin::CLAUDE_CODE_WASM.to_vec(),
+            "落位 wasm 为 Claude Code 自己的产物"
+        );
+
+        // 未知的 builtin: 来源报错，不回落（回落会把别人的产物落位到该来源名下）。
+        let err = service.add_plugin(&store, "builtin:ghost").unwrap_err();
+        assert!(err.contains("未知的内置插件来源"), "{err}");
+        assert!(
+            !maestro_paths.plugin_dir("ghost").exists(),
+            "未知来源不得落位"
+        );
     }
 
     /// 逐插件报告：applied / failed / skipped 分类，单插件失败不影响其它插件。
@@ -1963,8 +2060,9 @@ mod tests {
             .write_providers(&providers, &BTreeMap::new())
             .unwrap();
 
-        assert_eq!(reports[0].status, "failed");
-        let reason = reports[0].reason.as_deref().unwrap();
+        let report = plugin_report(&reports, "pi");
+        assert_eq!(report.status, "failed");
+        let reason = report.reason.as_deref().unwrap();
         assert!(reason.contains("插件配置已损坏"), "{reason}");
         assert!(
             reason.contains(

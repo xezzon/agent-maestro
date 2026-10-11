@@ -5,7 +5,7 @@ Agent Maestro 是一个跨平台桌面应用，集中管理各 Agent 工具（Pi
 ## 术语
 
 **Provider**：
-用户自行配置的一条 LLM API 接入，以用户自定义的**唯一 slug** 标识（slug 同时兼作界面展示名），可对多种协议（protocol）各持一个 Base URL 端点，并携带一份共享的凭证（API Key）、一份共享的模型列表与一份共享的自定义 HTTP header（`custom_header`），记录投影实际使用哪一个端点（未记录或记录失效时由插件兜底，见 ADR 0016）。多条 Provider 可以共享同一个 Base URL（例如同一网关下的不同账号），靠各自不同的 slug 区分；slug 一旦创建不可更改，且仅允许 `[a-z][a-z0-9-_]*` 的字符。Provider 有一个启用状态（默认启用，旧配置缺此字段视为启用）：禁用后不参与投影，已投影到工具侧的条目随之消失；禁用态仍可编辑。启用状态只影响「是否参与投影」，不改变落盘一致性——禁用 Provider 的占位符仍须对变量表可解析，存储写出的每条记录都自洽。
+用户自行配置的一条 LLM API 接入，以用户自定义的**唯一 slug** 标识（slug 同时兼作界面展示名），可对多种协议（protocol）各持一个 Base URL 端点，并携带一份共享的凭证（API Key）、一份共享的模型列表与一份共享的自定义 HTTP header（`custom_header`），记录投影实际使用哪一个端点（未记录或记录失效时由插件兜底，见 ADR 0016）。多条 Provider 可以共享同一个 Base URL（例如同一网关下的不同账号），靠各自不同的 slug 区分；slug 一旦创建不可更改，且仅允许 `[a-z][a-z0-9_-]*` 的字符。Provider 有一个启用状态（默认启用，旧配置缺此字段视为启用）：禁用后不参与投影，已投影到工具侧的条目随之消失；禁用态仍可编辑。启用状态只影响「是否参与投影」，不改变落盘一致性——禁用 Provider 的占位符仍须对变量表可解析，存储写出的每条记录都自洽。
 _避免_：vendor、服务商、模型 Provider（会把「一条接入」与「一家公司/预设目录」混为一谈）
 
 **协议（protocol）**：
@@ -13,7 +13,7 @@ Provider 与 LLM API 对话所用的线协议，取二选一的枚举：`openai-
 _避免_：类型、type、kind（语义模糊）
 
 **端点（endpoint）**：
-某个协议下可访问该 Provider 的 Base URL，如 `openai-completions` 协议下的 `https://api.example.com/v1`。一个 Provider 的每个已配置协议至多有一个端点，未配置的协议其端点值为空。投影实际用哪个端点由插件裁定（选择有效→用它，否则唯一端点，多端点且无有效选择→优先 `openai-completions`，见 ADR 0016）；宿主只把全部端点与选择原样交给插件，零端点的 Provider 由宿主在投影前跳过。
+某个协议下可访问该 Provider 的 Base URL，如 `openai-completions` 协议下的 `https://api.example.com/v1`。一个 Provider 的每个已配置协议至多有一个端点，未配置的协议其端点值为空。投影实际用哪个端点由插件裁定（选择有效→用它，否则唯一端点，多端点且无有效选择→优先 `openai-completions`，见 ADR 0016；工具只支持一种线协议时，协议由该工具本身决定，插件直接取该协议端点，见 ADR 0021）；宿主只把全部端点与选择原样交给插件，零端点的 Provider 由宿主在投影前跳过。
 _避免_：base url（作为泛指时）
 
 **Model（模型）**：

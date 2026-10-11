@@ -45,7 +45,7 @@ impl SourceKind {
 /// 必填字段缺失或插件 id 不合法即加载失败（见 issue #34）。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct Manifest {
-    /// 插件 id：`[a-z][a-z0-9-_]*`。
+    /// 插件 id：`[a-z][a-z0-9_-]*`。
     pub(crate) id: String,
     /// 插件被授权写入的配置目录：字符串形式以平台变量前缀声明（`$HOME/.pi`、
     /// `$XDG_CONFIG_HOME/zed`…），对象形式按平台键各声明一条（键固定为
@@ -476,6 +476,33 @@ mod tests {
                 .unwrap()
                 .settings_schema,
             None
+        );
+    }
+
+    /// `settings_schema` 的字段顺序照抄 manifest（ADR 0017）：「原样透传」到前端后，
+    /// rjsf 按 `properties` 的顺序排布表单字段，序列化时不得按字典序重排。
+    #[test]
+    fn settings_schema_property_order_matches_the_manifest() {
+        let (_root, _g) = platform_dirs_setup();
+        let text = r#"{
+                "id": "zed",
+                "config_dir": "$HOME/.zed",
+                "entry": "p.wasm",
+                "settings_schema": {
+                    "type": "object",
+                    "properties": {
+                        "zz_later": { "type": "string" },
+                        "aa_earlier": { "type": "string" }
+                    }
+                }
+            }"#;
+
+        let manifest = parse_manifest(SourceKind::File, text).unwrap();
+
+        let serialized = serde_json::to_string(&manifest.settings_schema).unwrap();
+        assert!(
+            serialized.find("zz_later") < serialized.find("aa_earlier"),
+            "字段顺序应与 manifest 一致：{serialized}"
         );
     }
 
