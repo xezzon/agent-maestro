@@ -258,7 +258,7 @@ function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
  * @param {(busy: boolean) => void=} param0.onBusyChange 上报本表单的保存态
  */
 function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyChange }) {
-  const SLUG_PATTERN = /^[a-z][a-z0-9-_]*$/;
+  const SLUG_PATTERN = /^[a-z][a-z0-9_-]*$/;
   const PROTOCOL_OPTIONS = [
     {
       value: OPENAI_COMPLETIONS,

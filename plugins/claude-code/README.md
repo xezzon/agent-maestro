@@ -1,4 +1,4 @@
-# Claude Code 适配器（`plugins/claude-code`）
+# Claude Code 插件（`plugins/claude-code`）
 
 > 状态：已实现（决策见 [ADR 0020](../../docs/adr/0020-provider-selection-in-plugin-form.md)、[ADR 0021](../../docs/adr/0021-tool-decides-protocol.md)，背景见 issue #56）。本文即本插件的投影合同，实现见 [`src/lib.rs`](src/lib.rs)。
 

@@ -45,7 +45,7 @@ impl SourceKind {
 /// 必填字段缺失或插件 id 不合法即加载失败（见 issue #34）。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct Manifest {
-    /// 插件 id：`[a-z][a-z0-9-_]*`。
+    /// 插件 id：`[a-z][a-z0-9_-]*`。
     pub(crate) id: String,
     /// 插件被授权写入的配置目录：字符串形式以平台变量前缀声明（`$HOME/.pi`、
     /// `$XDG_CONFIG_HOME/zed`…），对象形式按平台键各声明一条（键固定为

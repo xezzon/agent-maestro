@@ -11,7 +11,7 @@
         "type": "string",
         "title": "Provider",
         "description": "指定 Claude Code 使用哪个 Provider（必填，填其 slug，见 Provider 页）。配置里缺这个字段时（手工编辑的配置）插件仍兜底：恰好一个候选 Provider 就自动用它，多于一个会投影失败。",
-        "pattern": "^[a-z][a-z0-9-_]*$"
+        "pattern": "^[a-z][a-z0-9_-]*$"
       },
       "model_id": {
         "type": "string",
