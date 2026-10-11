@@ -13,7 +13,7 @@ Provider 与 LLM API 对话所用的线协议，取二选一的枚举：`openai-
 _避免_：类型、type、kind（语义模糊）
 
 **端点（endpoint）**：
-某个协议下可访问该 Provider 的 Base URL，如 `openai-completions` 协议下的 `https://api.example.com/v1`。一个 Provider 的每个已配置协议至多有一个端点，未配置的协议其端点值为空。投影实际用哪个端点由插件裁定（选择有效→用它，否则唯一端点，多端点且无有效选择→优先 `openai-completions`，见 ADR 0016）；宿主只把全部端点与选择原样交给插件，零端点的 Provider 由宿主在投影前跳过。
+某个协议下可访问该 Provider 的 Base URL，如 `openai-completions` 协议下的 `https://api.example.com/v1`。一个 Provider 的每个已配置协议至多有一个端点，未配置的协议其端点值为空。投影实际用哪个端点由插件裁定（选择有效→用它，否则唯一端点，多端点且无有效选择→优先 `openai-completions`，见 ADR 0016；工具只支持一种线协议时，协议由该工具本身决定，插件直接取该协议端点，见 ADR 0021）；宿主只把全部端点与选择原样交给插件，零端点的 Provider 由宿主在投影前跳过。
 _避免_：base url（作为泛指时）
 
 **Model（模型）**：
