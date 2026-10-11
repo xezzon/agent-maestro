@@ -137,9 +137,10 @@ function PageHeader({ plugin }) {
 }
 
 /**
- * 插件配置保存的共享样板：saving 状态 + 整包写回 + 失败 message.error。
+ * 插件配置保存的共享样板：saving 状态 + 整包写回 + 结果 message。
  * 返回 [saving, save]；save(config, patch, onSaved) 把 patch 并入 config
  * 整包写回该插件的配置（ADR 0018），成功后调用 onSaved（由调用方决定是否刷新）。
+ * 保存成功后页面未必有可见变化（表单段刷新后与提交前同形），故成功也提示。
  * @param {string} source 插件来源（条目身份，同 PluginEntry::source）
  * @returns {[boolean, (config: import("./api/plugins").PluginConfig, patch: Object, onSaved: () => void) => Promise<void>]}
  */
@@ -149,6 +150,7 @@ function usePluginConfigSave(source) {
     setSaving(true);
     try {
       await setPluginConfig(source, { ...config, ...patch });
+      message.success("插件配置已保存");
       onSaved();
     } catch (err) {
       message.error(String(err));
@@ -361,10 +363,14 @@ function PluginSettingsForm({ plugin, config, onReload }) {
 
   return (
     <Card title="表单">
+      {/* noHtml5Validate：schema 声明了 required 时 rjsf 会把 required 传给 <input>，
+          浏览器的原生校验会先短路 submit，rjsf 自己的错误列表与字段提示就不会跑；
+          原生气泡由 webview 决定是否显示，故关掉它，改成与其它表单一致的常驻提示。 */}
       <RjsfForm
         schema={plugin.settings_schema}
         formData={config.form ?? undefined}
         validator={validator}
+        noHtml5Validate
         onSubmit={handleSubmit}
       >
         <div className="card-actions">

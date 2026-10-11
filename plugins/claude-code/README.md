@@ -20,7 +20,7 @@ Claude Code 只对接 Anthropic Messages，且把 `ANTHROPIC_BASE_URL` 当作基
 
 ## 用哪个 Provider
 
-Claude Code 同时只能对接一条接入，而宿主把全部 Provider 交给插件，所以选择由本插件的表单承载（见 ADR 0020）：
+Claude Code 同时只能对接一条接入，而宿主把全部 Provider 交给插件，所以选择由本插件的表单承载（见 ADR 0020）。表单把 `provider_slug` 列为**必填**（不保存空值），下表后三行的「表单留空」因此只在手工编辑配置文件时出现：
 
 | 情形 | 行为 |
 | --- | --- |
