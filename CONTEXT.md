@@ -1,6 +1,6 @@
 # Agent Maestro
 
-Agent Maestro 是一个跨平台桌面应用，集中管理各 Agent 工具（Pi、OpenCode、Zed……）的配置：LLM Provider、模型、MCP Server、Skills 与 Profile。配置在 Maestro 中录入一次，再投影（projection）到各工具自己的配置文件中；配置以 Maestro 为准。
+Agent Maestro 是一个跨平台桌面应用，集中管理各 harness（Pi、OpenCode、Zed……）的配置：LLM Provider、模型、MCP Server、Skills 与 Profile。配置在 Maestro 中录入一次，再投影（projection）到各工具自己的配置文件中；配置以 Maestro 为准。
 
 ## 术语
 
@@ -17,12 +17,12 @@ _避免_：类型、type、kind（语义模糊）
 _避免_：base url（作为泛指时）
 
 **Model（模型）**：
-某个 Provider 提供的 LLM 能力，以各 Agent 工具实际使用的模型 ID 字符串（如 `gpt-4o`）标识。模型不是全局实体——它从属于且仅从属于一个 Provider；同一个模型 ID 可以出现在多个 Provider 下（例如直连 OpenAI 与公司网关各有一条 `gpt-4o`）。可选的人类可读显示名只是元数据；模型还可声明自己的 token 能力上限（`limit`：上下文窗口、单次最大输入、最大输出）与能力集合（`capabilities`：`tool_use`、`image_in`、`thinking`）——这些是**声明式**元数据，Maestro 只保存与投影，不据此推断或裁剪请求。
+某个 Provider 提供的 LLM 能力，以各 harness 实际使用的模型 ID 字符串（如 `gpt-4o`）标识。模型不是全局实体——它从属于且仅从属于一个 Provider；同一个模型 ID 可以出现在多个 Provider 下（例如直连 OpenAI 与公司网关各有一条 `gpt-4o`）。可选的人类可读显示名只是元数据；模型还可声明自己的 token 能力上限（`limit`：上下文窗口、单次最大输入、最大输出）与能力集合（`capabilities`：`tool_use`、`image_in`、`thinking`）——这些是**声明式**元数据，Maestro 只保存与投影，不据此推断或裁剪请求。
 _避免_：model id（当指条目本身、而非 ID 字符串时）
 
-**工具（tool）**：
-被 Maestro 统一管理配置的 Agent 软件（Pi、OpenCode、Zed……）。每类工具由一个**插件**适配，其配置文件由插件在投影时写入。
-_避免_：客户端、应用（会与 Maestro 自身混淆）
+**harness**：
+被 Maestro 统一管理配置的 Agent 软件（Pi、OpenCode、Zed……）。每类 harness 由一个**插件**适配，其配置文件由插件在投影时写入。
+_避免_：Agent 工具、Agent Tool、客户端、应用（会与 Maestro 自身混淆）
 
 **投影（projection）**：
 把 Maestro 中录入的配置写入各工具自身配置文件的动作，是“配置一次、处处生效”的落地环节。配置以 Maestro 为准：工具侧的手工改动不被读取，投影时可能被覆盖。
