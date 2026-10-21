@@ -1,27 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import {
-  Alert,
-  Badge,
   Button,
-  Card,
   Checkbox,
   Collapse,
-  Empty,
   Flex,
   Form,
   Input,
   InputNumber,
   message,
-  Modal,
-  Popconfirm,
   Radio,
-  Spin,
-  Switch,
-  Tag,
-  Tooltip,
   Typography,
 } from "antd";
-import { CheckCircleTwoTone, FileTextOutlined } from "@ant-design/icons";
 import {
   ANTHROPIC_MESSAGES,
   CAPABILITY_IMAGE_IN,
@@ -30,17 +19,9 @@ import {
   OPENAI_COMPLETIONS,
   PROVIDER_PROTOCOLS,
   createProvider,
-  deleteProvider,
-  listProviders,
-  normalizeEndpoints,
-  setProviderEnabled,
   updateProvider,
-} from "./api/provider";
-import { applyProviders, listPlugins } from "./api/plugins";
-import { listVariables } from "./api/variables";
-import VariablesCard from "./components/VariablesCard";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { theme } from "antd";
+} from "../../api/provider";
+import FormActions from "../../components/FormActions";
 
 /** token 上限的预设快捷值：K/M 按十进制（128K = 128000），留空即「未设置」。 */
 const LIMIT_PRESETS = [
@@ -56,208 +37,15 @@ const MODEL_LIMIT_FIELDS = [
   { key: "max_output", label: "最大输出" },
 ];
 
-/** 能力枚举串与界面标签：分组（能力 / 输入模态）只是排版，落盘仍是枚举串。 */
-const CAPABILITY_LABELS = {
-  [CAPABILITY_TOOL_USE]: "工具调用",
-  [CAPABILITY_IMAGE_IN]: "视觉",
-  [CAPABILITY_THINKING]: "推理",
-};
-
-/** 只读展示一项 token 上限：未设置就显示「未设置」，不编造默认值。 */
-function formatLimit(value) {
-  return value == null ? "未设置" : String(value);
-}
-
 /**
  * @param {Object} param0
- * @param {import("./api/provider").Provider} param0.provider
- * @param {() => Promise<void>} param0.onReload
- */
-function ProviderCard({ provider, onReload }) {
-  const [editing, setEditing] = useState(false);
-  // 开关与编辑表单互斥：任一方进行中另一方整体禁用。否则切换成功后、
-  // 列表刷新落地前提交的表单仍持有切换前的 provider，会把刚完成的禁用改回启用。
-  const [busy, setBusy] = useState(false);
-
-  /** 开关独立于编辑表单：切换失败保持原状态。 */
-  async function handleToggleEnabled(enabled) {
-    setBusy(true);
-    try {
-      await setProviderEnabled(provider.slug, enabled);
-      await onReload();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const title = (
-    <Flex justify="space-between" align="center">
-      <Flex align="center" gap={8}>
-        <Typography.Text strong>{provider.slug}</Typography.Text>
-        {!provider.enabled && <Tag>已禁用</Tag>}
-      </Flex>
-      <Switch
-        checked={provider.enabled}
-        checkedChildren="启用"
-        unCheckedChildren="禁用"
-        disabled={busy}
-        onChange={handleToggleEnabled}
-      />
-    </Flex>
-  );
-
-  return <Card title={title} className={provider.enabled ? undefined : "provider-disabled"}>
-    {editing
-      ? <ProviderForm
-        provider={provider}
-        providers={[]} // 更新状态下不需要检查 slug 冲突（因为 slug 不可编辑）
-        disabled={busy}
-        onBusyChange={setBusy}
-        onFinish={(refresh) => {
-          setEditing(false)
-          if (refresh) {
-            onReload();
-          }
-        }}
-      />
-      : <ProviderReadonlyForm
-        provider={provider}
-        onEdit={() => setEditing(true)}
-        afterDelete={onReload}
-      />
-    }
-  </Card>
-}
-
-/**
- * @param {Object} param0
- * @param {import("./api/provider").Provider} param0.provider
- * @param {() => void} param0.afterDelete
- * @param {() => void} param0.onEdit
- */
-function ProviderReadonlyForm({ provider, afterDelete, onEdit }) {
-  const [deleting, setDeleting] = useState(false);
-  const { useToken } = theme;
-  const { token } = useToken();
-
-  async function handleDelete() {
-    setDeleting(true);
-    try {
-      await deleteProvider(provider.slug);
-      afterDelete();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setDeleting(false);
-    }
-  }
-
-  return <>
-    <Form layout="vertical" disabled>
-      {PROVIDER_PROTOCOLS.map((protocol) => (
-        <Form.Item
-          key={protocol}
-          label={
-            <Flex align="center" gap={8}>
-              <span>{protocol}</span>
-              {provider.selected_protocol === protocol && (
-                <Tooltip title="已选择">
-                  <Tag
-                    color="blue"
-                    icon={<CheckCircleTwoTone aria-label="已选择" />}
-                  />
-                </Tooltip>
-              )}
-            </Flex>
-          }
-        >
-          <Input
-            disabled
-            value={provider.base_url?.[protocol] ?? ""}
-            placeholder="未配置"
-          />
-        </Form.Item>
-      ))}
-    </Form>
-    <div className="provider-meta">
-      <span>
-        API Key <Tag>{provider.api_key_set ? "已设置" : "未设置"}</Tag>
-      </span>
-    </div>
-    {(provider.custom_header?.length ?? 0) > 0 && (
-      // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
-      <div className="provider-headers">
-        <Typography.Text>Header</Typography.Text>
-        {provider.custom_header.map((header) => (
-          <Tag key={header.name}>{header.name}</Tag>
-        ))}
-      </div>
-    )}
-    <Flex align="center" gap={8} className="provider-models-title">
-      <Typography.Title level={3} style={{ margin: 0 }}>
-        模型
-      </Typography.Title>
-      <Badge count={provider.models?.length ?? 0} showZero color={token.colorPrimary} />
-    </Flex>
-    {(provider.models?.length ?? 0) > 0 && (
-      <ul className="provider-models">
-        {provider.models.map((model, index) => (
-          <li key={`${model.id}-${index}`}>
-            <Flex vertical gap={4}>
-              <Flex align="baseline" gap={8}>
-                <Typography.Text>{model.display_name || model.id}</Typography.Text>
-                {model.display_name ? (
-                  <Typography.Text type="secondary">{model.id}</Typography.Text>
-                ) : null}
-              </Flex>
-              {(model.capabilities?.length ?? 0) > 0 ? (
-                <Flex align="center" gap={4}>
-                  {model.capabilities.map((capability) => (
-                    <Tag key={capability}>{CAPABILITY_LABELS[capability]}</Tag>
-                  ))}
-                </Flex>
-              ) : null}
-              <Typography.Text type="secondary">
-                上下文窗口 {formatLimit(model.limit?.context_window)}
-                ｜单次最大输入 {formatLimit(model.limit?.max_input)}
-                ｜最大输出 {formatLimit(model.limit?.max_output)}
-              </Typography.Text>
-            </Flex>
-          </li>
-        ))}
-      </ul>
-    )}
-    <div className="card-actions">
-      <Button disabled={deleting} onClick={onEdit}>
-        编辑
-      </Button>
-      <Popconfirm
-        title="删除 Provider"
-        description={`将同时删除「${provider.slug}」的模型与 API Key，确定删除？`}
-        okText="删除"
-        cancelText="取消"
-        okButtonProps={{ danger: true }}
-        onConfirm={handleDelete}
-      >
-        <Button danger disabled={deleting}>
-          删除
-        </Button>
-      </Popconfirm>
-    </div>
-  </>
-}
-
-/**
- * @param {Object} param0
- * @param {import("./api/provider").Provider} param0.provider
- * @param {import("./api/provider").Provider[]} param0.providers 当前存在的 providers，用于检查 slug 冲突
+ * @param {import("../../api/provider").Provider} param0.provider
+ * @param {import("../../api/provider").Provider[]} param0.providers 当前存在的 providers，用于检查 slug 冲突
  * @param {(refresh: boolean) => void} param0.onFinish
  * @param {boolean=} param0.disabled 外部（状态开关）进行中时整体禁用表单
  * @param {(busy: boolean) => void=} param0.onBusyChange 上报本表单的保存态
  */
-function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyChange }) {
+export default function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyChange }) {
   const SLUG_PATTERN = /^[a-z][a-z0-9_-]*$/;
   const PROTOCOL_OPTIONS = [
     {
@@ -614,219 +402,10 @@ function ProviderForm({ provider, providers, onFinish, disabled = false, onBusyC
       </Form.List>
     </Form.Item>
 
-    <div className="card-actions">
-      <Button disabled={saving} onClick={() => onFinish(false)}>
-        取消
-      </Button>
-      <Button
-        type="primary"
-        loading={saving}
-        onClick={() => form.submit()}
-      >
-        保存
-      </Button>
-    </div>
+    <FormActions
+      saving={saving}
+      onCancel={() => onFinish(false)}
+      onSave={() => form.submit()}
+    />
   </Form>
-}
-
-/**
- * 逐插件投影结果（见 issue #34 用户故事 2/3/4）。
- * @param {Object} param0
- * @param {import("./api/plugins").PluginApplyReport[]} param0.reports
- */
-function ApplyResultList({ reports }) {
-  return (
-    <Flex vertical gap={12}>
-      {reports.map((report) => (
-        <div key={report.id}>
-          <Flex align="center" gap={8}>
-            <Typography.Text strong>{report.id}</Typography.Text>
-            {report.status === "applied" && (
-              <Tag color="success">已写入</Tag>
-            )}
-            {report.status === "failed" && <Tag color="error">失败</Tag>}
-            {report.status === "skipped" && <Tag>已跳过</Tag>}
-          </Flex>
-          {report.files.length > 0 && (
-            <Flex align="center" gap={8}>
-              <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
-                写入文件：{report.files.join("、")}
-              </Typography.Paragraph>
-              <Tooltip title="打开文件">
-                <Button
-                  size="small"
-                  shape="circle"
-                  aria-label="打开文件"
-                  icon={<FileTextOutlined />}
-                  onClick={async () => {
-                    try {
-                      await openPath(report.files[0]);
-                    } catch (err) {
-                      // opener 是插件命令，失败不经 Rust 命令层，前端自行落盘（ADR 0008）。
-                      console.error(String(err));
-                      message.error(String(err));
-                    }
-                  }}
-                />
-              </Tooltip>
-            </Flex>
-          )}
-          {report.skipped.map((skip) => (
-            <Typography.Paragraph type="secondary" style={{ margin: 0 }} key={skip.slug}>
-              跳过 Provider「{skip.slug}」：{skip.reason}
-            </Typography.Paragraph>
-          ))}
-          {report.reason && (
-            <Typography.Paragraph type="danger" style={{ margin: 0 }}>
-              {report.reason}
-            </Typography.Paragraph>
-          )}
-        </div>
-      ))}
-    </Flex>
-  );
-}
-
-export default function ProvidersPage() {
-  const [providers, setProviders] = useState([]);
-  const [variables, setVariables] = useState({});
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(null);
-  const [creating, setCreating] = useState(false);
-  const [applying, setApplying] = useState(false);
-  const [canApply, setCanApply] = useState(false);
-  const [reports, setReports] = useState(null);
-
-  const reload = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [providers, variables] = await Promise.all([listProviders(), listVariables()]);
-      setProviders(providers);
-      setVariables(variables);
-      setLoadError(null);
-    } catch (err) {
-      setLoadError(String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    reload();
-    // 没有可用插件（已启用且加载成功）时投影按钮禁用（用户故事 24）。
-    listPlugins()
-      .then((plugins) =>
-        setCanApply(plugins.some((p) => p.enabled && !p.error)),
-      )
-      .catch(() => setCanApply(false));
-  }, [reload]);
-
-  async function handleApply() {
-    setApplying(true);
-    try {
-      setReports(await applyProviders());
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setApplying(false);
-    }
-  }
-
-  function openCreate() {
-    setCreating(true);
-  }
-
-  if (loadError) {
-    return (
-      <Alert
-        type="error"
-        showIcon
-        title="配置加载失败"
-        description={<pre className="error-detail">{loadError}</pre>}
-      />
-    );
-  }
-
-  return (
-    <div className="page providers-page">
-      <div className="page-header">
-        <Typography.Title level={4} style={{ margin: 0 }}>
-          Provider
-        </Typography.Title>
-        <Flex gap={8}>
-          <Button
-            disabled={!canApply || creating}
-            loading={applying}
-            onClick={handleApply}
-          >
-            应用到工具
-          </Button>
-          <Button type="primary" disabled={creating || loading} onClick={openCreate}>
-            新建
-          </Button>
-        </Flex>
-      </div>
-
-      <Modal
-        title="应用到工具"
-        open={reports !== null}
-        footer={
-          <Button type="primary" onClick={() => setReports(null)}>
-            关闭
-          </Button>
-        }
-        onCancel={() => setReports(null)}
-      >
-        <ApplyResultList reports={reports ?? []} />
-      </Modal>
-
-      <div className="providers-layout">
-        <div className="providers-main">
-          {loading && providers.length === 0 ? (
-            <div className="page-loading">
-              <Spin />
-            </div>
-          ) : (
-            <Flex vertical gap={16}>
-              {providers.length === 0 && !creating && (
-                <Empty description="尚未接入任何 Provider">
-                  <Button type="primary" onClick={openCreate}>
-                    新建 Provider
-                  </Button>
-                </Empty>
-              )}
-              {
-                creating && (
-                  <Card title="新建 Provider">
-                    <ProviderForm
-                      provider={{
-                        slug: "",
-                        base_url: normalizeEndpoints(),
-                        selected_protocol: null,
-                        models: [],
-                        enabled: true,
-                      }}
-                      providers={providers}
-                      onFinish={(refresh) => {
-                        setCreating(false);
-                        if (refresh) {
-                          reload();
-                        }
-                      }}
-                    />
-                  </Card>
-                )
-              }
-              {providers.map((provider) =>
-                <ProviderCard key={provider.slug} provider={provider} onReload={reload} />
-              )}
-            </Flex>
-          )}
-        </div>
-        <aside className="variables-sider">
-          <VariablesCard variables={variables} onReload={reload} />
-        </aside>
-      </div>
-    </div>
-  );
 }
