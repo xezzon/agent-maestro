@@ -2,6 +2,7 @@ import { useState } from "react";
 import { DeleteOutlined } from "@ant-design/icons";
 import { Button, Card, Flex, Form, Input, Typography, message } from "antd";
 import { setVariables as saveVariables } from "../api/variables";
+import FormActions from "./FormActions";
 
 /**
  * 全局变量表卡片（issue #90）：维护全局配置里的变量表（名 → 默认值，ADR 0015）。
@@ -145,17 +146,10 @@ function VariablesForm({ variables, onFinish }) {
       )}
     </Form.List>
 
-    <div className="card-actions">
-      <Button disabled={saving} onClick={() => onFinish(false)}>
-        取消
-      </Button>
-      <Button
-        type="primary"
-        loading={saving}
-        onClick={() => form.submit()}
-      >
-        保存
-      </Button>
-    </div>
+    <FormActions
+      saving={saving}
+      onCancel={() => onFinish(false)}
+      onSave={() => form.submit()}
+    />
   </Form>;
 }
