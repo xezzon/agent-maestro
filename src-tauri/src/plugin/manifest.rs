@@ -377,7 +377,7 @@ pub(crate) fn is_https_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
 }
 
-/// 插件 id 规则与 Provider slug 一致（见 CONTEXT.md）。
+/// 插件 id 规则与 Provider slug 一致（见 docs/GLOSSARY.md）。
 fn is_valid_plugin_id(id: &str) -> bool {
     let mut chars = id.chars();
     match chars.next() {

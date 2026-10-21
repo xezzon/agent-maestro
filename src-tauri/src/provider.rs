@@ -121,7 +121,7 @@ where
     Ok(capabilities)
 }
 
-/// 一条 LLM API 接入；以 slug 为 key 存于 providers 之下（见 CONTEXT.md）。
+/// 一条 LLM API 接入；以 slug 为 key 存于 providers 之下（见 docs/GLOSSARY.md）。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Provider {
     /// 是否参与投影：默认启用，旧配置缺该字段同样视为启用（向后兼容）。
@@ -208,7 +208,7 @@ impl Debug for Provider {
 pub(crate) type FieldError = (String, String);
 
 impl Provider {
-    /// 插值（CONTEXT.md「插值」/ ADR 0015）：把自身全部字符串值里的占位符
+    /// 插值（docs/GLOSSARY.md「插值」/ ADR 0015）：把自身全部字符串值里的占位符
     /// 替换为变量实际值，返回字面值副本；失败返回（字段名, 库报错）。
     ///
     /// 占位符语法与转义由 `crate::interpolate` 的纯函数执行（ADR 0014 换库哨兵）；

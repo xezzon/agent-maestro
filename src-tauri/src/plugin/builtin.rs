@@ -4,7 +4,7 @@
 /// manifest 来自仓库根的内置插件目录（`plugins/<id>/`）；wasm 产物不入库，
 /// 由宿主 build.rs 在构建时自动编译（见 ADR 0005，构建清单见 `src-tauri/build.rs`
 /// 的 `BUILTIN_PLUGINS`）。
-/// 内置来源的 `source` 前缀：来源以内置前缀标识（见 CONTEXT.md「来源」）。
+/// 内置来源的 `source` 前缀：来源以内置前缀标识（见 docs/GLOSSARY.md「来源」）。
 pub(crate) const SOURCE_PREFIX: &str = "builtin:";
 
 pub(crate) const BUILTIN_PI_SOURCE: &str = "builtin:pi";
