@@ -805,6 +805,7 @@ export default function ProvidersPage() {
                         selected_protocol: null,
                         models: [],
                         enabled: true,
+                        api_key_set: false,
                       }}
                       providers={providers}
                       onFinish={(refresh) => {

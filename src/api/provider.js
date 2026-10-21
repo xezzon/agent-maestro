@@ -41,6 +41,9 @@
  * 空串即未设置；第一期凭证随配置文件落盘，不做密钥链（ADR 0002 推迟采纳）。
  * `base_url` 只包含已配置的槽位，缺键即未配置。
  * `custom_header` 是名→值映射（无序），缺键即空映射。
+ * 创建/更新命令的 `provider` 负载复用同一组字段名，但恒带 `slug`、
+ * `selected_protocol`（未选为 `null`）与 `api_key`（空串即未设置）；
+ * 写入字段集合固定，见 `toProviderPayload`。
  * @typedef {Object} ProviderRequest
  * @property {string} slug
  * @property {boolean} enabled 禁用后不参与投影；旧配置缺此字段视为启用。
@@ -51,8 +54,8 @@
  * @property {Model[]} models 保序模型列表。
  */
 /**
- * 列表页/表单使用的 Provider 视图：原样携带明文 `api_key`（空串即未设置），
- * 创建/更新时整包回传。
+ * 列表页/表单使用的 Provider 视图：原样携带明文 `api_key`（空串即未设置）。
+ * 创建/更新时按写入字段集回传（见 `toProviderPayload`），只读字段不回传。
  * @typedef {Object} Provider
  * @property {string} slug
  * @property {boolean} enabled 禁用后不参与投影；禁用态仍可编辑。
@@ -61,6 +64,7 @@
  * @property {Model[]} models
  * @property {CustomHeader[]} custom_header 界面形态的行列表；读入时按名排序展开。
  * @property {string=} api_key
+ * @property {boolean} api_key_set 只读：是否已配置凭证（读取路径生成，不随写入负载回传）。
  */
 import { invoke } from "@tauri-apps/api/core";
 
@@ -82,6 +86,19 @@ const MODEL_CAPABILITIES = [
   CAPABILITY_IMAGE_IN,
   CAPABILITY_THINKING,
 ];
+
+/**
+ * 按字节序比较两个字符串（而非 `localeCompare`——那是随语言环境变化的排序）：
+ * 与记录层 `BTreeMap<String, _>` 的键序一致，slug 列表与 header 行共用这一套口径。
+ * 比较的是 UTF-16 码元序，与 Rust 的 UTF-8 字节序只在 BMP 内等价：slug
+ * （`[a-z][a-z0-9_-]*`）与 header 名（HTTP token）都是 ASCII，实践中不分歧。
+ * @param {string} a
+ * @param {string} b
+ * @returns {number}
+ */
+function compareByteOrder(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 
 /**
  * 把后端可能缺键的 `base_url` 补齐为两个槽位恒存在的形态，缺键补空串。
@@ -114,10 +131,15 @@ export function normalizeModel(model) {
 }
 
 /**
- * 创建/更新命令共用的 `provider` 负载：`base_url` 只携带已填写的槽位，
- * `selected_protocol` 归一化为已填槽位之一（否则 `null`，投影时由插件兜底）。
- * `api_key` 与模型列表随整包替换回传（保序）；`custom_header` 由行列表还原为
- * 名→值映射。归一化归前端：映射本无序，按名排序后落盘才能让产物确定（issue #58 决定 21）。
+ * 创建/更新命令共用的 `provider` 负载：字段集合固定为写入字段
+ * （slug、enabled、base_url、selected_protocol、api_key、custom_header、models），
+ * 只读视图字段（如 `api_key_set`）不进负载——后端 `ProviderRequest` 不拒绝未知字段，
+ * 视图模型越过持久化边界只会被静默丢弃。
+ *
+ * `base_url` 只携带已填写的槽位，`selected_protocol` 归一化为已填槽位之一
+ * （否则 `null`，投影时由插件兜底）。`api_key` 与模型列表随整包替换回传（保序）；
+ * `custom_header` 由行列表还原为名→值映射。归一化归前端：映射本无序，
+ * 按名排序后落盘才能让产物确定（issue #58 决定 21）。
  * 导出供单元测试直接调用（调用方是 `createProvider` / `updateProvider`）。
  * @param {Provider} provider
  * @returns {ProviderRequest}
@@ -132,16 +154,18 @@ export function toProviderPayload(provider) {
     provider.selected_protocol && base_url[provider.selected_protocol]
       ? provider.selected_protocol
       : null;
-  // 按字节序比较（而非 localeCompare），与记录层 BTreeMap 的排序一致。
+  // 按字节序（compareByteOrder）与记录层 BTreeMap 的排序一致。
   const custom_header = Object.fromEntries(
     (provider.custom_header ?? [])
       .map(({ name, value }) => [name, value])
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+      .sort(([a], [b]) => compareByteOrder(a, b)),
   );
   return {
-    ...provider,
+    slug: provider.slug,
+    enabled: provider.enabled,
     base_url,
     selected_protocol,
+    api_key: provider.api_key ?? "",
     custom_header,
     models: (provider.models ?? []).map(normalizeModel),
   };
@@ -166,7 +190,8 @@ export async function updateProvider(provider) {
 }
 
 /**
- * 读取 Provider 列表：端点槽位补空串，模型归一化（见 `normalizeModel`）。
+ * 读取 Provider 列表：端点槽位补空串，模型归一化（见 `normalizeModel`），
+ * slug 列表与 header 行都按字节序排序（与记录层 `BTreeMap` 的键序一致）。
  * @returns {Promise<Provider[]>}
  */
 export async function listProviders() {
@@ -180,14 +205,15 @@ export async function listProviders() {
       slug,
       base_url: normalizeEndpoints(provider.base_url),
       selected_protocol: provider.selected_protocol ?? null,
-      // 记录层是无序映射，展开成按名排序的行列表，与表单的 Form.List 对齐。
-      custom_header: Object.entries(provider.custom_header ?? {}).map(
-        ([name, value]) => ({ name, value }),
-      ),
+      // 记录层是 BTreeMap，但 JSON 传进 JS 对象后键序不保证（整数字样键还会前置），
+      // 故显式按名排序展开成行列表，与表单的 Form.List 对齐。
+      custom_header: Object.entries(provider.custom_header ?? {})
+        .map(([name, value]) => ({ name, value }))
+        .sort((a, b) => compareByteOrder(a.name, b.name)),
       api_key_set: !!provider.api_key,
       models: (provider.models ?? []).map(normalizeModel),
     }))
-    .sort((a, b) => a.slug.localeCompare(b.slug));
+    .sort((a, b) => compareByteOrder(a.slug, b.slug));
 }
 
 /**
