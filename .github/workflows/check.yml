@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   frontend:
-    name: Frontend build, test
+    name: Frontend (build, test)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
