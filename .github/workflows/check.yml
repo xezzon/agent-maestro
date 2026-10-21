@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   frontend:
-    name: Frontend build
+    name: Frontend (build, test)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -36,6 +36,9 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Test
+        run: pnpm test
 
   rust:
     name: Rust (fmt, clippy, test)

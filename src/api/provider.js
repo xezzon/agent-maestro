@@ -97,10 +97,11 @@ export function normalizeEndpoints(baseUrl) {
 /**
  * 归一化一条模型：`limit` 恒为对象且「空即缺键」（InputNumber 清空得到 `null`），
  * `capabilities` 按枚举声明序排序去重（取值受枚举约束，界面不求并集）。
+ * 导出供单元测试直接调用（调用方是 `listProviders` / `toProviderPayload`）。
  * @param {Model} model
  * @returns {Model}
  */
-function normalizeModel(model) {
+export function normalizeModel(model) {
   const limit = Object.fromEntries(
     Object.entries(model.limit ?? {}).filter(([, value]) => value != null),
   );
@@ -117,9 +118,11 @@ function normalizeModel(model) {
  * `selected_protocol` 归一化为已填槽位之一（否则 `null`，投影时由插件兜底）。
  * `api_key` 与模型列表随整包替换回传（保序）；`custom_header` 由行列表还原为
  * 名→值映射。归一化归前端：映射本无序，按名排序后落盘才能让产物确定（issue #58 决定 21）。
+ * 导出供单元测试直接调用（调用方是 `createProvider` / `updateProvider`）。
  * @param {Provider} provider
+ * @returns {ProviderRequest}
  */
-function toProviderPayload(provider) {
+export function toProviderPayload(provider) {
   const base_url = Object.fromEntries(
     Object.entries(normalizeEndpoints(provider.base_url)).filter(
       ([, url]) => url.trim() !== "",
