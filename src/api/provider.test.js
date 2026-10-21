@@ -1,13 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  listProviders,
   normalizeEndpoints,
   normalizeModel,
   toProviderPayload,
 } from "./provider.js";
 
+// Tauri IPC 是系统边界：读取路径的排序口径只能通过打桩 `invoke` 观察。
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+
 /**
  * 构造一条 Provider 视图（界面形态）：未显式给出的字段取空形态，
- * 让每个用例只写自己关心的那部分输入。
+ * 让每个用例只写自己关心的那部分输入。`api_key_set` 是读取路径生成的
+ * 只读字段，视图里恒存在（写入负载不得携带它）。
  * @param {Partial<import("./provider.js").Provider>} overrides
  */
 function makeProvider(overrides = {}) {
@@ -17,6 +23,23 @@ function makeProvider(overrides = {}) {
     base_url: {},
     selected_protocol: null,
     custom_header: [],
+    models: [],
+    api_key_set: false,
+    ...overrides,
+  };
+}
+
+/**
+ * 构造一条后端记录（`list_providers` 的返回形态）。
+ * @param {Partial<import("./provider.js").ProviderRequest>} overrides
+ */
+function makeRecord(overrides = {}) {
+  return {
+    enabled: true,
+    base_url: {},
+    selected_protocol: null,
+    api_key: "",
+    custom_header: {},
     models: [],
     ...overrides,
   };
@@ -234,5 +257,81 @@ describe("toProviderPayload", () => {
 
     expect(payload.api_key, "凭证随整包回传").toBe("sk-test");
     expect(payload.enabled, "启用状态随整包回传").toBe(false);
+  });
+
+  it("payload_carries_only_the_write_fields", () => {
+    const payload = toProviderPayload(makeProvider({ api_key_set: true }));
+
+    expect(
+      Object.keys(payload).sort(),
+      "写入负载的字段集合固定，视图专用字段不越界",
+    ).toStrictEqual([
+      "api_key",
+      "base_url",
+      "custom_header",
+      "enabled",
+      "models",
+      "selected_protocol",
+      "slug",
+    ]);
+    expect(payload, "只读视图字段不进写入负载").not.toHaveProperty("api_key_set");
+  });
+});
+
+describe("listProviders", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("providers_are_sorted_by_byte_order", async () => {
+    invokeMock.mockResolvedValue({
+      beta: makeRecord(),
+      alpha_2: makeRecord(),
+      alpha2: makeRecord(),
+      "alpha-2": makeRecord(),
+      alpha: makeRecord(),
+    });
+
+    const providers = await listProviders();
+
+    expect(
+      providers.map((provider) => provider.slug),
+      "按字节序（'-'=45 < '2'=50 < '_'=95），与记录层 BTreeMap 一致",
+    ).toStrictEqual(["alpha", "alpha-2", "alpha2", "alpha_2", "beta"]);
+  });
+
+  it("custom_header_rows_are_sorted_by_name", async () => {
+    invokeMock.mockResolvedValue({
+      acme: makeRecord({
+        custom_header: {
+          "x-Alpha": "1",
+          "X_Alpha": "2",
+          "X-Zeta": "3",
+          "X-Alpha": "4",
+        },
+      }),
+    });
+
+    const [provider] = await listProviders();
+
+    expect(
+      provider.custom_header.map((header) => header.name),
+      "header 行按名排序：字节序（'X'=88 早于 'x'=120，'-'=45 早于 '_'=95）",
+    ).toStrictEqual(["X-Alpha", "X-Zeta", "X_Alpha", "x-Alpha"]);
+  });
+
+  it("api_key_set_marks_whether_a_credential_is_configured", async () => {
+    invokeMock.mockResolvedValue({
+      withKey: makeRecord({ api_key: "sk-test" }),
+      withoutKey: makeRecord(),
+    });
+
+    const providers = await listProviders();
+    const bySlug = Object.fromEntries(
+      providers.map((provider) => [provider.slug, provider]),
+    );
+
+    expect(bySlug.withKey.api_key_set, "已配凭证").toBe(true);
+    expect(bySlug.withoutKey.api_key_set, "未配凭证").toBe(false);
   });
 });
