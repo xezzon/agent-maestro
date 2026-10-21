@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    interpolate::interpolation_failure_message,
     paths::MaestroPaths,
     plugin::PluginEntry,
     provider::{FieldError, Provider},
@@ -70,7 +71,8 @@ pub(crate) enum StoreError {
     DuplicateId { id: String, source: String },
     /// Provider 对（变更后的）全局变量表插值失败：变量未定义或占位符语法
     /// 错误。与投影时的插值失败同因同报，只是提前到落盘前拦截
-    /// （provider↔variables 一致性，ADR 0015）。
+    /// （provider↔variables 一致性，ADR 0015）。文案由
+    /// [`interpolation_failure_message`] 一处产出，与投影时逐字一致。
     Interpolation {
         slug: String,
         field: String,
@@ -155,7 +157,7 @@ impl From<&StoreError> for String {
                 slug,
                 field,
                 reason,
-            } => format!("Provider「{slug}」的 {field} 插值失败：{reason}"),
+            } => interpolation_failure_message(slug, field, reason),
             StoreError::InvalidVariableName { name } => format!(
                 "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
             ),
@@ -1488,6 +1490,50 @@ mod tests {
         assert!(
             !MaestroPaths::get().config_path().exists(),
             "报错路径不得静默写入文件"
+        );
+    }
+
+    /// 落盘前拦截的文案逐字断言：slug、字段名、原因三者都在句子里，且与投影时
+    /// 拦截同一句式（ADR 0015「报错与投影时同因同报」；共享构造函数见 issue #128）。
+    #[test]
+    fn interpolation_store_error_message_is_verbatim() {
+        let err = StoreError::Interpolation {
+            slug: "gateway".to_owned(),
+            field: "base_url.openai-completions".to_owned(),
+            reason: "No such variable: $HOST".to_owned(),
+        };
+
+        assert_eq!(
+            String::from(err),
+            "Provider「gateway」的 base_url.openai-completions 插值失败：No such variable: $HOST"
+        );
+    }
+
+    /// 落盘前拦截与投影时拦截逐字同报：同一份配置、同一个原因，两条路径给出
+    /// 完全相同的一句文案（ADR 0015「报错与投影时同因同报」；共享构造函数见
+    /// issue #128）。
+    #[test]
+    fn store_and_projection_report_interpolation_failures_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        let provider = Provider {
+            base_url: BTreeMap::from([(
+                Protocol::OpenaiCompletions,
+                "https://${HOST}/v1".to_owned(),
+            )]),
+            ..Provider::default()
+        };
+        let mut providers = BTreeMap::new();
+        providers.insert("gateway".to_owned(), provider.clone());
+
+        let stored = String::from(store.create_provider("gateway", provider).unwrap_err());
+        let projected =
+            crate::interpolate::interpolate_providers(&providers, &Variables::new()).unwrap_err();
+
+        assert_eq!(
+            stored, projected,
+            "落盘前拦截与投影时拦截逐字同报：{stored}"
         );
     }
 
