@@ -14,9 +14,7 @@ export default function ApplyResultList({ reports }) {
         <div key={report.id}>
           <Flex align="center" gap={8}>
             <Typography.Text strong>{report.id}</Typography.Text>
-            {report.status === "applied" && (
-              <Tag color="success">已写入</Tag>
-            )}
+            {report.status === "applied" && <Tag color="success">已写入</Tag>}
             {report.status === "failed" && <Tag color="error">失败</Tag>}
             {report.status === "skipped" && <Tag>已跳过</Tag>}
           </Flex>
@@ -45,7 +43,11 @@ export default function ApplyResultList({ reports }) {
             </Flex>
           )}
           {report.skipped.map((skip) => (
-            <Typography.Paragraph type="secondary" style={{ margin: 0 }} key={skip.slug}>
+            <Typography.Paragraph
+              type="secondary"
+              style={{ margin: 0 }}
+              key={skip.slug}
+            >
               跳过 Provider「{skip.slug}」：{skip.reason}
             </Typography.Paragraph>
           ))}

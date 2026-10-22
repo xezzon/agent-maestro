@@ -48,7 +48,9 @@ function makeRecord(overrides = {}) {
 describe("normalizeEndpoints", () => {
   it("missing_protocol_slot_is_filled_with_empty_string", () => {
     expect(
-      normalizeEndpoints({ "openai-completions": "https://api.example.com/v1" }),
+      normalizeEndpoints({
+        "openai-completions": "https://api.example.com/v1",
+      }),
       "缺键的协议槽位补空串，两个槽位恒存在",
     ).toStrictEqual({
       "openai-completions": "https://api.example.com/v1",
@@ -73,16 +75,21 @@ describe("normalizeEndpoints", () => {
 
 describe("normalizeModel", () => {
   it("limit_is_always_an_object", () => {
-    expect(normalizeModel({ id: "gpt-4o" }).limit, "limit 恒为对象").toStrictEqual(
-      {},
-    );
+    expect(
+      normalizeModel({ id: "gpt-4o" }).limit,
+      "limit 恒为对象",
+    ).toStrictEqual({});
   });
 
   it("limit_subfield_with_empty_value_keeps_no_key", () => {
     expect(
       normalizeModel({
         id: "gpt-4o",
-        limit: { context_window: null, max_input: 128000, max_output: undefined },
+        limit: {
+          context_window: null,
+          max_input: 128000,
+          max_output: undefined,
+        },
       }).limit,
       "空即缺键：null 与 undefined 都不保留键",
     ).toStrictEqual({ max_input: 128000 });
@@ -161,7 +168,10 @@ describe("toProviderPayload", () => {
     );
 
     expect(payload.base_url, "只填空白的端点视为未填写").toStrictEqual({});
-    expect(payload.selected_protocol, "端点未填写则选择失效，归 null").toBeNull();
+    expect(
+      payload.selected_protocol,
+      "端点未填写则选择失效，归 null",
+    ).toBeNull();
   });
 
   it("selected_protocol_falls_back_to_null_when_its_endpoint_is_cleared", () => {
@@ -274,7 +284,9 @@ describe("toProviderPayload", () => {
       "selected_protocol",
       "slug",
     ]);
-    expect(payload, "只读视图字段不进写入负载").not.toHaveProperty("api_key_set");
+    expect(payload, "只读视图字段不进写入负载").not.toHaveProperty(
+      "api_key_set",
+    );
   });
 });
 
@@ -305,7 +317,7 @@ describe("listProviders", () => {
       acme: makeRecord({
         custom_header: {
           "x-Alpha": "1",
-          "X_Alpha": "2",
+          X_Alpha: "2",
           "X-Zeta": "3",
           "X-Alpha": "4",
         },

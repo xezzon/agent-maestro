@@ -139,15 +139,19 @@ export function headerNameUniquenessRule(form) {
       ).length;
       return occurrences > 1
         ? Promise.reject(
-          new Error(`Header 名「${value}」在当前 Provider 内重复（忽略大小写）`),
-        )
+            new Error(
+              `Header 名「${value}」在当前 Provider 内重复（忽略大小写）`,
+            ),
+          )
         : Promise.resolve();
     },
   };
 }
 
 /** header 值可能含凭证，必填；界面用普通输入框明文编辑。 */
-export const HEADER_VALUE_RULES = [{ required: true, message: "请输入 Header 值" }];
+export const HEADER_VALUE_RULES = [
+  { required: true, message: "请输入 Header 值" },
+];
 
 /**
  * 模型 ID 非空（空白串视为空）且同一 Provider 内唯一（大小写敏感）。
@@ -188,9 +192,10 @@ export function providerFormRules({ form, mode, providers }) {
     throw new Error(`未知的 Provider 表单模式：${mode}`);
   }
   return {
-    slug: mode === MODE_CREATE
-      ? [...SLUG_RULES, slugUniquenessRule({ providers })]
-      : SLUG_RULES,
+    slug:
+      mode === MODE_CREATE
+        ? [...SLUG_RULES, slugUniquenessRule({ providers })]
+        : SLUG_RULES,
     // 按协议槽位分组，字段名复用 PROVIDER_PROTOCOLS 的常量，不另写一份键名。
     baseUrl: {
       [OPENAI_COMPLETIONS]: [...BASE_URL_RULES, atLeastOneEndpointRule(form)],

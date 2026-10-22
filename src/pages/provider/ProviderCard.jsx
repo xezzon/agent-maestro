@@ -45,24 +45,30 @@ export default function ProviderCard({ provider, onReload }) {
     </Flex>
   );
 
-  return <Card title={title} className={provider.enabled ? undefined : "provider-disabled"}>
-    {editing
-      ? <ProviderForm
-        mode={MODE_UPDATE}
-        provider={provider}
-        disabled={busy}
-        onBusyChange={setBusy}
-        onCancel={() => setEditing(false)}
-        onSaved={() => {
-          setEditing(false);
-          onReload();
-        }}
-      />
-      : <ProviderReadonlyForm
-        provider={provider}
-        onEdit={() => setEditing(true)}
-        afterDelete={onReload}
-      />
-    }
-  </Card>;
+  return (
+    <Card
+      title={title}
+      className={provider.enabled ? undefined : "provider-disabled"}
+    >
+      {editing ? (
+        <ProviderForm
+          mode={MODE_UPDATE}
+          provider={provider}
+          disabled={busy}
+          onBusyChange={setBusy}
+          onCancel={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
+            onReload();
+          }}
+        />
+      ) : (
+        <ProviderReadonlyForm
+          provider={provider}
+          onEdit={() => setEditing(true)}
+          afterDelete={onReload}
+        />
+      )}
+    </Card>
+  );
 }

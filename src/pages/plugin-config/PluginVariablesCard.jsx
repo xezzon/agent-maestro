@@ -12,7 +12,12 @@ import PluginVariablesForm from "./PluginVariablesForm";
  * @param {import("../../api/variables").Variables} param0.variables
  * @param {() => void} param0.onReload
  */
-export default function PluginVariablesCard({ plugin, config, variables, onReload }) {
+export default function PluginVariablesCard({
+  plugin,
+  config,
+  variables,
+  onReload,
+}) {
   const [editing, setEditing] = useState(false);
   const names = Object.keys(config.variables ?? {});
 

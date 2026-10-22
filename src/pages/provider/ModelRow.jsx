@@ -54,13 +54,7 @@ const CAPABILITY_GROUPS = [
  * @param {boolean} param0.disabled 外部（状态开关）进行中：上限预设禁用
  * @param {() => void} param0.onRemove 删除本行
  */
-export default function ModelRow({
-  field,
-  rules,
-  saving,
-  disabled,
-  onRemove,
-}) {
+export default function ModelRow({ field, rules, saving, disabled, onRemove }) {
   return (
     <Flex vertical gap={4}>
       <Flex align="flex-start" gap={8} className="model-row">

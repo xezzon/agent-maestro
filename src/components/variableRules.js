@@ -53,9 +53,7 @@ export function declaredVariableRule(variables) {
       if (!value) return Promise.resolve();
       return Object.hasOwn(variables, value)
         ? Promise.resolve()
-        : Promise.reject(
-          new Error(`变量「${value}」未在全局变量表中声明`),
-        );
+        : Promise.reject(new Error(`变量「${value}」未在全局变量表中声明`));
     },
   };
 }
