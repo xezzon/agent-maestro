@@ -1449,6 +1449,37 @@ fn set_plugin_config_survives_a_plugin_reload() {
     );
 }
 
+/// `apply_providers`（服务层入口）：逐插件的失败不是命令的失败——命令整体成功，
+/// 但失败的那个插件要留下 id 与原因。服务层按插件各记一条，命令层只报整体成败。
+#[test]
+fn apply_providers_logs_each_failed_plugin_with_its_reason() {
+    let window = crate::logging::capture::capture_window();
+    let home = temp_home();
+    let store = store_at(home.path());
+    let service = test_service(home.path());
+    service.startup(&store).unwrap();
+    let maestro_paths = MaestroPaths::get();
+    fs::write(
+        maestro_paths.plugin_dir("pi").join(PLACED_CONFIG),
+        "{ not json",
+    )
+    .unwrap();
+
+    let reports = service.apply_providers(&store).unwrap();
+
+    let pi = reports
+        .iter()
+        .find(|report| report.id == "pi")
+        .expect("内置 pi 插件的报告");
+    assert_eq!(pi.status, ApplyStatus::Failed);
+    let logs = window.lines();
+    assert!(
+        logs.iter()
+            .any(|line| { line.contains("plugin projection failed") && line.contains("id=pi") }),
+        "逐插件的失败要按插件留下 id 与原因：{logs:?}"
+    );
+}
+
 /// 插件返回的路径必须是 config_dir 内的相对路径：绝对路径与 `..` 一律拒绝（fail-loud），
 /// 它们是预开放目录之外的写入面，不得被回报成一次成功投影。
 #[test]

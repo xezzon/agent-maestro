@@ -60,7 +60,7 @@ pub(crate) fn list_providers(
         let guard = store.read()?;
         Ok(guard.providers_snapshot()?)
     })();
-    log_outcome("list_providers", "", &outcome);
+    log_outcome("list_providers", None, &outcome);
     outcome
 }
 
@@ -75,7 +75,7 @@ pub(crate) fn create_provider(
         let mut guard = store.write()?;
         Ok(guard.create_provider(&slug, provider.into())?)
     })();
-    log_outcome("create_provider", &context, &outcome);
+    log_outcome("create_provider", Some(&context), &outcome);
     outcome
 }
 
@@ -91,7 +91,7 @@ pub(crate) fn update_provider(
         guard.update_provider(&slug, provider.into())?;
         Ok(())
     })();
-    log_outcome("update_provider", &context, &outcome);
+    log_outcome("update_provider", Some(&context), &outcome);
     outcome
 }
 
@@ -102,7 +102,7 @@ pub(crate) fn delete_provider(store: State<'_, AppStore>, slug: String) -> Resul
         guard.delete_provider(&slug)?;
         Ok(())
     })();
-    log_outcome("delete_provider", &format!("slug={slug}"), &outcome);
+    log_outcome("delete_provider", Some(&format!("slug={slug}")), &outcome);
     outcome
 }
 
@@ -119,7 +119,7 @@ pub(crate) fn set_provider_enabled(
         guard.set_provider_enabled(&slug, enabled)?;
         Ok(())
     })();
-    log_outcome("set_provider_enabled", &context, &outcome);
+    log_outcome("set_provider_enabled", Some(&context), &outcome);
     outcome
 }
 

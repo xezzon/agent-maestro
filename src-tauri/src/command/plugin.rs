@@ -16,7 +16,7 @@ pub(crate) fn list_plugins(
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
     let outcome = service.list(&store);
-    log_outcome("list_plugins", "", &outcome);
+    log_outcome("list_plugins", None, &outcome);
     outcome
 }
 
@@ -38,7 +38,7 @@ pub(crate) fn set_plugin_enabled(
     };
     log_outcome(
         "set_plugin_enabled",
-        &format!("source={source} enabled={enabled}"),
+        Some(&format!("source={source} enabled={enabled}")),
         &outcome,
     );
     outcome
@@ -59,7 +59,7 @@ pub(crate) async fn add_plugin(app: AppHandle, source: String) -> Result<(), Str
         service.add_plugin(store, &source)
     })
     .await;
-    log_outcome("add_plugin", &context, &outcome);
+    log_outcome("add_plugin", Some(&context), &outcome);
     outcome
 }
 
@@ -73,7 +73,7 @@ pub(crate) async fn reload_plugin(app: AppHandle, source: String) -> Result<(), 
         service.reload_plugin(store, &source)
     })
     .await;
-    log_outcome("reload_plugin", &context, &outcome);
+    log_outcome("reload_plugin", Some(&context), &outcome);
     outcome
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn remove_plugin(
     source: String,
 ) -> Result<(), String> {
     let outcome = service.remove_plugin(&store, &source);
-    log_outcome("remove_plugin", &format!("source={source}"), &outcome);
+    log_outcome("remove_plugin", Some(&format!("source={source}")), &outcome);
     outcome
 }
 
@@ -98,7 +98,11 @@ pub(crate) fn get_plugin_config(
     source: String,
 ) -> Result<PluginConfig, String> {
     let outcome = service.get_config(&store, &source);
-    log_outcome("get_plugin_config", &format!("source={source}"), &outcome);
+    log_outcome(
+        "get_plugin_config",
+        Some(&format!("source={source}")),
+        &outcome,
+    );
     outcome
 }
 
@@ -119,42 +123,23 @@ pub(crate) async fn set_plugin_config(
         service.set_config(store, &source, &config)
     })
     .await;
-    log_outcome("set_plugin_config", &context, &outcome);
+    log_outcome("set_plugin_config", Some(&context), &outcome);
     outcome
 }
 
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，
 /// 返回逐插件结果（写入的文件、跳过的 Provider、失败原因）。
 ///
-/// 禁用 Provider（`enabled == false`）在读取配置时即剔除（#94），不进入插值
-/// 与写入。store 锁在读取 providers 后即释放，注册表锁也仅用于快照：
-/// 插件执行时长不受应用控制，执行全程不持锁，不得阻塞其它命令。
+/// 命令层只做分派：读配置、挑启用项与执行投影都在插件服务里（见
+/// `PluginService::apply_providers`）。逐插件的状态与原因由服务层按插件记
+/// 日志，命令层只报整体成败——成功行不带识别参数，不留尾随的冒号与空格。
 #[tauri::command]
 pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
-    // `?` 在闭包内传播：读 store 的错误也被捕获进 outcome，与 write_providers 的错误
-    // 统一走「outcome → 日志 → 返回」路径。若平铺到函数体，`?` 会提前返回并跳过失败日志。
-    let outcome = (|| -> Result<Vec<PluginApplyReport>, String> {
-        let (providers, variables) = {
-            let guard = store.read()?;
-            (guard.enabled_providers()?, guard.variables_snapshot()?)
-        };
-        service.write_providers(&providers, &variables)
-    })();
-    // 结果行携带逐插件状态摘要（id:status），命令 payload 不进日志。
-    match &outcome {
-        Ok(reports) => {
-            let summary = reports
-                .iter()
-                .map(|report| format!("{}:{}", report.id, report.status))
-                .collect::<Vec<_>>()
-                .join(" ");
-            log::info!("apply_providers ok: {summary}");
-        }
-        Err(reason) => log::error!("apply_providers failed: {reason}"),
-    }
+    let outcome = service.apply_providers(&store);
+    log_outcome("apply_providers", None, &outcome);
     outcome
 }
 

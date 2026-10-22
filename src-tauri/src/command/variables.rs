@@ -13,7 +13,7 @@ pub(crate) fn list_variables(
         let guard = store.read()?;
         Ok(guard.variables_snapshot()?)
     })();
-    log_outcome("list_variables", "", &outcome);
+    log_outcome("list_variables", None, &outcome);
     outcome
 }
 
@@ -29,6 +29,6 @@ pub(crate) fn set_variables(
         guard.set_variables(variables)?;
         Ok(())
     })();
-    log_outcome("set_variables", "", &outcome);
+    log_outcome("set_variables", None, &outcome);
     outcome
 }

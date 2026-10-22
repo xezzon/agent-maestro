@@ -6,7 +6,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::{interpolate, paths::MaestroPaths, provider::Provider, variables::Variables};
+use crate::{
+    interpolate, paths::MaestroPaths, provider::Provider, store::AppStore, variables::Variables,
+};
 
 use super::{
     ApplyStatus, LoadedPlugin, PluginApplyReport, PluginService, PluginState,
@@ -14,6 +16,35 @@ use super::{
 };
 
 impl PluginService {
+    /// 应用到工具：把 Provider 投影进各插件，返回逐插件结果。
+    ///
+    /// 禁用 Provider（`enabled == false`）在读取配置时即剔除（#94），不进入插值
+    /// 与写入。store 锁在读取 providers 后即释放，注册表锁也仅用于快照：
+    /// 插件执行时长不受应用控制，执行全程不持锁，不得阻塞其它命令。
+    pub(crate) fn apply_providers(
+        &self,
+        store: &AppStore,
+    ) -> Result<Vec<PluginApplyReport>, String> {
+        let (providers, variables) = {
+            let guard = store.read()?;
+            (guard.enabled_providers()?, guard.variables_snapshot()?)
+        };
+        let reports = self.write_providers(&providers, &variables)?;
+        // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
+        // 在此按插件各记一条，失败原因与插件 id 一起留在日志里。
+        for report in &reports {
+            if report.status != ApplyStatus::Applied {
+                log::warn!(
+                    "plugin projection {status}: id={id} reason={reason}",
+                    status = report.status,
+                    id = report.id,
+                    reason = report.reason.as_deref().unwrap_or(""),
+                );
+            }
+        }
+        Ok(reports)
+    }
+
     /// 对注册表中的每个插件执行投影，返回逐插件报告：
     /// Loaded 交给 [`Self::project_one_plugin`]；Disabled 与 Error 态不执行投影。
     /// 单个插件的失败不影响其它插件，失败原因写入该插件的报告——即该插件整体
