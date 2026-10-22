@@ -5,6 +5,12 @@ import ProviderForm from "./ProviderForm";
 import ProviderReadonlyForm from "./ProviderReadonlyForm";
 
 /**
+ * 更新态不做 slug 冲突校验（slug 不可编辑）。空数组提到模块级，
+ * 让表单规则在重渲染之间保持同一引用、不被 useMemo 重建。
+ */
+const NO_SLUG_CONFLICTS = [];
+
+/**
  * @param {Object} param0
  * @param {import("../../api/provider").Provider} param0.provider
  * @param {() => Promise<void>} param0.onReload
@@ -48,7 +54,7 @@ export default function ProviderCard({ provider, onReload }) {
     {editing
       ? <ProviderForm
         provider={provider}
-        providers={[]} // 更新状态下不需要检查 slug 冲突（因为 slug 不可编辑）
+        providers={NO_SLUG_CONFLICTS}
         disabled={busy}
         onBusyChange={setBusy}
         onFinish={(refresh) => {
