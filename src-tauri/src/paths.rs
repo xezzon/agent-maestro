@@ -1,13 +1,12 @@
 use std::path::{Path, PathBuf};
 
-#[cfg(not(test))]
-static MAESTRO_PATHS: std::sync::OnceLock<MaestroPaths> = std::sync::OnceLock::new();
+use crate::test_global::Global;
 
 #[cfg(test)]
-thread_local! {
-    static MAESTRO_PATHS_TEST: std::cell::RefCell<Option<MaestroPaths>> =
-        const { std::cell::RefCell::new(None) };
-}
+use crate::test_global::TestGuard;
+
+/// 全局主目录：生产期进程内一份，测试期每线程一份（见 [`crate::test_global`]）。
+static MAESTRO_PATHS: Global<MaestroPaths> = Global::new();
 
 #[derive(Clone)]
 pub(crate) struct MaestroPaths {
@@ -25,16 +24,7 @@ impl MaestroPaths {
     ///
     /// 必须在第一次调用 [`MaestroPaths::get`] 之前完成，否则 `get` 会 panic。
     pub(crate) fn init(home: &Path) {
-        #[cfg(not(test))]
-        {
-            let _ = MAESTRO_PATHS.set(Self::new(home));
-        }
-        #[cfg(test)]
-        {
-            MAESTRO_PATHS_TEST.with(|cell| {
-                *cell.borrow_mut() = Some(Self::new(home));
-            });
-        }
+        MAESTRO_PATHS.set(Self::new(home));
     }
 
     /// 获取全局实例（值语义，clone 成本极低）。
@@ -48,21 +38,14 @@ impl MaestroPaths {
     ///
     /// 用于启动早期（logger attach 等）调用点——此时主目录可能还没解析出来。
     pub(crate) fn try_get() -> Option<Self> {
-        #[cfg(not(test))]
-        {
-            MAESTRO_PATHS.get().cloned()
-        }
-        #[cfg(test)]
-        {
-            MAESTRO_PATHS_TEST.with(|cell| cell.borrow().clone())
-        }
+        MAESTRO_PATHS.get()
     }
 
     /// 测试辅助：设置当前线程的全局实例，返回 RAII guard（drop 时自动清理）。
     #[cfg(test)]
-    fn test_guard(home: &Path) -> TestGuard {
+    fn test_guard(home: &Path) -> TestGuard<MaestroPaths> {
         Self::init(home);
-        TestGuard
+        TestGuard::new(&MAESTRO_PATHS)
     }
 
     pub(crate) fn maestro_dir(&self) -> PathBuf {
@@ -87,20 +70,6 @@ impl MaestroPaths {
     }
 }
 
-/// 测试 RAII guard：drop 时清理当前线程的 [`MaestroPaths`] 全局实例。
-#[cfg(test)]
-#[must_use = "guard 被立即 drop 将立即清理全局实例"]
-struct TestGuard;
-
-#[cfg(test)]
-impl Drop for TestGuard {
-    fn drop(&mut self) {
-        MAESTRO_PATHS_TEST.with(|cell| {
-            *cell.borrow_mut() = None;
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,8 +84,6 @@ mod tests {
             assert_eq!(paths.config_path(), dir.path().join(".maestro/config.json"));
         }
         // guard drop 后应清理
-        MAESTRO_PATHS_TEST.with(|cell| {
-            assert!(cell.borrow().is_none());
-        });
+        assert!(MAESTRO_PATHS.get().is_none());
     }
 }

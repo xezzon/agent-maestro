@@ -5,6 +5,7 @@ mod paths;
 mod plugin;
 mod provider;
 mod store;
+mod test_global;
 mod variables;
 
 use command::{

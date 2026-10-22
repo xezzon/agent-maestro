@@ -5,6 +5,11 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use crate::test_global::Global;
+
+#[cfg(test)]
+use crate::test_global::TestGuard;
+
 /// 插件来源：解析一次，随值传递。
 ///
 /// 来源字符串此前在四处各判一次（`SourceKind::from_source`），每次都重新解析
@@ -74,14 +79,8 @@ pub(crate) struct Manifest {
     pub(crate) settings_schema: Option<serde_json::Value>,
 }
 
-#[cfg(not(test))]
-static PLATFORM_DIRS: std::sync::OnceLock<PlatformDirs> = std::sync::OnceLock::new();
-
-#[cfg(test)]
-thread_local! {
-    static PLATFORM_DIRS_TEST: std::cell::RefCell<Option<PlatformDirs>> =
-        const { std::cell::RefCell::new(None) };
-}
+/// 全局平台目录：生产期进程内一份，测试期每线程一份（见 [`crate::test_global`]）。
+static PLATFORM_DIRS: Global<PlatformDirs> = Global::new();
 
 /// 平台基准目录：`config_dir` 声明里的变量前缀在此解析为宿主绝对路径。
 #[derive(Clone, Debug)]
@@ -111,7 +110,7 @@ impl PlatformDirs {
                 dirs::data_dir().ok_or_else(|| missing("数据目录"))?,
                 dirs::data_local_dir().ok_or_else(|| missing("本地数据目录"))?,
             );
-            let _ = PLATFORM_DIRS.set(dirs);
+            PLATFORM_DIRS.set(dirs);
         }
         Ok(())
     }
@@ -139,36 +138,27 @@ impl PlatformDirs {
     /// [`resolve_config_dir`]），而 manifest 可能来自网络——解析一份不可信的
     /// manifest 绝不能让进程崩掉。
     fn get() -> Result<Self, String> {
-        #[cfg(not(test))]
-        {
-            PLATFORM_DIRS.get().cloned().ok_or_else(|| {
-                "PlatformDirs 尚未初始化：调用 PlatformDirs::init_from_system 后再使用".to_owned()
-            })
-        }
-        #[cfg(test)]
-        {
-            PLATFORM_DIRS_TEST.with(|cell| {
-                cell.borrow().as_ref().cloned().ok_or_else(|| {
-                    "测试线程未设置 PlatformDirs：使用 PlatformDirs::test_guard 或 PlatformDirs::init_test"
-                        .to_owned()
-                })
-            })
-        }
+        PLATFORM_DIRS.get().ok_or_else(|| {
+            #[cfg(not(test))]
+            let message = "PlatformDirs 尚未初始化：调用 PlatformDirs::init_from_system 后再使用";
+            #[cfg(test)]
+            let message =
+                "测试线程未设置 PlatformDirs：使用 PlatformDirs::test_guard 或 PlatformDirs::init_test";
+            message.to_owned()
+        })
     }
 
     /// 测试辅助：设置当前线程的全局实例，返回 RAII guard（drop 时自动清理）。
     #[cfg(test)]
-    pub(crate) fn test_guard(dirs: Self) -> PlatformDirsTestGuard {
+    pub(crate) fn test_guard(dirs: Self) -> TestGuard<PlatformDirs> {
         Self::init_test(dirs);
-        PlatformDirsTestGuard
+        TestGuard::new(&PLATFORM_DIRS)
     }
 
     /// 测试辅助：直接设置当前线程的全局实例（不返回 guard，自行管理生命周期）。
     #[cfg(test)]
     pub(crate) fn init_test(dirs: Self) {
-        PLATFORM_DIRS_TEST.with(|cell| {
-            *cell.borrow_mut() = Some(dirs);
-        });
+        PLATFORM_DIRS.set(dirs);
     }
 
     /// 变量前缀 → 基准目录；不支持的变量返回 `None`。
@@ -181,20 +171,6 @@ impl PlatformDirs {
             "$LOCAL_APP_DATA" => Some(&self.data_local),
             _ => None,
         }
-    }
-}
-
-/// 测试 RAII guard：drop 时清理当前线程的 [`PlatformDirs`] 全局实例。
-#[cfg(test)]
-#[must_use = "guard 被立即 drop 将立即清理全局实例"]
-pub(crate) struct PlatformDirsTestGuard;
-
-#[cfg(test)]
-impl Drop for PlatformDirsTestGuard {
-    fn drop(&mut self) {
-        PLATFORM_DIRS_TEST.with(|cell| {
-            *cell.borrow_mut() = None;
-        });
     }
 }
 
@@ -441,7 +417,7 @@ mod tests {
     }
 
     /// 注入的基准目录：全部落在临时目录下，不读真实环境。
-    fn platform_dirs_setup() -> (tempfile::TempDir, PlatformDirsTestGuard) {
+    fn platform_dirs_setup() -> (tempfile::TempDir, TestGuard<PlatformDirs>) {
         let root = tempfile::tempdir().unwrap();
         let dirs = PlatformDirs::new(
             root.path().join("home"),
