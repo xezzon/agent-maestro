@@ -3,7 +3,7 @@ use tauri::{AppHandle, Manager, State};
 use super::log_outcome;
 use crate::{
     AppStore,
-    plugin::{PluginApplyReport, PluginConfig, PluginService, PluginView},
+    plugin::{PluginApplyReport, PluginConfig, PluginService, PluginView, apply_summary},
 };
 
 /// 列出插件注册表（metadata 与加载状态）。
@@ -131,15 +131,20 @@ pub(crate) async fn set_plugin_config(
 /// 返回逐插件结果（写入的文件、跳过的 Provider、失败原因）。
 ///
 /// 命令层只做分派：读配置、挑启用项与执行投影都在插件服务里（见
-/// `PluginService::apply_providers`）。逐插件的状态与原因由服务层按插件记
-/// 日志，命令层只报整体成败——成功行不带识别参数，不留尾随的冒号与空格。
+/// `PluginService::apply_providers`）。结果行按 ADR 0008 携带逐插件状态
+/// 摘要——某个插件失败时，日志里要能看出是哪一个；没有插件时不带上下文，
+/// 成功行因此不留尾随的冒号与空格。
 #[tauri::command]
 pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
     let outcome = service.apply_providers(&store);
-    log_outcome("apply_providers", None, &outcome);
+    let context = outcome
+        .as_ref()
+        .ok()
+        .and_then(|reports| apply_summary(reports));
+    log_outcome("apply_providers", context.as_deref(), &outcome);
     outcome
 }
 

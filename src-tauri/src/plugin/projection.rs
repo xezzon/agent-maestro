@@ -34,10 +34,11 @@ impl PluginService {
         })?;
         let reports = self.write_providers(&providers, &variables)?;
         // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
-        // 在此按插件各记一条，失败原因与插件 id 一起留在日志里。
+        // 在此按插件各记一条（ADR 0008：服务层的投影步骤打 DEBUG，默认级别
+        // 下不落盘；命令层的结果行按插件携带状态摘要）。
         for report in &reports {
             if report.status != ApplyStatus::Applied {
-                log::warn!(
+                log::debug!(
                     "plugin projection {status}: id={id} reason={reason}",
                     status = report.status,
                     id = report.id,

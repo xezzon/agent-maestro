@@ -9,7 +9,7 @@ use std::{
 
 use super::{
     ApplyStatus, PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport,
-    PluginConfig, PluginState, PluginView, builtin,
+    PluginConfig, PluginState, PluginView, apply_summary, builtin,
     manifest::is_https_url,
     projection::project_files,
     testutil::{
@@ -1479,6 +1479,30 @@ fn apply_providers_logs_each_failed_plugin_with_its_reason() {
         logs.iter()
             .any(|line| { line.contains("plugin projection failed") && line.contains("id=pi") }),
         "逐插件的失败要按插件留下 id 与原因：{logs:?}"
+    );
+}
+
+/// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有
+/// 插件时不带上下文——成功行因此不留尾随的冒号与空格。
+#[test]
+fn apply_summary_lists_each_plugin_status() {
+    assert_eq!(apply_summary(&[]), None, "没有插件即没有上下文");
+
+    let report = |id: &str, status: ApplyStatus| PluginApplyReport {
+        id: id.to_owned(),
+        status,
+        files: Vec::new(),
+        skipped: Vec::new(),
+        reason: None,
+    };
+    let reports = vec![
+        report("pi", ApplyStatus::Applied),
+        report("claude-code", ApplyStatus::Failed),
+    ];
+
+    assert_eq!(
+        apply_summary(&reports).as_deref(),
+        Some("pi:applied claude-code:failed")
     );
 }
 
