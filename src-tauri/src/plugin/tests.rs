@@ -374,8 +374,7 @@ fn set_enabled_waits_for_the_install_lock() {
         thread::spawn(move || {
             // 子线程 thread_local 为空，需重新设置全局目录。
             crate::plugin::testutil::setup_test_dirs(&home);
-            tx.send(service.set_enabled(&store, MANIFEST_URL, false))
-                .unwrap();
+            tx.send(service.disable(&store, MANIFEST_URL)).unwrap();
         })
     };
 
@@ -400,7 +399,7 @@ fn set_enabled_disables_and_re_enables_the_plugin() {
     let service = stub_service(home.path(), https_stub("pi2"));
     service.add_plugin(&store, MANIFEST_URL).unwrap();
 
-    service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+    service.disable(&store, MANIFEST_URL).unwrap();
     assert!(!snapshot(&store).plugins[0].enabled);
     let view = &service.list(&store).unwrap()[0];
     assert!(!view.enabled);
@@ -412,7 +411,7 @@ fn set_enabled_disables_and_re_enables_the_plugin() {
         view.config_dir
     );
 
-    service.set_enabled(&store, MANIFEST_URL, true).unwrap();
+    service.enable(&store, MANIFEST_URL).unwrap();
     assert!(snapshot(&store).plugins[0].enabled);
     let view = &service.list(&store).unwrap()[0];
     assert!(view.enabled);
@@ -427,10 +426,10 @@ fn set_enabled_enable_fails_without_touching_config_when_placed_files_are_missin
     let maestro_paths = MaestroPaths::get();
     let service = stub_service(home.path(), https_stub("pi2"));
     service.add_plugin(&store, MANIFEST_URL).unwrap();
-    service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+    service.disable(&store, MANIFEST_URL).unwrap();
     fs::remove_dir_all(maestro_paths.plugin_dir("pi2")).unwrap();
 
-    let err = service.set_enabled(&store, MANIFEST_URL, true).unwrap_err();
+    let err = service.enable(&store, MANIFEST_URL).unwrap_err();
 
     assert!(err.contains("读取"), "{err}");
     assert!(
@@ -446,9 +445,7 @@ fn set_enabled_unknown_source_is_rejected() {
     let store = store_at(home.path());
     let service = test_service(home.path());
 
-    let err = service
-        .set_enabled(&store, "builtin:ghost", true)
-        .unwrap_err();
+    let err = service.enable(&store, "builtin:ghost").unwrap_err();
 
     assert!(err.contains("插件条目不存在"), "{err}");
 }
@@ -687,7 +684,7 @@ fn reload_plugin_keeps_the_disabled_state_with_a_fresh_manifest() {
     let fetcher = Arc::new(https_stub("pi2"));
     let service = fetcher_service(home.path(), fetcher.clone());
     service.add_plugin(&store, MANIFEST_URL).unwrap();
-    service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+    service.disable(&store, MANIFEST_URL).unwrap();
 
     fetcher.serve(MANIFEST_URL, manifest_json("pi2", "$HOME/.pi3", WASM_URL));
     service.reload_plugin(&store, MANIFEST_URL).unwrap();
@@ -870,7 +867,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         .add_plugin(&store, "https://example.com/pi3/manifest.json")
         .unwrap();
     service
-        .set_enabled(&store, "https://example.com/pi3/manifest.json", false)
+        .disable(&store, "https://example.com/pi3/manifest.json")
         .unwrap();
 
     // 直接注入注册表的两种异常态：坏 wasm 的 Loaded 与显式 Error。

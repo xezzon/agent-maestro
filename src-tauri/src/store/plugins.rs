@@ -10,8 +10,8 @@ use super::schema::{Change, Config, PluginEntry, StoreError};
 /// 安装成功后由插件服务调用，`id` 随条目一并给出：它是来源到落位目录的唯一映射
 /// （见 ADR 0006）。因此安装失败时不会留下条目，重新添加即可。
 ///
-/// 同一临界区内复检来源与 id 冲突：插件服务的预检（`check_id_conflict`）与
-/// 此处写入分属两次加锁，两次锁之间另一来源可能已占用同一 id。
+/// 同一临界区内复检来源与 id 冲突：插件服务的预检（`Store::check_plugin_id_conflict`）
+/// 与此处写入分属两次加锁，两次锁之间另一来源可能已占用同一 id。
 pub(super) fn add(
     config: &mut Config,
     plugin_entry: &PluginEntry,
@@ -20,15 +20,24 @@ pub(super) fn add(
     if config.plugins.iter().any(|plugin| plugin.source == source) {
         return Err(StoreError::duplicate_source(&source));
     }
-    if let Some(other) = config
-        .plugins
-        .iter()
-        .find(|plugin| plugin.source != source && plugin.id == plugin_entry.id)
-    {
-        return Err(StoreError::duplicate_id(&plugin_entry.id, &other.source));
-    }
+    check_id_conflict(config, &source, &plugin_entry.id)?;
     config.plugins.push(plugin_entry.clone());
     Ok(Change::Changed(()))
+}
+
+/// 同一 id 是否已被**其它**来源的插件条目持有（id 是来源到落位目录的唯一映射）。
+///
+/// 安装前的预检与写入时的复检共用这一条规则：「两次加锁之间可能被抢占」是
+/// 要复检的理由，不是要写两份实现的理由——预检与写入问同一句，答案一致。
+pub(super) fn check_id_conflict(config: &Config, source: &str, id: &str) -> Result<(), StoreError> {
+    match config
+        .plugins
+        .iter()
+        .find(|plugin| plugin.source != source && plugin.id == id)
+    {
+        Some(other) => Err(StoreError::duplicate_id(id, &other.source)),
+        None => Ok(()),
+    }
 }
 
 /// 删除插件条目，返回被删除的条目（调用方据此删除落位目录）。

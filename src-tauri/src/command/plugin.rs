@@ -21,6 +21,9 @@ pub(crate) fn list_plugins(
 }
 
 /// 启用/禁用插件。
+///
+/// 前端送来的是一个开关；服务层按意图分成 `enable` / `disable` 两个方法
+/// （各自装载或降级注册表，不靠布尔分叉），命令层只做分派。
 #[tauri::command]
 pub(crate) fn set_plugin_enabled(
     store: State<'_, AppStore>,
@@ -28,7 +31,11 @@ pub(crate) fn set_plugin_enabled(
     source: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let outcome = service.set_enabled(&store, &source, enabled);
+    let outcome = if enabled {
+        service.enable(&store, &source)
+    } else {
+        service.disable(&store, &source)
+    };
     log_outcome(
         "set_plugin_enabled",
         &format!("source={source} enabled={enabled}"),

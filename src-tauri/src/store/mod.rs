@@ -237,6 +237,18 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.mutate(|config| plugins::set_enabled(config, source, enabled))
     }
+
+    /// 插件 id 冲突预检：同一 id 不得被**其它**来源的条目持有。
+    ///
+    /// 安装流程在落位前问一次、写入时再问一次（两次加锁之间可能被抢占）——
+    /// 两处问的是同一句规则，故错误类型也统一为 [`StoreError::DuplicateId`]。
+    pub(crate) fn check_plugin_id_conflict(
+        &self,
+        source: &str,
+        id: &str,
+    ) -> Result<(), StoreError> {
+        plugins::check_id_conflict(self.get()?, source, id)
+    }
 }
 
 /// 共享应用状态：配置存储（启动时加载进内存，变更后原子写回）。

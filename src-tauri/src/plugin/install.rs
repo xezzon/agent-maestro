@@ -56,7 +56,10 @@ impl PluginService {
         // 2. 获取 manifest 与 wasm、校验并落位；获取与校验全程不持配置存储锁。
         //    `load` 顺带解析 `config_dir`，解析先于 validate() 与 save()。
         let loaded = self.fetch_placed(source)?.load()?;
-        self.check_id_conflict(store, source, &loaded.manifest.id)?;
+        // id 冲突预检：与写入时的复检问同一句规则（见 `Store::check_plugin_id_conflict`）。
+        store
+            .read()?
+            .check_plugin_id_conflict(source, &loaded.manifest.id)?;
         // 链接期校验先于落位：wasm 不是组件或接口不兼容时不落位、不写条目。
         // 仅做字节反序列化与类型检查，不触发组件 init、不预开放真实配置目录；
         // 避免未授权的 init 代码在安装失败时仍写入 plugin config_dir。
@@ -148,10 +151,9 @@ impl PluginService {
         ))
     }
 
-    /// 启用/禁用插件条目。
+    /// 启用插件条目。
     ///
-    /// 禁用：先改配置条目，再把内存注册表换成 Disabled 态（保留 manifest 供列表展示）。
-    /// 启用：先从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步注册表
+    /// 先从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步注册表
     /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
     ///
     /// 整个流程在 `install_lock` 内独占：与添加、移除、重新加载互斥。
@@ -160,53 +162,70 @@ impl PluginService {
     /// `enabled` 并按它覆盖注册表，与刚落盘的配置对不上。
     /// 锁序 `install_lock` → store → entries，与其余安装类流程一致；
     /// 本流程只读本机文件、不联网，临界区比含下载的流程短。
-    pub(crate) fn set_enabled(
-        &self,
-        store: &AppStore,
-        source: &str,
-        enabled: bool,
-    ) -> Result<(), String> {
+    pub(crate) fn enable(&self, store: &AppStore, source: &str) -> Result<(), String> {
         let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
 
         let entry = store.read()?.plugin_by_source(source)?;
-        if entry.enabled == enabled {
+        if entry.enabled {
             return Ok(());
         }
 
         // 启用先装载再写配置：装载失败不写条目、不动注册表，旧状态保持可用。
-        let loaded = if enabled {
-            let placed = PlacedPlugin::from_plugin_dir(&MaestroPaths::get().plugin_dir(&entry.id))?;
-            Some(placed.load()?)
-        } else {
-            None
-        };
+        let placed = PlacedPlugin::from_plugin_dir(&MaestroPaths::get().plugin_dir(&entry.id))?;
+        let loaded = placed.load()?;
 
         let entry = {
             let mut guard = store.write()?;
             // 复检：条目可能已被移除，不得按过期条目继续写。
             // install_lock 已让移除与本流程互斥，此处是纵深防御。
             let entry = guard.plugin_by_source(source)?;
-            if entry.enabled == enabled {
+            if entry.enabled {
                 // 并发方已完成同样的切换：配置与注册表均已同步，直接成功。
                 return Ok(());
             }
-            guard.set_plugin_enabled(source, enabled)?;
+            guard.set_plugin_enabled(source, true)?;
+            entry
+        };
+
+        self.entries
+            .write()
+            .map_err(|_| "插件注册表不可用")?
+            .insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
+        Ok(())
+    }
+
+    /// 禁用插件条目。
+    ///
+    /// 先改配置条目，再把内存注册表换成 Disabled 态（保留 manifest 供列表展示）。
+    ///
+    /// 整个流程在 `install_lock` 内独占：与添加、启用、移除、重新加载互斥
+    /// （理由见 [`Self::enable`]）；本流程只读本机文件、不联网。
+    pub(crate) fn disable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
+
+        let entry = store.read()?.plugin_by_source(source)?;
+        if !entry.enabled {
+            return Ok(());
+        }
+
+        let entry = {
+            let mut guard = store.write()?;
+            // 复检：条目可能已被移除，不得按过期条目继续写。
+            let entry = guard.plugin_by_source(source)?;
+            if !entry.enabled {
+                // 并发方已完成同样的切换：配置与注册表均已同步，直接成功。
+                return Ok(());
+            }
+            guard.set_plugin_enabled(source, false)?;
             entry
         };
 
         let mut entries = self.entries.write().map_err(|_| "插件注册表不可用")?;
-        match loaded {
-            Some(loaded) => {
-                entries.insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
-            }
-            None => {
-                if let Some(state) = entries.get_mut(&entry.id)
-                    && let PluginState::Loaded(loaded) = state
-                {
-                    let manifest = loaded.manifest.clone();
-                    *state = PluginState::Disabled(manifest);
-                }
-            }
+        if let Some(state) = entries.get_mut(&entry.id)
+            && let PluginState::Loaded(loaded) = state
+        {
+            let manifest = loaded.manifest.clone();
+            *state = PluginState::Disabled(manifest);
         }
         Ok(())
     }
@@ -290,18 +309,5 @@ impl PluginService {
             .map_err(|_| "插件注册表不可用")?
             .insert(entry.id, state);
         Ok(())
-    }
-
-    /// id 冲突检查：同一 id 只能由一个来源持有。
-    fn check_id_conflict(&self, store: &AppStore, source: &str, id: &str) -> Result<(), String> {
-        let guard = store.read()?;
-        match guard
-            .list_plugins()?
-            .iter()
-            .find(|plugin| plugin.source != source && plugin.id.as_str() == id)
-        {
-            Some(other) => Err(format!("插件 id「{id}」已被来源 {} 占用", other.source)),
-            None => Ok(()),
-        }
     }
 }
