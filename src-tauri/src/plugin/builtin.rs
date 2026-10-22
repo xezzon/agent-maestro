@@ -60,13 +60,7 @@ mod tests {
     #[test]
     fn embedded_pi_manifest_is_valid_and_matches_builtin_identity() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = crate::plugin::PlatformDirs::new(
-            root.path().to_path_buf(),
-            root.path().join(".config"),
-            root.path().join(".config"),
-            root.path().join(".local/share"),
-            root.path().join(".local/share"),
-        );
+        let dirs = crate::plugin::PlatformDirs::from_home(root.path());
         let _g = crate::plugin::PlatformDirs::test_guard(dirs);
         let manifest = parse_manifest(
             &PluginSource::Builtin(BUILTIN_PI_ID.to_owned()),

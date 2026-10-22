@@ -132,6 +132,48 @@ impl PlatformDirs {
         }
     }
 
+    /// 全部基准目录都落在同一个根之下（测试用）。
+    ///
+    /// 五个基准目录此前由调用方各拼一遍——参数一多就容易拼错位（`new` 的
+    /// 五个参数全是 `PathBuf`，编译器分不清谁是谁）。派生规则收在这里一处。
+    #[cfg(test)]
+    pub(crate) fn from_root(root: &Path) -> Self {
+        Self {
+            home: root.to_path_buf(),
+            config: root.to_path_buf(),
+            config_local: root.to_path_buf(),
+            data: root.to_path_buf(),
+            data_local: root.to_path_buf(),
+        }
+    }
+
+    /// 主目录 + 平台约定的子目录（测试用）。
+    #[cfg(test)]
+    pub(crate) fn from_home(home: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            config: home.join(".config"),
+            config_local: home.join(".config"),
+            data: home.join(".local/share"),
+            data_local: home.join(".local/share"),
+        }
+    }
+
+    /// 五个基准目录互不相同（各自是根下的一个具名子目录）。
+    ///
+    /// 只有「验证每个平台变量映射到自己的基准目录」时需要这种布局——五个
+    /// 基准目录若指向同一处，就分不清哪个变量解析到了哪里。
+    #[cfg(test)]
+    pub(crate) fn distinct_under(root: &Path) -> Self {
+        Self::new(
+            root.join("home"),
+            root.join("config"),
+            root.join("config-local"),
+            root.join("data"),
+            root.join("data-local"),
+        )
+    }
+
     /// 获取全局实例（值语义，clone 成本极低）。
     ///
     /// 尚未初始化即报错，不 panic：本方法在 manifest 的反序列化路径上（经
@@ -419,13 +461,7 @@ mod tests {
     /// 注入的基准目录：全部落在临时目录下，不读真实环境。
     fn platform_dirs_setup() -> (tempfile::TempDir, TestGuard<PlatformDirs>) {
         let root = tempfile::tempdir().unwrap();
-        let dirs = PlatformDirs::new(
-            root.path().join("home"),
-            root.path().join("config"),
-            root.path().join("config-local"),
-            root.path().join("data"),
-            root.path().join("data-local"),
-        );
+        let dirs = PlatformDirs::distinct_under(root.path());
         let guard = PlatformDirs::test_guard(dirs);
         (root, guard)
     }

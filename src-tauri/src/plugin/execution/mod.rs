@@ -155,13 +155,7 @@ mod testutil {
     /// manifest 声明 `$HOME/.pi`，平台基准目录全部指向传入的临时目录，解析结果
     /// 随插件一并返回——断言对着它写，路径不必硬编码两次。
     pub(crate) fn loaded_plugin(root: &Path, wasm: &[u8]) -> (LoadedPlugin, PathBuf) {
-        let dirs = PlatformDirs::new(
-            root.to_path_buf(),
-            root.to_path_buf(),
-            root.to_path_buf(),
-            root.to_path_buf(),
-            root.to_path_buf(),
-        );
+        let dirs = PlatformDirs::from_root(root);
         PlatformDirs::init_test(dirs);
         let manifest = testutil::manifest_json("pi", "$HOME/.pi", "plugin.wasm");
         let loaded = PlacedPlugin::new(&root.join("placed"), manifest, wasm)

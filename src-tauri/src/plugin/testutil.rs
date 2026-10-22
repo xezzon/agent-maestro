@@ -21,13 +21,7 @@ pub(crate) fn temp_home() -> tempfile::TempDir {
 /// 设置测试用全局目录（MaestroPaths + PlatformDirs），落在临时主目录下。
 pub(super) fn setup_test_dirs(home: &Path) {
     MaestroPaths::init(home);
-    PlatformDirs::init_test(PlatformDirs::new(
-        home.to_path_buf(),
-        home.join(".config"),
-        home.join(".config"),
-        home.join(".local/share"),
-        home.join(".local/share"),
-    ));
+    PlatformDirs::init_test(PlatformDirs::from_home(home));
 }
 
 /// 不联网的插件服务：任何未预置的拉取都会失败。
