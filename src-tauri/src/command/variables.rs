@@ -11,8 +11,7 @@ pub(crate) fn list_variables(
 ) -> Result<BTreeMap<String, String>, String> {
     let outcome = (|| -> Result<BTreeMap<String, String>, String> {
         let guard = store.read()?;
-        let config = guard.get()?;
-        Ok(config.variables.clone())
+        Ok(guard.variables_snapshot()?)
     })();
     log_outcome("list_variables", "", &outcome);
     outcome

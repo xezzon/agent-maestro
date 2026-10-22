@@ -104,7 +104,7 @@ pub fn run() {
             let app_store = app.state::<AppStore>();
             service.startup(&app_store)?;
             match app_store.read() {
-                Ok(guard) => match guard.get() {
+                Ok(guard) => match guard.config_snapshot() {
                     Ok(config) => log::info!(
                         "startup complete: {} providers, {} plugins",
                         config.providers.len(),

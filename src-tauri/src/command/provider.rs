@@ -58,8 +58,7 @@ pub(crate) fn list_providers(
 ) -> Result<BTreeMap<String, Provider>, String> {
     let outcome = (|| -> Result<BTreeMap<String, Provider>, String> {
         let guard = store.read()?;
-        let config = guard.get()?;
-        Ok(config.providers.clone())
+        Ok(guard.providers_snapshot()?)
     })();
     log_outcome("list_providers", "", &outcome);
     outcome

@@ -38,9 +38,9 @@ impl PluginService {
         // 短锁内完成条目读取与校验：声明的真相源就是当前全局变量表。
         let entry = {
             let guard = store.read()?;
-            let config = guard.get()?;
+            let variables = guard.variables_snapshot()?;
             for name in plugin_config.variables.keys() {
-                if !config.variables.contains_key(name) {
+                if !variables.contains_key(name) {
                     return Err(format!(
                         "变量「{name}」未在全局变量表中声明，不能写入插件配置的覆盖项；请先在全局变量中声明。"
                     ));

@@ -222,8 +222,38 @@ impl Store {
     }
 
     /// 当前配置；存储处于保护状态时返回错误。
-    pub(crate) fn get(&self) -> Result<&Config, &StoreError> {
-        self.state.as_ref()
+    ///
+    /// 错误按值返回：调用方不必持有 `&StoreError` 的借用，命令层因此不必
+    /// 为「把错误交出去」而反复 `map_err(Clone::clone)`。本方法**模块私有**——
+    /// 外部只经由语义化查询（`providers_snapshot` / `enabled_providers` /
+    /// `variables_snapshot` / `list_plugins` / `config_snapshot`）读取配置，
+    /// 不直接触碰 `Config` 的字段布局。
+    fn get(&self) -> Result<&Config, StoreError> {
+        self.state.as_ref().map_err(Clone::clone)
+    }
+
+    /// 整份配置快照（自有值）：给「要整份配置」的调用方（启动摘要、测试夹具）。
+    ///
+    /// 只需要其中一段的调用方走语义化查询，不必克隆整份配置。
+    pub(crate) fn config_snapshot(&self) -> Result<Config, StoreError> {
+        Ok(self.get()?.clone())
+    }
+
+    /// Provider 表快照（按 slug 键序）。
+    pub(crate) fn providers_snapshot(&self) -> Result<BTreeMap<String, Provider>, StoreError> {
+        Ok(self.get()?.providers.clone())
+    }
+
+    /// 参与投影的 Provider 表快照（#94）：`enabled == false` 者整体不参与——
+    /// 既不写入插件，也不做占位符插值，因此其字段里的占位符错误不会牵连整个
+    /// 插件失败。筛选与快照合并为一次克隆，且只克隆启用项。
+    pub(crate) fn enabled_providers(&self) -> Result<BTreeMap<String, Provider>, StoreError> {
+        Ok(select_enabled_providers(&self.get()?.providers))
+    }
+
+    /// 全局变量表快照（ADR 0015）。
+    pub(crate) fn variables_snapshot(&self) -> Result<Variables, StoreError> {
+        Ok(self.get()?.variables.clone())
     }
 
     /// 唯一的配置写路径：取当前配置 → clone → 交闭包改 → 落盘 → 换 state。
@@ -236,8 +266,7 @@ impl Store {
         &mut self,
         f: impl FnOnce(&mut Config) -> Result<Change<T>, StoreError>,
     ) -> Result<T, StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        let mut next = config.clone();
+        let mut next = self.get()?.clone();
         match f(&mut next)? {
             Change::Unchanged(value) => Ok(value),
             Change::Changed(value) => {
@@ -360,14 +389,12 @@ impl Store {
     }
 
     pub(crate) fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        Ok(config.plugins.clone())
+        Ok(self.get()?.plugins.clone())
     }
 
     /// 按来源取插件条目（`source` 即条目唯一身份）。
     pub(crate) fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        config
+        self.get()?
             .plugins
             .iter()
             .find(|plugin| plugin.source == source)
@@ -444,6 +471,21 @@ impl Store {
 /// 变量名合法性（ADR 0014）：`[A-Za-z0-9_]+`，与占位符语法一致。
 fn is_valid_variable_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// 挑出参与投影的 Provider（#94）：`enabled == false` 者整体不参与——既不写入
+/// 插件，也不做占位符插值，因此其字段里的占位符错误不会牵连整个插件失败。
+///
+/// 这是存储层的领域规则（不是传输层的）：命令层与插件服务都经由
+/// [`Store::enabled_providers`] 走同一份实现，不再各自复述一遍筛选口径。
+pub(crate) fn select_enabled_providers(
+    providers: &BTreeMap<String, Provider>,
+) -> BTreeMap<String, Provider> {
+    providers
+        .iter()
+        .filter(|(_, provider)| provider.enabled)
+        .map(|(slug, provider)| (slug.clone(), provider.clone()))
+        .collect()
 }
 
 /// Provider 插值失败 → 存储错误：与投影时（`interpolate_providers`）同因同报、

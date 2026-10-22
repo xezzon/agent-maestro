@@ -295,9 +295,8 @@ impl PluginService {
     /// id 冲突检查：同一 id 只能由一个来源持有。
     fn check_id_conflict(&self, store: &AppStore, source: &str, id: &str) -> Result<(), String> {
         let guard = store.read()?;
-        let config = guard.get()?;
-        match config
-            .plugins
+        match guard
+            .list_plugins()?
             .iter()
             .find(|plugin| plugin.source != source && plugin.id.as_str() == id)
         {

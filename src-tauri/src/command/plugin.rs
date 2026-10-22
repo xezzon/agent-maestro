@@ -1,12 +1,9 @@
-use std::collections::BTreeMap;
-
 use tauri::{AppHandle, Manager, State};
 
 use super::log_outcome;
 use crate::{
     AppStore,
     plugin::{PluginApplyReport, PluginConfig, PluginService, PluginView},
-    provider::Provider,
 };
 
 /// 列出插件注册表（metadata 与加载状态）。
@@ -119,19 +116,6 @@ pub(crate) async fn set_plugin_config(
     outcome
 }
 
-/// 挑出参与投影的 Provider（#94）：`enabled == false` 者整体不参与——既不写入
-/// 插件，也不做占位符插值，因此其字段里的占位符错误不会牵连整个插件失败。
-///
-/// 在读取配置的临界区内调用：返回值即脱离 store 锁的那份自有快照（筛选与快照
-/// 合并为一次克隆，且只克隆启用项）。
-fn enabled_providers(providers: &BTreeMap<String, Provider>) -> BTreeMap<String, Provider> {
-    providers
-        .iter()
-        .filter(|(_, provider)| provider.enabled)
-        .map(|(slug, provider)| (slug.clone(), provider.clone()))
-        .collect()
-}
-
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，
 /// 返回逐插件结果（写入的文件、跳过的 Provider、失败原因）。
 ///
@@ -148,11 +132,7 @@ pub(crate) fn apply_providers(
     let outcome = (|| -> Result<Vec<PluginApplyReport>, String> {
         let (providers, variables) = {
             let guard = store.read()?;
-            let config = guard.get()?;
-            (
-                enabled_providers(&config.providers),
-                config.variables.clone(),
-            )
+            (guard.enabled_providers()?, guard.variables_snapshot()?)
         };
         service.write_providers(&providers, &variables)
     })();
@@ -194,10 +174,10 @@ where
 mod tests {
     use std::{collections::BTreeMap, fs};
 
-    use super::enabled_providers;
     use crate::{
         plugin::testutil::{store_at, temp_home, test_service},
         provider::{Protocol, Provider},
+        store::select_enabled_providers,
     };
 
     /// 禁用 Provider 不参与投影（#94）：先投影一次留下条目，再禁用并重新投影，
@@ -236,7 +216,7 @@ mod tests {
 
         let models_path = home.path().join(".pi").join("agent").join("models.json");
         let first = service
-            .write_providers(&enabled_providers(&providers), &BTreeMap::new())
+            .write_providers(&select_enabled_providers(&providers), &BTreeMap::new())
             .unwrap();
         assert_eq!(first[0].status, "applied", "{:?}", first[0].reason);
         let written: serde_json::Value =
@@ -248,7 +228,7 @@ mod tests {
 
         providers.get_mut("offline").unwrap().enabled = false;
         let second = service
-            .write_providers(&enabled_providers(&providers), &BTreeMap::new())
+            .write_providers(&select_enabled_providers(&providers), &BTreeMap::new())
             .unwrap();
         assert_eq!(second[0].status, "applied", "{:?}", second[0].reason);
         let raw = fs::read_to_string(&models_path).unwrap();
