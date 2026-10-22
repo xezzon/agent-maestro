@@ -6,7 +6,7 @@ import { applyStatusPresentation } from "./applyStatus";
 /**
  * 逐插件投影结果（见 issue #34 用户故事 2/3/4）。
  * @param {Object} param0
- * @param {import("../../api/plugins").PluginApplyReport[]} param0.reports
+ * @param {import("@/api/plugins").PluginApplyReport[]} param0.reports
  */
 export default function ApplyResultList({ reports }) {
   return (

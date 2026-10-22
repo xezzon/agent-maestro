@@ -3,7 +3,7 @@ import {
   ANTHROPIC_MESSAGES,
   OPENAI_COMPLETIONS,
   configuredProtocols,
-} from "../../api/provider";
+} from "@/api/provider";
 import { MODE_UPDATE } from "./formMode";
 
 /** 投影协议的可选项：标签带协议名，界面上一眼对得上落盘值。 */

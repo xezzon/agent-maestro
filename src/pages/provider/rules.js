@@ -3,8 +3,8 @@ import {
   OPENAI_COMPLETIONS,
   PROVIDER_PROTOCOLS,
   configuredProtocols,
-} from "../../api/provider";
-import { urlRule } from "../../components/urlRules";
+} from "@/api/provider";
+import { urlRule } from "@/components/urlRules";
 import { MODE_CREATE, MODE_UPDATE } from "./formMode";
 
 /**
@@ -36,7 +36,7 @@ export const SLUG_RULES = [
  * 更新态的 slug 只读，不需要（也不应该）拿它去撞已有记录。
  * 缺 `providers` 时直接抛错：静默当成空列表会让冲突校验形同虚设。
  * @param {Object} deps
- * @param {import("../../api/provider").Provider[]} deps.providers 当前存在的 Provider
+ * @param {import("@/api/provider").Provider[]} deps.providers 当前存在的 Provider
  */
 export function slugUniquenessRule({ providers }) {
   if (!providers) {
@@ -65,7 +65,7 @@ export const BASE_URL_RULES = [
 /**
  * 已配置的协议：端点只填空白视为未配置，与写入前的归一化同一口径。
  * @param {{ getFieldValue: (name: any) => any }} form
- * @returns {import("../../api/provider").ProviderProtocol[]}
+ * @returns {import("@/api/provider").ProviderProtocol[]}
  */
 function filledProtocols(form) {
   return configuredProtocols(
@@ -181,7 +181,7 @@ export function modelIdRule(form) {
  * @param {Object} deps
  * @param {{ getFieldValue: (name: any) => any }} deps.form
  * @param {"create" | "update"} deps.mode
- * @param {import("../../api/provider").Provider[]=} deps.providers 创建态必传
+ * @param {import("@/api/provider").Provider[]=} deps.providers 创建态必传
  */
 export function providerFormRules({ form, mode, providers }) {
   if (mode !== MODE_CREATE && mode !== MODE_UPDATE) {

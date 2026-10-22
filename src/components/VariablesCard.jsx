@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button, Card, Form, Input, Typography } from "antd";
-import { setVariables as saveVariables } from "../api/variables";
-import useAsyncAction from "../hooks/useAsyncAction";
+import { setVariables as saveVariables } from "@/api/variables";
+import useAsyncAction from "@/hooks/useAsyncAction";
 import VariableRowsForm from "./VariableRowsForm";
 import { globalVariableRules } from "./variableRules";
 
@@ -10,7 +10,7 @@ import { globalVariableRules } from "./variableRules";
  * 数据由所在页面持有（`variables` + `onReload`），可在多个页面复用。
  * 只读态展示名 → 默认值；编辑态整表增删改，保存即写回全局配置。
  * @param {Object} param0
- * @param {import("../api/variables").Variables} param0.variables
+ * @param {import("@/api/variables").Variables} param0.variables
  * @param {() => void} param0.onReload
  */
 export default function VariablesCard({ variables, onReload }) {
@@ -61,7 +61,7 @@ export default function VariablesCard({ variables, onReload }) {
  * 全局变量编辑表单：名与默认值必填；规则见 `variableRules`（名仅允许
  * `[A-Za-z0-9_]+`，同表内唯一，大小写敏感）。保存即整包替换全局变量表。
  * @param {Object} param0
- * @param {import("../api/variables").Variables} param0.variables
+ * @param {import("@/api/variables").Variables} param0.variables
  * @param {(refresh: boolean) => void} param0.onFinish
  */
 function VariablesForm({ variables, onFinish }) {

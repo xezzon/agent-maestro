@@ -15,8 +15,8 @@ import {
   CAPABILITY_LABELS,
   PROVIDER_PROTOCOLS,
   deleteProvider,
-} from "../../api/provider";
-import useAsyncAction from "../../hooks/useAsyncAction";
+} from "@/api/provider";
+import useAsyncAction from "@/hooks/useAsyncAction";
 
 /** 只读展示一项 token 上限：未设置就显示「未设置」，不编造默认值。 */
 function formatLimit(value) {
@@ -25,7 +25,7 @@ function formatLimit(value) {
 
 /**
  * @param {Object} param0
- * @param {import("../../api/provider").Provider} param0.provider
+ * @param {import("@/api/provider").Provider} param0.provider
  * @param {() => void} param0.afterDelete
  * @param {() => void} param0.onEdit
  */

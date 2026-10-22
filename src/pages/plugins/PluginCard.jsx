@@ -16,12 +16,12 @@ import {
   reloadPlugin,
   removePlugin,
   setPluginEnabled,
-} from "../../api/plugins";
-import useAsyncAction from "../../hooks/useAsyncAction";
+} from "@/api/plugins";
+import useAsyncAction from "@/hooks/useAsyncAction";
 
 /**
  * @param {Object} param0
- * @param {import("../../api/plugins").PluginView} param0.plugin
+ * @param {import("@/api/plugins").PluginView} param0.plugin
  * @param {() => void} param0.onReload
  */
 export default function PluginCard({ plugin, onReload }) {

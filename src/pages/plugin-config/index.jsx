@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, Empty, Spin, Tabs, Typography } from "antd";
-import { getPluginConfig } from "../../api/plugins";
-import { listVariables } from "../../api/variables";
+import { getPluginConfig } from "@/api/plugins";
+import { listVariables } from "@/api/variables";
 import PluginVariablesCard from "./PluginVariablesCard";
 import PluginForm from "./PluginForm";
 
@@ -11,7 +11,7 @@ import PluginForm from "./PluginForm";
  * 保存只写该插件的配置（ADR 0018），不触发投影——投影仍由 Provider 页的
  * 「应用到工具」显式发起。
  * @param {Object} param0
- * @param {import("../../api/plugins").PluginView} param0.plugin
+ * @param {import("@/api/plugins").PluginView} param0.plugin
  */
 export default function PluginConfigPage({ plugin }) {
   const [config, setConfig] = useState(null);
@@ -97,7 +97,7 @@ export default function PluginConfigPage({ plugin }) {
 /**
  * 页头：插件标识（加载失败与正常两个分支共用）。
  * @param {Object} param0
- * @param {import("../../api/plugins").PluginView} param0.plugin
+ * @param {import("@/api/plugins").PluginView} param0.plugin
  */
 function PageHeader({ plugin }) {
   return (

@@ -9,15 +9,15 @@ import {
   Spin,
   Typography,
 } from "antd";
-import { listProviders, normalizeEndpoints } from "../../api/provider";
-import { applyProviders, isUsablePlugin, listPlugins } from "../../api/plugins";
-import { listVariables } from "../../api/variables";
-import VariablesCard from "../../components/VariablesCard";
+import { listProviders, normalizeEndpoints } from "@/api/provider";
+import { applyProviders, isUsablePlugin, listPlugins } from "@/api/plugins";
+import { listVariables } from "@/api/variables";
+import VariablesCard from "@/components/VariablesCard";
 import ProviderCard from "./ProviderCard";
 import ProviderForm from "./ProviderForm";
 import { MODE_CREATE } from "./formMode";
 import ApplyResultList from "./ApplyResultList";
-import useAsyncAction from "../../hooks/useAsyncAction";
+import useAsyncAction from "@/hooks/useAsyncAction";
 
 export default function ProvidersPage() {
   const [providers, setProviders] = useState([]);

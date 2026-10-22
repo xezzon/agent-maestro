@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 /**
  * 构造一个插件视图（界面形态）：未显式给出的字段取空形态。
- * @param {Partial<import("./api/plugins").PluginView>} overrides
+ * @param {Partial<import("@/api/plugins").PluginView>} overrides
  */
 function makePlugin(overrides = {}) {
   return {

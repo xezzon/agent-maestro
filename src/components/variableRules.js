@@ -45,7 +45,7 @@ export function variableNameUniquenessRule(form, duplicateMessage) {
 /**
  * 插件覆盖：变量名必须已在全局变量表中声明（与后端 set_plugin_config 的校验一致）。
  * 用 `Object.hasOwn` 读自有属性，原型链上的名字不算声明过。
- * @param {import("../api/variables").Variables} variables 全局变量表
+ * @param {import("@/api/variables").Variables} variables 全局变量表
  */
 export function declaredVariableRule(variables) {
   return {
@@ -88,7 +88,7 @@ export function globalVariableRules(form) {
  * 不重复查名格式——能通过声明检查的名字必然已在全局表中，格式已由那里保证。
  * @param {Object} deps
  * @param {{ getFieldValue: (name: any) => any }} deps.form
- * @param {import("../api/variables").Variables} deps.variables 全局变量表
+ * @param {import("@/api/variables").Variables} deps.variables 全局变量表
  */
 export function overrideVariableRules({ form, variables }) {
   return {

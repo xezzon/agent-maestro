@@ -13,7 +13,7 @@ import {
   CAPABILITY_LABELS,
   CAPABILITY_THINKING,
   CAPABILITY_TOOL_USE,
-} from "../../api/provider";
+} from "@/api/provider";
 
 /** token 上限的预设快捷值：K/M 按十进制（128K = 128000），留空即「未设置」。 */
 const LIMIT_PRESETS = [

@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { Card, Flex, Switch, Tag, Typography } from "antd";
-import { setProviderEnabled } from "../../api/provider";
-import useAsyncAction from "../../hooks/useAsyncAction";
+import { setProviderEnabled } from "@/api/provider";
+import useAsyncAction from "@/hooks/useAsyncAction";
 import ProviderForm from "./ProviderForm";
 import ProviderReadonlyForm from "./ProviderReadonlyForm";
 import { MODE_UPDATE } from "./formMode";
 
 /**
  * @param {Object} param0
- * @param {import("../../api/provider").Provider} param0.provider
+ * @param {import("@/api/provider").Provider} param0.provider
  * @param {() => Promise<void>} param0.onReload
  */
 export default function ProviderCard({ provider, onReload }) {

@@ -17,8 +17,8 @@ const validator = customizeValidator({ AjvClass: Ajv2020 });
  * @rjsf/antd 渲染，输入期校验由 rjsf 按 schema 完成（宿主不校验 form）。
  * 保存整包写回插件配置（form 段写入提交的表单数据，variables 段原样带回）。
  * @param {Object} param0
- * @param {import("../../api/plugins").PluginView} param0.plugin
- * @param {import("../../api/plugins").PluginConfig} param0.config
+ * @param {import("@/api/plugins").PluginView} param0.plugin
+ * @param {import("@/api/plugins").PluginConfig} param0.config
  * @param {() => void} param0.onReload
  */
 export default function PluginForm({ plugin, config, onReload }) {

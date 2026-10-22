@@ -25,3 +25,7 @@ The frontend mirrors `console.*` into the same file (`log`→trace and `debug`�
 ### Tauri commands
 
 Commands are thin shells: pass parameters, call the store, and return the raw domain structure (e.g. `providers` keyed by slug). Type mapping to UI view models happens in the frontend (JS), not in Rust.
+
+### Frontend imports
+
+Frontend-internal imports use the `@/` alias, which points at `src/` (`resolve.alias` in `vite.config.js`, mirrored in `vitest.config.js` so tests resolve the same specifiers the app does, and `paths` in `jsconfig.json` so editors resolve them too). Use it for anything outside the file's own directory: `../../api/provider` chains are hard to read and break when a file moves. Imports of a sibling stay relative (`./formMode`). Third-party packages (`react`, `antd`, …) keep their bare specifiers.

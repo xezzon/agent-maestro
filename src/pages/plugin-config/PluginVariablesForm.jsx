@@ -1,6 +1,6 @@
 import { AutoComplete, Form } from "antd";
-import VariableRowsForm from "../../components/VariableRowsForm";
-import { overrideVariableRules } from "../../components/variableRules";
+import VariableRowsForm from "@/components/VariableRowsForm";
+import { overrideVariableRules } from "@/components/variableRules";
 import usePluginConfigSave from "./usePluginConfigSave";
 
 /**
@@ -8,9 +8,9 @@ import usePluginConfigSave from "./usePluginConfigSave";
  * 的校验一致），输入时从全局变量表自动补全；同表内唯一，覆盖值必填非空白
  * （规则见 `variableRules`）。保存整包写回插件配置。
  * @param {Object} param0
- * @param {import("../../api/plugins").PluginView} param0.plugin
- * @param {import("../../api/plugins").PluginConfig} param0.config
- * @param {import("../../api/variables").Variables} param0.variables
+ * @param {import("@/api/plugins").PluginView} param0.plugin
+ * @param {import("@/api/plugins").PluginConfig} param0.config
+ * @param {import("@/api/variables").Variables} param0.variables
  * @param {(refresh: boolean) => void} param0.onFinish
  */
 export default function PluginVariablesForm({

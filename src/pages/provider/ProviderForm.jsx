@@ -1,8 +1,8 @@
 import { useMemo } from "react";
 import { Form } from "antd";
-import { createProvider, updateProvider } from "../../api/provider";
-import FormActions from "../../components/FormActions";
-import useAsyncAction from "../../hooks/useAsyncAction";
+import { createProvider, updateProvider } from "@/api/provider";
+import FormActions from "@/components/FormActions";
+import useAsyncAction from "@/hooks/useAsyncAction";
 import HeaderRows from "./HeaderRows";
 import ModelRows from "./ModelRows";
 import ProviderFields from "./ProviderFields";
@@ -24,8 +24,8 @@ const SAVE_BY_MODE = {
  *
  * @param {Object} param0
  * @param {"create" | "update"} param0.mode 创建态 slug 可编辑并校验冲突；更新态 slug 只读
- * @param {import("../../api/provider").Provider} param0.provider 初始值（创建态为空白 Provider）
- * @param {import("../../api/provider").Provider[]=} param0.providers 创建态必传：slug 冲突校验
+ * @param {import("@/api/provider").Provider} param0.provider 初始值（创建态为空白 Provider）
+ * @param {import("@/api/provider").Provider[]=} param0.providers 创建态必传：slug 冲突校验
  * @param {() => void} param0.onSaved 已落盘（调用方关表单并刷新列表）
  * @param {() => void} param0.onCancel 取消（不落盘）
  * @param {boolean=} param0.disabled 外部（状态开关）进行中时整体禁用表单

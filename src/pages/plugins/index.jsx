@@ -8,7 +8,7 @@ import {
   Spin,
   Typography,
 } from "antd";
-import { addPlugin, listPlugins } from "../../api/plugins";
+import { addPlugin, listPlugins } from "@/api/plugins";
 import AddPluginModal from "./AddPluginModal";
 import PluginCard from "./PluginCard";
 

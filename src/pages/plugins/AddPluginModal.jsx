@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Button, Form, Input, Modal, Radio } from "antd";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { urlRule } from "../../components/urlRules";
-import useAsyncAction from "../../hooks/useAsyncAction";
+import { urlRule } from "@/components/urlRules";
+import useAsyncAction from "@/hooks/useAsyncAction";
 
 const URL_RULES = [
   { required: true, message: "请输入 manifest.json 的 https 地址" },

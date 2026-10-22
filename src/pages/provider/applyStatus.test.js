@@ -4,7 +4,7 @@ import {
   APPLY_STATUS_FAILED,
   APPLY_STATUS_SKIPPED,
   APPLY_STATUSES,
-} from "../../api/plugins";
+} from "@/api/plugins";
 import { applyStatusPresentation } from "./applyStatus";
 
 describe("投影状态的界面呈现", () => {

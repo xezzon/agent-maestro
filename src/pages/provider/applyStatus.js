@@ -2,7 +2,7 @@ import {
   APPLY_STATUS_APPLIED,
   APPLY_STATUS_FAILED,
   APPLY_STATUS_SKIPPED,
-} from "../../api/plugins";
+} from "@/api/plugins";
 
 /**
  * 投影状态的界面呈现：标签文案与配色。
@@ -19,7 +19,7 @@ const STATUS_PRESENTATION = {
 
 /**
  * 取投影状态的界面呈现；未知状态返回 `null`（不渲染标签，而不是渲染一个空标签）。
- * @param {import("../../api/plugins").ApplyStatus} status
+ * @param {import("@/api/plugins").ApplyStatus} status
  * @returns {{ label: string, color: string|undefined }|null}
  */
 export function applyStatusPresentation(status) {
