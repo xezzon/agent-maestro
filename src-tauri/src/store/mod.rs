@@ -21,6 +21,8 @@ mod variable_table;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod testutil;
 
 use std::{
     collections::BTreeMap,

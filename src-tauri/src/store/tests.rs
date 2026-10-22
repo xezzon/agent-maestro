@@ -1,5 +1,6 @@
 //! 配置存储的单元测试：读写、落盘往返、校验与保护态。
 
+use super::testutil::temp_home;
 use super::*;
 use crate::provider::{ApiKey, ModelEntry, Protocol};
 
@@ -58,8 +59,7 @@ fn config_parses_version_1_document() {
 
 #[test]
 fn missing_file_opens_as_empty_config() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let store = Store::new();
 
     assert_eq!(store.get().unwrap(), &Config::default());
@@ -68,8 +68,7 @@ fn missing_file_opens_as_empty_config() {
 
 #[test]
 fn create_provider_persists_and_round_trips_through_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     store
@@ -101,8 +100,7 @@ fn create_provider_persists_and_round_trips_through_disk() {
 
 #[test]
 fn update_provider_persists_and_round_trips_through_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider(
@@ -147,8 +145,7 @@ fn update_provider_persists_and_round_trips_through_disk() {
 
 #[test]
 fn update_provider_missing_slug_is_rejected_without_upsert() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     let err = store
@@ -174,8 +171,7 @@ fn update_provider_missing_slug_is_rejected_without_upsert() {
 
 #[test]
 fn update_provider_replaces_api_key_with_whole_record() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider(
@@ -255,8 +251,7 @@ fn update_provider_replaces_api_key_with_whole_record() {
 
 #[test]
 fn delete_provider_removes_record_with_models_and_api_key() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
     fs::write(
         MaestroPaths::get().config_path(),
@@ -290,8 +285,7 @@ fn delete_provider_removes_record_with_models_and_api_key() {
 
 #[test]
 fn delete_provider_missing_slug_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     let err = store.delete_provider("ghost").unwrap_err();
@@ -302,8 +296,7 @@ fn delete_provider_missing_slug_is_rejected() {
 
 #[test]
 fn deleted_slug_can_be_recreated() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider(
@@ -347,8 +340,7 @@ fn deleted_slug_can_be_recreated() {
 
 #[test]
 fn persisted_file_omits_unconfigured_protocol_slots() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     store
@@ -374,8 +366,7 @@ fn persisted_file_omits_unconfigured_protocol_slots() {
 
 #[test]
 fn providers_are_written_sorted_by_slug() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     for slug in ["zeta", "alpha", "midway"] {
@@ -402,8 +393,7 @@ fn providers_are_written_sorted_by_slug() {
 
 #[test]
 fn multiple_providers_round_trip_through_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     store
@@ -452,8 +442,7 @@ fn multiple_providers_round_trip_through_disk() {
 
 #[test]
 fn create_provider_preserves_other_providers_models_and_endpoints() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
     fs::write(
         MaestroPaths::get().config_path(),
@@ -514,8 +503,7 @@ fn create_provider_preserves_other_providers_models_and_endpoints() {
 
 #[test]
 fn corrupt_file_reports_error_with_path_and_refuses_writes() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
     fs::write(MaestroPaths::get().config_path(), "不是 JSON {{{").unwrap();
     let original = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
@@ -548,8 +536,7 @@ fn corrupt_file_reports_error_with_path_and_refuses_writes() {
 
 #[test]
 fn unsupported_version_reports_error_with_path_and_refuses_writes() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
     fs::write(
         MaestroPaths::get().config_path(),
@@ -586,8 +573,7 @@ fn unsupported_version_reports_error_with_path_and_refuses_writes() {
 
 #[test]
 fn duplicate_slug_is_rejected_and_original_kept() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     store
@@ -635,8 +621,7 @@ fn duplicate_slug_is_rejected_and_original_kept() {
 
 #[test]
 fn create_provider_creates_missing_directories() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     store
@@ -657,8 +642,7 @@ fn create_provider_creates_missing_directories() {
 
 #[test]
 fn provider_with_models_round_trips_through_disk_order_preserved() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     let models = vec![
         ModelEntry {
@@ -702,8 +686,7 @@ fn provider_with_models_round_trips_through_disk_order_preserved() {
 
 #[test]
 fn same_model_id_can_exist_in_different_providers() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     let gpt_4o = || ModelEntry {
         id: "gpt-4o".to_owned(),
@@ -764,8 +747,7 @@ fn same_model_id_can_exist_in_different_providers() {
 #[test]
 fn store_does_not_validate_model_ids() {
     // 业务校验（非空、Provider 内唯一）由前端内联完成；存储层原样保存，不拦不补。
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     store
@@ -808,8 +790,7 @@ fn store_does_not_validate_model_ids() {
 
 #[test]
 fn plugins_section_defaults_to_empty_for_legacy_config_files() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
     fs::write(
         MaestroPaths::get().config_path(),
@@ -829,8 +810,7 @@ fn plugins_section_defaults_to_empty_for_legacy_config_files() {
 /// CONFIG_VERSION 保持 1；空表照常写出为 `{}`。
 #[test]
 fn variables_default_to_empty_and_serialize_as_an_empty_object() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
     fs::write(
         MaestroPaths::get().config_path(),
@@ -850,8 +830,7 @@ fn variables_default_to_empty_and_serialize_as_an_empty_object() {
 
 #[test]
 fn variables_round_trip_through_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let store = Store::new();
     let variables = BTreeMap::from([
         ("HOST".to_owned(), "api.example.com".to_owned()),
@@ -872,8 +851,7 @@ fn variables_round_trip_through_disk() {
 /// 成功后原子写回磁盘。
 #[test]
 fn set_variables_replaces_whole_table_and_round_trips_through_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     store
@@ -903,8 +881,7 @@ fn set_variables_replaces_whole_table_and_round_trips_through_disk() {
 /// 变量表清空同样是合法保存：空表照常写出为 `{}`。
 #[test]
 fn set_variables_to_empty_clears_the_table() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .set_variables(BTreeMap::from([(
@@ -928,8 +905,7 @@ fn set_variables_to_empty_clears_the_table() {
 /// 嵌套渲染同样不得携带 api_key 明文。
 #[test]
 fn config_debug_output_never_contains_the_api_key() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider(
@@ -951,8 +927,7 @@ fn config_debug_output_never_contains_the_api_key() {
 
 #[test]
 fn corrupt_store_refuses_plugin_writes() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
     fs::write(MaestroPaths::get().config_path(), "不是 JSON {{{").unwrap();
     let mut store = Store::new();
@@ -970,8 +945,7 @@ fn corrupt_store_refuses_plugin_writes() {
 
 #[test]
 fn create_provider_rejects_references_to_undefined_variables() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     let err = store
@@ -1019,8 +993,7 @@ fn interpolation_store_error_message_is_verbatim() {
 /// issue #128）。
 #[test]
 fn store_and_projection_report_interpolation_failures_identically() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     let provider = Provider {
         base_url: BTreeMap::from([(Protocol::OpenaiCompletions, "https://${HOST}/v1".to_owned())]),
@@ -1042,8 +1015,7 @@ fn store_and_projection_report_interpolation_failures_identically() {
 /// 已定义的变量与带内联默认值的引用都可通过；存储层原样保存，插值发生在投影时。
 #[test]
 fn create_provider_accepts_defined_variables_and_inline_defaults() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .set_variables(BTreeMap::from([(
@@ -1080,8 +1052,7 @@ fn create_provider_accepts_defined_variables_and_inline_defaults() {
 
 #[test]
 fn update_provider_rejects_undefined_variables_and_keeps_the_original() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider(
@@ -1124,8 +1095,7 @@ fn update_provider_rejects_undefined_variables_and_keeps_the_original() {
 /// 删除在用变量整表拒绝：报错与投影时插值失败同款文案，落盘不变。
 #[test]
 fn set_variables_rejects_removing_a_variable_in_use() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .set_variables(BTreeMap::from([
@@ -1164,8 +1134,7 @@ fn set_variables_rejects_removing_a_variable_in_use() {
 /// 只被带内联默认值的引用提到的变量可以删除（删除后插值仍可解析）。
 #[test]
 fn set_variables_allows_removing_a_variable_only_referenced_with_inline_default() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .set_variables(BTreeMap::from([("OPT".to_owned(), "x".to_owned())]))
@@ -1191,8 +1160,7 @@ fn set_variables_allows_removing_a_variable_only_referenced_with_inline_default(
 /// 改值与新增不受一致性约束：在用变量的值可以修改。
 #[test]
 fn set_variables_allows_changing_the_value_of_a_variable_in_use() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .set_variables(BTreeMap::from([(
@@ -1229,8 +1197,7 @@ fn set_variables_allows_changing_the_value_of_a_variable_in_use() {
 /// 占位符语法错误同样在落盘前拦截：与投影时插值失败同因同报。
 #[test]
 fn create_provider_rejects_malformed_placeholders() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     let err = store
@@ -1255,8 +1222,7 @@ fn create_provider_rejects_malformed_placeholders() {
 /// 当前（变更后的）变量表可插值。
 #[test]
 fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
     fs::write(
         MaestroPaths::get().config_path(),
@@ -1295,8 +1261,7 @@ fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
 /// 直传命令的非法键名整表拒绝、不落盘。
 #[test]
 fn set_variables_rejects_invalid_variable_names() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     for name in ["a-b", "", "带 空格"] {
@@ -1319,8 +1284,7 @@ fn set_variables_rejects_invalid_variable_names() {
 /// 后端不拒绝；非空的合法名照常保存。
 #[test]
 fn set_variables_accepts_an_empty_default_value() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     store
@@ -1339,8 +1303,7 @@ fn set_variables_accepts_an_empty_default_value() {
 /// 原有数据（端点/模型/api_key/变量）一字不丢。
 #[test]
 fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let path = MaestroPaths::get().config_path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
@@ -1396,8 +1359,7 @@ fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
 fn provider_with_custom_header_limit_and_capabilities_round_trips_through_disk() {
     use crate::provider::{ModelCapability, ModelLimit};
 
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     let provider = Provider {
         base_url: BTreeMap::from([(
@@ -1432,8 +1394,7 @@ fn provider_with_custom_header_limit_and_capabilities_round_trips_through_disk()
 /// 空 limit、空能力集合；随后任一次落盘补齐固定形状。
 #[test]
 fn legacy_config_without_new_fields_reads_as_unset_and_writes_fixed_shape() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let path = MaestroPaths::get().config_path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
@@ -1480,8 +1441,7 @@ fn legacy_config_without_new_fields_reads_as_unset_and_writes_fixed_shape() {
 
 #[test]
 fn set_provider_enabled_toggles_and_round_trips_through_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider("ollama", Provider::default())
@@ -1501,8 +1461,7 @@ fn set_provider_enabled_toggles_and_round_trips_through_disk() {
 
 #[test]
 fn set_provider_enabled_is_idempotent_and_missing_slug_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider("ollama", Provider::default())
@@ -1523,8 +1482,7 @@ fn set_provider_enabled_is_idempotent_and_missing_slug_is_rejected() {
 /// 可被改写且翻转被记录——否则「文件没变」可能只是文件坏了。
 #[test]
 fn set_provider_enabled_does_not_write_to_disk_when_state_is_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider("ollama", Provider::default())
@@ -1569,8 +1527,7 @@ fn set_provider_enabled_does_not_write_to_disk_when_state_is_unchanged() {
 /// 禁用只是投影时的结构过滤，不放宽 provider↔variables 一致性。
 #[test]
 fn disabled_provider_is_still_subject_to_interpolation_checks() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
 
     // 禁用态也不能保存引用未定义变量的记录。
@@ -1622,8 +1579,7 @@ fn disabled_provider_is_still_subject_to_interpolation_checks() {
 /// 整包更新为禁用态同样要过插值校验：不能把记录改成引用未定义变量。
 #[test]
 fn update_provider_to_disabled_still_checks_interpolation() {
-    let dir = tempfile::tempdir().unwrap();
-    MaestroPaths::init(dir.path());
+    let _home = temp_home();
     let mut store = Store::new();
     store
         .create_provider("gateway", Provider::default())
