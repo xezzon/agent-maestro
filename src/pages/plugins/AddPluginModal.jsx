@@ -58,6 +58,16 @@ export default function AddPluginModal({ open, onClose, onSubmit }) {
     onClose();
   }
 
+  /**
+   * 用户取消：保存进行中不关闭。
+   * 在途提交若在用户重新打开之后才回调，会把新会话的输入一起清掉——
+   * 故保存期间取消、关闭按钮、遮罩点击与 Esc 一律不关闭对话框。
+   */
+  function cancel() {
+    if (saving) return;
+    close();
+  }
+
   async function pickManifest() {
     setPicking(true);
     try {
@@ -106,7 +116,11 @@ export default function AddPluginModal({ open, onClose, onSubmit }) {
       confirmLoading={saving}
       destroyOnHidden
       onOk={handleSubmit}
-      onCancel={close}
+      onCancel={cancel}
+      closable={!saving}
+      keyboard={!saving}
+      mask={{ closable: !saving }}
+      cancelButtonProps={{ disabled: saving }}
     >
       <Form form={form} layout="vertical" onFinish={handleSubmit}>
         <Form.Item label="来源">
