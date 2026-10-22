@@ -10,12 +10,14 @@ import globals from "globals";
 export default defineConfig([
   {
     // Rust 侧（src-tauri、crates、plugins）由 clippy 与 rustfmt 负责，不进 ESLint；
-    // .scratch 放临时产物，不参与检查。
+    // .scratch 放临时产物，不参与检查；.worktrees 是本地工作树（含前端构建产物
+    // bundle.js），既不入库也不参与检查——漏掉它会让全仓 `pnpm lint` 常年报错。
     ignores: [
       "dist/",
       "node_modules/",
       ".scratch/",
       ".agents/",
+      ".worktrees/",
       "src-tauri/",
       "crates/",
       "plugins/",

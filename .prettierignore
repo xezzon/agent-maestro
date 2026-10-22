@@ -4,6 +4,7 @@ node_modules
 dist
 .scratch
 .agents
+.worktrees
 .github
 crates
 docs
