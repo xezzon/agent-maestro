@@ -3,6 +3,7 @@ import {
   OPENAI_COMPLETIONS,
   PROVIDER_PROTOCOLS,
 } from "../../api/provider";
+import { MODE_CREATE, MODE_UPDATE } from "./formMode";
 
 /**
  * Provider 表单的校验规则。
@@ -29,17 +30,19 @@ export const SLUG_RULES = [
 ];
 
 /**
- * slug 唯一性：与已有 Provider 冲突时报错。
- * 更新态传 `providers: []`（slug 不可编辑），因此不做冲突校验；即便如此，
- * 传入的 `currentSlug` 也保证把自己排除在外。
+ * slug 唯一性：与已有 Provider 冲突时报错。只挂在创建态——
+ * 更新态的 slug 只读，不需要（也不应该）拿它去撞已有记录。
+ * 缺 `providers` 时直接抛错：静默当成空列表会让冲突校验形同虚设。
  * @param {Object} deps
  * @param {import("../../api/provider").Provider[]} deps.providers 当前存在的 Provider
- * @param {string} deps.currentSlug 正在编辑的 Provider 的 slug（新建时为空串）
  */
-export function slugUniquenessRule({ providers, currentSlug }) {
+export function slugUniquenessRule({ providers }) {
+  if (!providers) {
+    throw new Error("slug 冲突校验需要当前 Provider 列表");
+  }
   return {
     validator: (_, value) =>
-      value !== currentSlug && providers.some((p) => p.slug === value)
+      providers.some((p) => p.slug === value)
         ? Promise.reject(new Error(`slug ${value} 已被使用`))
         : Promise.resolve(),
   };
@@ -172,14 +175,22 @@ export function modelIdRule(form) {
  * Provider 表单各字段的规则组：按字段名组装，供 `Form.Item` 直接取用。
  * 依赖在创建时注入（先声明 `form`，再调用本工厂）；不依赖表单的规则组
  * 直接复用模块级常量，调用方再把结果放进 `useMemo` 即可做到不随渲染重建。
+ *
+ * `mode` 决定 slug 一组：创建态要避开已有 slug，更新态的 slug 只读、
+ * 只有静态格式规则。冲突校验不再靠调用方传空 `providers` 来关闭。
  * @param {Object} deps
  * @param {{ getFieldValue: (name: any) => any }} deps.form
- * @param {import("../../api/provider").Provider[]} deps.providers
- * @param {string} deps.currentSlug 正在编辑的 Provider 的 slug（新建时为空串）
+ * @param {"create" | "update"} deps.mode
+ * @param {import("../../api/provider").Provider[]=} deps.providers 创建态必传
  */
-export function providerFormRules({ form, providers, currentSlug }) {
+export function providerFormRules({ form, mode, providers }) {
+  if (mode !== MODE_CREATE && mode !== MODE_UPDATE) {
+    throw new Error(`未知的 Provider 表单模式：${mode}`);
+  }
   return {
-    slug: [...SLUG_RULES, slugUniquenessRule({ providers, currentSlug })],
+    slug: mode === MODE_CREATE
+      ? [...SLUG_RULES, slugUniquenessRule({ providers })]
+      : SLUG_RULES,
     // 按协议槽位分组，字段名复用 PROVIDER_PROTOCOLS 的常量，不另写一份键名。
     baseUrl: {
       [OPENAI_COMPLETIONS]: [...BASE_URL_RULES, atLeastOneEndpointRule(form)],

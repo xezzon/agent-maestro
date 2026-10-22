@@ -3,12 +3,7 @@ import { Card, Flex, message, Switch, Tag, Typography } from "antd";
 import { setProviderEnabled } from "../../api/provider";
 import ProviderForm from "./ProviderForm";
 import ProviderReadonlyForm from "./ProviderReadonlyForm";
-
-/**
- * 更新态不做 slug 冲突校验（slug 不可编辑）。空数组提到模块级，
- * 让表单规则在重渲染之间保持同一引用、不被 useMemo 重建。
- */
-const NO_SLUG_CONFLICTS = [];
+import { MODE_UPDATE } from "./formMode";
 
 /**
  * @param {Object} param0
@@ -53,15 +48,14 @@ export default function ProviderCard({ provider, onReload }) {
   return <Card title={title} className={provider.enabled ? undefined : "provider-disabled"}>
     {editing
       ? <ProviderForm
+        mode={MODE_UPDATE}
         provider={provider}
-        providers={NO_SLUG_CONFLICTS}
         disabled={busy}
         onBusyChange={setBusy}
-        onFinish={(refresh) => {
-          setEditing(false)
-          if (refresh) {
-            onReload();
-          }
+        onCancel={() => setEditing(false)}
+        onSaved={() => {
+          setEditing(false);
+          onReload();
         }}
       />
       : <ProviderReadonlyForm
