@@ -5,19 +5,19 @@ import {
   Card,
   Empty,
   Flex,
-  message,
   Modal,
   Spin,
   Typography,
 } from "antd";
 import { listProviders, normalizeEndpoints } from "../../api/provider";
-import { applyProviders, listPlugins } from "../../api/plugins";
+import { applyProviders, isUsablePlugin, listPlugins } from "../../api/plugins";
 import { listVariables } from "../../api/variables";
 import VariablesCard from "../../components/VariablesCard";
 import ProviderCard from "./ProviderCard";
 import ProviderForm from "./ProviderForm";
 import { MODE_CREATE } from "./formMode";
 import ApplyResultList from "./ApplyResultList";
+import useAsyncAction from "../../hooks/useAsyncAction";
 
 export default function ProvidersPage() {
   const [providers, setProviders] = useState([]);
@@ -25,7 +25,7 @@ export default function ProvidersPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [creating, setCreating] = useState(false);
-  const [applying, setApplying] = useState(false);
+  const [applying, runApply] = useAsyncAction();
   const [canApply, setCanApply] = useState(false);
   const [reports, setReports] = useState(null);
 
@@ -50,21 +50,14 @@ export default function ProvidersPage() {
     reload();
     // 没有可用插件（已启用且加载成功）时投影按钮禁用（用户故事 24）。
     listPlugins()
-      .then((plugins) =>
-        setCanApply(plugins.some((p) => p.enabled && !p.error)),
-      )
+      .then((plugins) => setCanApply(plugins.some(isUsablePlugin)))
       .catch(() => setCanApply(false));
   }, [reload]);
 
   async function handleApply() {
-    setApplying(true);
-    try {
+    await runApply(async () => {
       setReports(await applyProviders());
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setApplying(false);
-    }
+    });
   }
 
   function openCreate() {

@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
-import { Form, message } from "antd";
+import { useMemo } from "react";
+import { Form } from "antd";
 import { createProvider, updateProvider } from "../../api/provider";
 import FormActions from "../../components/FormActions";
+import useAsyncAction from "../../hooks/useAsyncAction";
 import HeaderRows from "./HeaderRows";
 import ModelRows from "./ModelRows";
 import ProviderFields from "./ProviderFields";
@@ -45,24 +46,19 @@ export default function ProviderForm({
     () => providerFormRules({ form, mode, providers }),
     [form, mode, providers],
   );
-  const [saving, setSaving] = useState(false);
+  const [saving, runSave] = useAsyncAction();
 
   // 命令成功即已落盘，由调用方刷新列表。
   // `enabled` 不是 Form.Item（开关独立于表单），提交值里没有它；
   // 显式与 provider 合并回传，避免缺字段被后端默认值静默重置为启用。
   // 校验失败由各 Form.Item 内联展示，不会走到这里；这里的错误都是命令调用失败。
   async function handleFinish(values) {
-    setSaving(true);
     onBusyChange?.(true);
-    try {
+    await runSave(async () => {
       await SAVE_BY_MODE[mode]({ ...provider, ...values });
       onSaved();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setSaving(false);
-      onBusyChange?.(false);
-    }
+    });
+    onBusyChange?.(false);
   }
 
   return (

@@ -3,7 +3,7 @@ import { Layout, Menu } from "antd";
 import PluginsPage from "./pages/plugins";
 import PluginConfigPage from "./pages/plugin-config";
 import ProvidersPage from "./pages/provider";
-import { listPlugins } from "./api/plugins";
+import { isUsablePlugin, listPlugins } from "./api/plugins";
 import "./App.css";
 
 const { Sider, Content } = Layout;
@@ -32,12 +32,10 @@ function App() {
 
   // 分隔线之后每个已启用且加载成功的插件各占一个菜单项，直达其插件配置页；
   // 已禁用或加载失败的插件不出现（ticket #91）。
-  const pluginNavItems = plugins
-    .filter((plugin) => plugin.enabled && !plugin.error)
-    .map((plugin) => ({
-      key: `${PLUGIN_KEY_PREFIX}${plugin.id}`,
-      label: plugin.id,
-    }));
+  const pluginNavItems = plugins.filter(isUsablePlugin).map((plugin) => ({
+    key: `${PLUGIN_KEY_PREFIX}${plugin.id}`,
+    label: plugin.id,
+  }));
   const mainItems =
     pluginNavItems.length > 0
       ? [...NAV_MAIN_ITEMS, { type: "divider" }, ...pluginNavItems]

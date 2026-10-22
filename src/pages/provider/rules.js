@@ -2,7 +2,9 @@ import {
   ANTHROPIC_MESSAGES,
   OPENAI_COMPLETIONS,
   PROVIDER_PROTOCOLS,
+  configuredProtocols,
 } from "../../api/provider";
+import { urlRule } from "../../components/urlRules";
 import { MODE_CREATE, MODE_UPDATE } from "./formMode";
 
 /**
@@ -53,21 +55,11 @@ export function slugUniquenessRule({ providers }) {
  * 两个协议槽位共用同一组规则。
  */
 export const BASE_URL_RULES = [
-  {
-    validator: (_, value) => {
-      if (!value) return Promise.resolve();
-      let url;
-      try {
-        url = new URL(value);
-      } catch {
-        return Promise.reject(new Error("Base URL 不是合法的 URL"));
-      }
-      if (url.protocol !== "http:" && url.protocol !== "https:") {
-        return Promise.reject(new Error("Base URL 仅支持 http(s) 地址"));
-      }
-      return Promise.resolve();
-    },
-  },
+  urlRule({
+    schemes: ["http:", "https:"],
+    invalidUrl: "Base URL 不是合法的 URL",
+    badScheme: "Base URL 仅支持 http(s) 地址",
+  }),
 ];
 
 /**
@@ -76,9 +68,13 @@ export const BASE_URL_RULES = [
  * @returns {import("../../api/provider").ProviderProtocol[]}
  */
 function filledProtocols(form) {
-  return PROVIDER_PROTOCOLS.filter(
-    (protocol) =>
-      (form.getFieldValue(["base_url", protocol]) ?? "").trim() !== "",
+  return configuredProtocols(
+    Object.fromEntries(
+      PROVIDER_PROTOCOLS.map((protocol) => [
+        protocol,
+        form.getFieldValue(["base_url", protocol]),
+      ]),
+    ),
   );
 }
 

@@ -10,6 +10,7 @@ import {
 } from "antd";
 import {
   CAPABILITY_IMAGE_IN,
+  CAPABILITY_LABELS,
   CAPABILITY_THINKING,
   CAPABILITY_TOOL_USE,
 } from "../../api/provider";
@@ -33,13 +34,24 @@ const CAPABILITY_GROUPS = [
   {
     label: "能力",
     options: [
-      { value: CAPABILITY_TOOL_USE, label: "工具调用" },
-      { value: CAPABILITY_THINKING, label: "推理" },
+      {
+        value: CAPABILITY_TOOL_USE,
+        label: CAPABILITY_LABELS[CAPABILITY_TOOL_USE],
+      },
+      {
+        value: CAPABILITY_THINKING,
+        label: CAPABILITY_LABELS[CAPABILITY_THINKING],
+      },
     ],
   },
   {
     label: "输入模态",
-    options: [{ value: CAPABILITY_IMAGE_IN, label: "视觉" }],
+    options: [
+      {
+        value: CAPABILITY_IMAGE_IN,
+        label: CAPABILITY_LABELS[CAPABILITY_IMAGE_IN],
+      },
+    ],
   },
 ];
 

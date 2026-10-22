@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Button, Card, Form, Input, Typography, message } from "antd";
+import { Button, Card, Form, Input, Typography } from "antd";
 import { setVariables as saveVariables } from "../api/variables";
+import useAsyncAction from "../hooks/useAsyncAction";
 import VariableRowsForm from "./VariableRowsForm";
 import { globalVariableRules } from "./variableRules";
 
@@ -65,19 +66,14 @@ export default function VariablesCard({ variables, onReload }) {
  */
 function VariablesForm({ variables, onFinish }) {
   const [form] = Form.useForm();
-  const [saving, setSaving] = useState(false);
+  const [saving, runSave] = useAsyncAction();
 
   // 命令成功即已落盘，由父组件刷新列表。
   async function handleSave(variableValues) {
-    setSaving(true);
-    try {
+    await runSave(async () => {
       await saveVariables(variableValues);
       onFinish(true);
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setSaving(false);
-    }
+    });
   }
 
   return (

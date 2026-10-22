@@ -2,7 +2,7 @@ import { Form, Input, Radio } from "antd";
 import {
   ANTHROPIC_MESSAGES,
   OPENAI_COMPLETIONS,
-  PROVIDER_PROTOCOLS,
+  configuredProtocols,
 } from "../../api/provider";
 import { MODE_UPDATE } from "./formMode";
 
@@ -30,9 +30,7 @@ const PROTOCOL_OPTIONS = [
  */
 export default function ProviderFields({ mode, rules }) {
   const endpoints = Form.useWatch("base_url") ?? {};
-  const filledProtocols = PROVIDER_PROTOCOLS.filter(
-    (protocol) => (endpoints[protocol] ?? "").trim() !== "",
-  );
+  const filledProtocols = configuredProtocols(endpoints);
 
   return (
     <>

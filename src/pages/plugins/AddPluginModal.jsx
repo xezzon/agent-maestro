@@ -1,31 +1,16 @@
 import { useState } from "react";
-import {
-  Button,
-  Form,
-  Input,
-  message,
-  Modal,
-  Radio,
-} from "antd";
+import { Button, Form, Input, Modal, Radio } from "antd";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { urlRule } from "../../components/urlRules";
+import useAsyncAction from "../../hooks/useAsyncAction";
 
 const URL_RULES = [
   { required: true, message: "请输入 manifest.json 的 https 地址" },
-  {
-    validator: (_, value) => {
-      if (!value) return Promise.resolve();
-      let url;
-      try {
-        url = new URL(value);
-      } catch {
-        return Promise.reject(new Error("不是合法的 URL"));
-      }
-      if (url.protocol !== "https:") {
-        return Promise.reject(new Error("插件来源仅支持 https 地址"));
-      }
-      return Promise.resolve();
-    },
-  },
+  urlRule({
+    schemes: ["https:"],
+    invalidUrl: "不是合法的 URL",
+    badScheme: "插件来源仅支持 https 地址",
+  }),
 ];
 
 const PATH_RULES = [{ required: true, message: "请选择插件的 manifest.json" }];
@@ -48,8 +33,8 @@ const SOURCE_OPTIONS = [
 export default function AddPluginModal({ open, onClose, onSubmit }) {
   const [form] = Form.useForm();
   const [kind, setKind] = useState("https");
-  const [picking, setPicking] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [picking, runPick] = useAsyncAction();
+  const [saving, runSave] = useAsyncAction();
 
   /** 关闭即复位：每次打开都回到默认来源与空输入。 */
   function close() {
@@ -69,8 +54,7 @@ export default function AddPluginModal({ open, onClose, onSubmit }) {
   }
 
   async function pickManifest() {
-    setPicking(true);
-    try {
+    await runPick(async () => {
       const selected = await openDialog({
         title: "选择插件的 manifest.json",
         multiple: false,
@@ -80,11 +64,7 @@ export default function AddPluginModal({ open, onClose, onSubmit }) {
       if (typeof selected === "string") {
         form.setFieldValue("path", selected);
       }
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setPicking(false);
-    }
+    });
   }
 
   async function handleSubmit() {
@@ -96,15 +76,10 @@ export default function AddPluginModal({ open, onClose, onSubmit }) {
       return;
     }
     const source = kind === "https" ? values.url : values.path;
-    setSaving(true);
-    try {
+    await runSave(async () => {
       await onSubmit(source);
       close();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setSaving(false);
-    }
+    });
   }
 
   return (

@@ -53,6 +53,19 @@ export const APPLY_STATUSES = [
 ];
 
 /**
+ * 插件是否可用（可参与投影）：已启用且加载成功。
+ *
+ * 「可用插件」的判定此前在应用导航（哪些插件出现在侧边栏）与 Provider 页
+ * （投影按钮是否可点）各写一遍——两处一旦漂移，界面就会出现「导航里有、
+ * 投影时没有」的插件。
+ * @param {PluginView} plugin
+ * @returns {boolean}
+ */
+export function isUsablePlugin(plugin) {
+  return plugin.enabled && !plugin.error;
+}
+
+/**
  * @returns {Promise<PluginView[]>}
  */
 export async function listPlugins() {

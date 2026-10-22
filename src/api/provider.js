@@ -88,6 +88,20 @@ const MODEL_CAPABILITIES = [
 ];
 
 /**
+ * 能力枚举串与界面标签。
+ *
+ * 标签此前在模型行（复选框分组）与只读表单（能力标签）各写一份——同一组
+ * 文案两处维护，改一处漏一处就是「两处显示得不一样」。分组（能力 / 输入
+ * 模态）只是排版，仍归模型行；标签本身归这里。
+ * @type {Record<ModelCapability, string>}
+ */
+export const CAPABILITY_LABELS = {
+  [CAPABILITY_TOOL_USE]: "工具调用",
+  [CAPABILITY_IMAGE_IN]: "视觉",
+  [CAPABILITY_THINKING]: "推理",
+};
+
+/**
  * 按字节序比较两个字符串（而非 `localeCompare`——那是随语言环境变化的排序）：
  * 与记录层 `BTreeMap<String, _>` 的键序一致，slug 列表与 header 行共用这一套口径。
  * 比较的是 UTF-16 码元序，与 Rust 的 UTF-8 字节序只在 BMP 内等价：slug
@@ -133,6 +147,21 @@ export function normalizeModel(model) {
 }
 
 /**
+ * 已配置的协议：端点只填空白视为未配置，与写入前的归一化同一口径。
+ *
+ * 「哪些端点算已配置」此前写了三遍（表单的整体校验、协议单选框的可用性、
+ * 写入负载的过滤），三处口径一旦漂移，界面允许填的与实际落盘的就不一致。
+ * 这里给出唯一一份口径（ADR 0016）。
+ * @param {Partial<Endpoints>|undefined} baseUrl
+ * @returns {ProviderProtocol[]}
+ */
+export function configuredProtocols(baseUrl) {
+  return PROVIDER_PROTOCOLS.filter(
+    (protocol) => (baseUrl?.[protocol] ?? "").trim() !== "",
+  );
+}
+
+/**
  * 创建/更新命令共用的 `provider` 负载：字段集合固定为写入字段
  * （slug、enabled、base_url、selected_protocol、api_key、custom_header、models），
  * 只读视图字段（如 `api_key_set`）不进负载——后端 `ProviderRequest` 不拒绝未知字段，
@@ -147,10 +176,12 @@ export function normalizeModel(model) {
  * @returns {ProviderRequest}
  */
 export function toProviderPayload(provider) {
+  const endpoints = normalizeEndpoints(provider.base_url);
   const base_url = Object.fromEntries(
-    Object.entries(normalizeEndpoints(provider.base_url)).filter(
-      ([, url]) => url.trim() !== "",
-    ),
+    configuredProtocols(endpoints).map((protocol) => [
+      protocol,
+      endpoints[protocol],
+    ]),
   );
   const selected_protocol =
     provider.selected_protocol && base_url[provider.selected_protocol]

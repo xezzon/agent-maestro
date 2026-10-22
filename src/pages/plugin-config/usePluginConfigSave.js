@@ -1,6 +1,6 @@
-import { useState } from "react";
 import { message } from "antd";
 import { setPluginConfig } from "../../api/plugins";
+import useAsyncAction from "../../hooks/useAsyncAction";
 
 /**
  * 插件配置保存的共享样板：saving 状态 + 整包写回 + 结果 message。
@@ -11,18 +11,13 @@ import { setPluginConfig } from "../../api/plugins";
  * @returns {[boolean, (config: import("../../api/plugins").PluginConfig, patch: Object, onSaved: () => void) => Promise<void>]}
  */
 export default function usePluginConfigSave(source) {
-  const [saving, setSaving] = useState(false);
+  const [saving, run] = useAsyncAction();
   async function save(config, patch, onSaved) {
-    setSaving(true);
-    try {
+    await run(async () => {
       await setPluginConfig(source, { ...config, ...patch });
       message.success("插件配置已保存");
       onSaved();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setSaving(false);
-    }
+    });
   }
   return [saving, save];
 }
