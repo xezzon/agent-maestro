@@ -77,11 +77,7 @@ export default function ProviderForm({
       <HeaderRows rules={rules} saving={saving} />
       <ModelRows rules={rules} saving={saving} disabled={disabled} />
 
-      <FormActions
-        saving={saving}
-        onCancel={onCancel}
-        onSave={() => form.submit()}
-      />
+      <FormActions saving={saving} onCancel={onCancel} />
     </Form>
   );
 }

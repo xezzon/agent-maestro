@@ -95,11 +95,7 @@ export default function VariableRowsForm({
         )}
       </Form.List>
 
-      <FormActions
-        saving={saving}
-        onCancel={onCancel}
-        onSave={() => form.submit()}
-      />
+      <FormActions saving={saving} onCancel={onCancel} />
     </Form>
   );
 }
