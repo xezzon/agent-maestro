@@ -331,14 +331,14 @@ impl PluginService {
         }
 
         // 筛选出配置中缺失的内置插件：随后的安装管线会为其落位并补写条目。
-        let missing_builtins: Vec<&str> = BUILTINS
+        let missing_builtins: Vec<String> = BUILTINS
             .iter()
             .filter(|plugin| !plugin_entries.iter().any(|entry| entry.id == plugin.id))
-            .map(|plugin| plugin.source)
+            .map(|plugin| plugin.source())
             .collect();
 
         for builtin_source in missing_builtins {
-            if let Err(err) = self.add_plugin(store, builtin_source) {
+            if let Err(err) = self.add_plugin(store, &builtin_source) {
                 log::warn!("failed to install builtin plugin {builtin_source}: {err}");
             }
         }

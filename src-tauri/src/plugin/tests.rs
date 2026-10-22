@@ -196,7 +196,7 @@ fn add_plugin_rejects_id_conflict_without_placing() {
         maestro_paths.config_path(),
         format!(
             r#"{{"version":1,"providers":{{}},"plugins":[{{"source":"{}","enabled":true,"id":"pi"}}]}}"#,
-            builtin::BUILTIN_PI_SOURCE
+            builtin::source_of(builtin::BUILTIN_PI_ID)
         ),
     )
     .unwrap();
@@ -521,7 +521,7 @@ fn remove_plugin_rejects_builtin_source() {
     let service = test_service(home.path());
 
     let err = service
-        .remove_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+        .remove_plugin(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap_err();
 
     assert!(err.contains("内置插件不可移除"), "{err}");
@@ -744,7 +744,7 @@ fn reload_builtin_plugin_restores_a_corrupted_placed_copy() {
     fs::write(&placed_wasm, b"corrupted").unwrap();
 
     service
-        .reload_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+        .reload_plugin(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap();
 
     assert_eq!(
@@ -778,7 +778,7 @@ fn startup_installs_missing_builtin_plugin_like_any_other_source() {
         "启动时补装缺失的内置插件"
     );
     let pi = plugin_entry(&plugins, builtin::BUILTIN_PI_ID);
-    assert_eq!(pi.source, builtin::BUILTIN_PI_SOURCE);
+    assert_eq!(pi.source, builtin::source_of(builtin::BUILTIN_PI_ID));
     assert!(pi.enabled);
     assert!(
         maestro_paths
@@ -1309,7 +1309,7 @@ fn get_plugin_config_returns_no_overrides_and_no_form_for_a_freshly_installed_pl
     service.startup(&store).unwrap();
 
     let config = service
-        .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+        .get_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap();
 
     assert!(config.variables.is_empty(), "{:?}", config.variables);
@@ -1339,7 +1339,7 @@ fn set_plugin_config_persists_variables_and_form_and_reads_back() {
         form: Some(serde_json::json!({"model": "kimi"})),
     };
     service
-        .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+        .set_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID), &config)
         .unwrap();
 
     let config_path = maestro_paths.plugin_dir("pi").join(PLACED_CONFIG);
@@ -1349,7 +1349,7 @@ fn set_plugin_config_persists_variables_and_form_and_reads_back() {
     assert_eq!(raw["form"]["model"], "kimi");
     assert_eq!(
         service
-            .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+            .get_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
             .unwrap(),
         config
     );
@@ -1370,7 +1370,7 @@ fn set_plugin_config_rejects_variables_not_declared_in_the_global_table() {
         form: None,
     };
     let err = service
-        .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+        .set_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID), &config)
         .unwrap_err();
 
     assert!(err.contains("未在全局变量表中声明"), "{err}");
@@ -1397,7 +1397,7 @@ fn get_plugin_config_reports_corruption_instead_of_degrading() {
     .unwrap();
 
     let err = service
-        .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+        .get_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap_err();
 
     assert!(err.contains("插件配置已损坏"), "{err}");
@@ -1436,15 +1436,15 @@ fn set_plugin_config_survives_a_plugin_reload() {
         form: Some(serde_json::json!({"model": "kimi"})),
     };
     service
-        .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+        .set_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID), &config)
         .unwrap();
     service
-        .reload_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+        .reload_plugin(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap();
 
     assert_eq!(
         service
-            .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+            .get_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
             .unwrap(),
         config,
         "重载不冲掉经命令写入的插件配置"

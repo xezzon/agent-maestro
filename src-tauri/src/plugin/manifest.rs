@@ -50,7 +50,7 @@ impl PluginSource {
     /// 来源字符串（条目的身份）：逐字还原成解析前的那一串。
     pub(crate) fn source(&self) -> String {
         match self {
-            Self::Builtin(id) => format!("{}{id}", builtin::SOURCE_PREFIX),
+            Self::Builtin(id) => builtin::source_of(id),
             Self::Https(url) => url.clone(),
             Self::File(path) => path.to_string_lossy().into_owned(),
         }

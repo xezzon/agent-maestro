@@ -4,13 +4,20 @@
 /// manifest 来自仓库根的内置插件目录（`plugins/<id>/`）；wasm 产物不入库，
 /// 由宿主 build.rs 在构建时自动编译（见 ADR 0005，构建清单见 `src-tauri/build.rs`
 /// 的 `BUILTIN_PLUGINS`）。
-/// 内置来源的 `source` 前缀：来源以内置前缀标识（见 docs/GLOSSARY.md「来源」）。
+/// 内置来源的前缀：来源以内置前缀标识（见 docs/GLOSSARY.md「来源」）。
 pub(crate) const SOURCE_PREFIX: &str = "builtin:";
 
-pub(crate) const BUILTIN_PI_SOURCE: &str = "builtin:pi";
+/// 内置插件 id。
+///
+/// 来源（条目身份）由 id 派生（`builtin:<id>`），不另写一份——同一信息在
+/// 常量与清单表里各写一次，改一处漏一处就是「找不到插件」。
 pub(crate) const BUILTIN_PI_ID: &str = "pi";
-pub(crate) const BUILTIN_CLAUDE_CODE_SOURCE: &str = "builtin:claude-code";
 pub(crate) const BUILTIN_CLAUDE_CODE_ID: &str = "claude-code";
+
+/// 内置来源的条目身份 `builtin:<id>`。
+pub(crate) fn source_of(id: &str) -> String {
+    format!("{SOURCE_PREFIX}{id}")
+}
 
 pub(crate) const PI_MANIFEST_JSON: &str = include_str!("../../../plugins/pi/manifest.json");
 pub(crate) const PI_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pi-plugin.wasm"));
@@ -19,28 +26,31 @@ pub(crate) const CLAUDE_CODE_MANIFEST_JSON: &str =
 pub(crate) const CLAUDE_CODE_WASM: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/claude-code-plugin.wasm"));
 
-/// 一个内置插件的来源、id 与内嵌产物。
+/// 一个内置插件的 id 与内嵌产物。
 pub(crate) struct BuiltinPlugin {
-    /// 条目身份，`builtin:<id>`。
-    pub(crate) source: &'static str,
     /// 插件 id（落位目录名、id 冲突检查与投影报告的键）。
     pub(crate) id: &'static str,
     pub(crate) manifest_json: &'static str,
     pub(crate) wasm: &'static [u8],
 }
 
-/// 内置插件清单：宿主按 `source` 精确查表分派，不再假设只有一个内置插件。
+impl BuiltinPlugin {
+    /// 条目身份 `builtin:<id>`：由 id 派生，不另存一份来源字符串。
+    pub(crate) fn source(&self) -> String {
+        source_of(self.id)
+    }
+}
+
+/// 内置插件清单：宿主按 id 精确查表分派，不再假设只有一个内置插件。
 /// 与 `src-tauri/build.rs` 的 `BUILTIN_PLUGINS`（编译清单）配套——新增内置插件
 /// 必须两处同步，因为编译清单在 build script 上下文、本表在宿主 crate 上下文。
 pub(crate) const BUILTINS: &[BuiltinPlugin] = &[
     BuiltinPlugin {
-        source: BUILTIN_PI_SOURCE,
         id: BUILTIN_PI_ID,
         manifest_json: PI_MANIFEST_JSON,
         wasm: PI_WASM,
     },
     BuiltinPlugin {
-        source: BUILTIN_CLAUDE_CODE_SOURCE,
         id: BUILTIN_CLAUDE_CODE_ID,
         manifest_json: CLAUDE_CODE_MANIFEST_JSON,
         wasm: CLAUDE_CODE_WASM,
