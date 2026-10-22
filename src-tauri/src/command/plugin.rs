@@ -171,7 +171,7 @@ mod tests {
             ApplyStatus,
             testutil::{store_at, temp_home, test_service},
         },
-        provider::{Protocol, Provider},
+        provider::{ApiKey, Protocol, Provider},
         store::select_enabled_providers,
     };
 
@@ -203,7 +203,7 @@ mod tests {
                         Protocol::OpenaiCompletions,
                         "https://offline.example.com/v1".to_owned(),
                     )]),
-                    api_key: "sk-disabled-must-not-leak".to_owned(),
+                    api_key: ApiKey::new("sk-disabled-must-not-leak".to_owned()),
                     ..Provider::default()
                 },
             ),

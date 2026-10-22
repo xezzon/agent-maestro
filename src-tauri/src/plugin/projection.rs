@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     ApplyStatus, LoadedPlugin, PluginApplyReport, PluginService, PluginState,
-    config::read_plugin_config, execution::SkippedProvider,
+    REGISTRY_LOCK_POISONED, config::read_plugin_config, execution::SkippedProvider,
 };
 
 impl PluginService {
@@ -61,7 +61,7 @@ impl PluginService {
         variables: &Variables,
     ) -> Result<Vec<PluginApplyReport>, String> {
         let (mut reports, loaded) = {
-            let entries = self.entries.read().map_err(|_| "插件注册表不可用")?;
+            let entries = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
             let mut reports = Vec::with_capacity(entries.len());
             let mut loaded = Vec::new();
             for (id, state) in entries.iter() {

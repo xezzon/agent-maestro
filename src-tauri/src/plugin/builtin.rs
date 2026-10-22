@@ -47,15 +47,15 @@ pub(crate) const BUILTINS: &[BuiltinPlugin] = &[
     },
 ];
 
-/// 按来源精确查表；未知来源返回 `None`，由调用方报错而非回落（见 issue #56）。
-pub(crate) fn find(source: &str) -> Option<&'static BuiltinPlugin> {
-    BUILTINS.iter().find(|plugin| plugin.source == source)
+/// 按插件 id 精确查表；未知 id 返回 `None`，由调用方报错而非回落（见 issue #56）。
+pub(crate) fn find_by_id(id: &str) -> Option<&'static BuiltinPlugin> {
+    BUILTINS.iter().find(|plugin| plugin.id == id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::manifest::{SourceKind, parse_manifest};
+    use crate::plugin::manifest::{PluginSource, parse_manifest};
 
     #[test]
     fn embedded_pi_manifest_is_valid_and_matches_builtin_identity() {
@@ -68,7 +68,11 @@ mod tests {
             root.path().join(".local/share"),
         );
         let _g = crate::plugin::PlatformDirs::test_guard(dirs);
-        let manifest = parse_manifest(SourceKind::Builtin, PI_MANIFEST_JSON).unwrap();
+        let manifest = parse_manifest(
+            &PluginSource::Builtin(BUILTIN_PI_ID.to_owned()),
+            PI_MANIFEST_JSON,
+        )
+        .unwrap();
 
         assert_eq!(manifest.id, BUILTIN_PI_ID);
         assert_eq!(

@@ -6,7 +6,7 @@ use tauri::State;
 use super::log_outcome;
 use crate::{
     AppStore,
-    provider::{Endpoints, ModelEntry, Protocol, Provider},
+    provider::{ApiKey, Endpoints, ModelEntry, Protocol, Provider},
 };
 
 /// 创建/更新 Provider 命令的 `provider` 负载；slug 亦随负载传入。
@@ -38,14 +38,14 @@ pub(crate) struct ProviderRequest {
 }
 
 /// 映射为配置记录：slug 由调用方另行取出作存储 key，不进记录本体；
-/// `api_key` 缺省即落空串（未设置）。
+/// `api_key` 缺省或空串即未设置（归一规则由 [`ApiKey`] 独家持有）。
 impl From<ProviderRequest> for Provider {
     fn from(val: ProviderRequest) -> Self {
         Provider {
             enabled: val.enabled,
             base_url: val.base_url,
             selected_protocol: val.selected_protocol,
-            api_key: val.api_key.unwrap_or_default(),
+            api_key: ApiKey::from_optional(val.api_key),
             custom_header: val.custom_header,
             models: val.models,
         }
@@ -301,13 +301,14 @@ mod tests {
         let with_value: Provider = parse(r#"{"api_key":"sk-test"}"#).unwrap().into();
 
         assert_eq!(
-            with_value.api_key, "sk-test",
+            with_value.api_key.as_deref(),
+            Some("sk-test"),
             "凭证以明文直接进入配置记录（第一期不做密钥链）"
         );
 
         let without_api_key: Provider = parse(r#"{}"#).unwrap().into();
 
-        assert_eq!(without_api_key.api_key, "", "api_key 缺省即未设置（空串）");
+        assert!(!without_api_key.api_key.is_set(), "api_key 缺省即未设置");
     }
 
     #[test]
@@ -315,13 +316,14 @@ mod tests {
         let with_value: Provider = parse(r#"{"api_key":"sk-new"}"#).unwrap().into();
 
         assert_eq!(
-            with_value.api_key, "sk-new",
+            with_value.api_key.as_deref(),
+            Some("sk-new"),
             "更新整包替换，api_key 携带现值或新值（明文）"
         );
 
         let without_api_key: Provider = parse(r#"{}"#).unwrap().into();
 
-        assert_eq!(without_api_key.api_key, "", "api_key 缺省即未设置（空串）");
+        assert!(!without_api_key.api_key.is_set(), "api_key 缺省即未设置");
     }
 
     /// `enabled` 缺省即启用：旧 payload 或漏字段不会被静默禁用。

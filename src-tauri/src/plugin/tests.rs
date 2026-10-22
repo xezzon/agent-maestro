@@ -17,7 +17,11 @@ use super::{
         stub_service, temp_home, test_service,
     },
 };
-use crate::{paths::MaestroPaths, provider::Provider, store::PluginEntry};
+use crate::{
+    paths::MaestroPaths,
+    provider::{ApiKey, Provider},
+    store::PluginEntry,
+};
 
 const MANIFEST_URL: &str = "https://example.com/releases/download/v1/manifest.json";
 const WASM_URL: &str = "https://example.com/releases/download/v1/plugin.wasm";
@@ -964,7 +968,7 @@ fn projection_path_never_logs_the_api_key() {
     let providers = BTreeMap::from([(
         "gateway".to_owned(),
         Provider {
-            api_key: canary.to_owned(),
+            api_key: ApiKey::new(canary.to_owned()),
             base_url: BTreeMap::from([(
                 Protocol::OpenaiCompletions,
                 "https://api.example.com/v1".to_owned(),
@@ -1063,7 +1067,7 @@ fn write_providers_interpolates_placeholders_before_projection() {
                 Protocol::OpenaiCompletions,
                 "https://${HOST}/v1".to_owned(),
             )]),
-            api_key: "sk-literal".to_owned(),
+            api_key: ApiKey::new("sk-literal".to_owned()),
             ..Provider::default()
         },
     )]);
@@ -1188,7 +1192,7 @@ fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_er
                 Protocol::OpenaiCompletions,
                 "https://${UNDEFINED_VAR}/v1".to_owned(),
             )]),
-            api_key: "sk-canary-must-not-leak".to_owned(),
+            api_key: ApiKey::new("sk-canary-must-not-leak".to_owned()),
             ..Provider::default()
         },
     )]);

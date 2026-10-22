@@ -6,7 +6,7 @@ use std::{fs, io::ErrorKind, path::Path};
 
 use crate::{paths::MaestroPaths, store::AppStore};
 
-use super::{PLACED_CONFIG, PluginConfig, PluginService, write_placed_file};
+use super::{INSTALL_LOCK_POISONED, PLACED_CONFIG, PluginConfig, PluginService, write_placed_file};
 
 impl PluginService {
     /// 读取插件配置（ADR 0018）：返回该插件对全局变量的覆盖与私有表单数据。
@@ -33,7 +33,10 @@ impl PluginService {
         source: &str,
         plugin_config: &PluginConfig,
     ) -> Result<(), String> {
-        let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
+        let _install_guard = self
+            .install_lock
+            .lock()
+            .map_err(|_| INSTALL_LOCK_POISONED)?;
 
         // 短锁内完成条目读取与校验：声明的真相源就是当前全局变量表。
         let entry = {

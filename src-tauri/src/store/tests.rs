@@ -1,7 +1,7 @@
 //! 配置存储的单元测试：读写、落盘往返、校验与保护态。
 
 use super::*;
-use crate::provider::{ModelEntry, Protocol};
+use crate::provider::{ApiKey, ModelEntry, Protocol};
 
 #[test]
 fn empty_config_serializes_to_version_1_schema() {
@@ -45,7 +45,7 @@ fn config_parses_version_1_document() {
         Some("http://localhost:11434/v1")
     );
     assert!(!provider.base_url.contains_key(&Protocol::AnthropicMessages));
-    assert_eq!(provider.api_key, "");
+    assert!(!provider.api_key.is_set(), "api_key 未设置");
     assert_eq!(provider.models.len(), 2);
     assert_eq!(provider.models[0].id, "deepseek-chat");
     assert_eq!(
@@ -95,7 +95,7 @@ fn create_provider_persists_and_round_trips_through_disk() {
         Some("http://localhost:11434/v1")
     );
     assert!(!provider.base_url.contains_key(&Protocol::AnthropicMessages));
-    assert_eq!(provider.api_key, "");
+    assert!(!provider.api_key.is_set(), "api_key 未设置");
     assert!(provider.models.is_empty());
 }
 
@@ -125,7 +125,7 @@ fn update_provider_persists_and_round_trips_through_disk() {
                     Protocol::OpenaiCompletions,
                     "https://api.example.com/v1".to_owned(),
                 )]),
-                api_key: "sk-test".to_owned(),
+                api_key: ApiKey::new("sk-test".to_owned()),
                 ..Provider::default()
             },
         )
@@ -141,7 +141,7 @@ fn update_provider_persists_and_round_trips_through_disk() {
         Some("https://api.example.com/v1")
     );
     assert!(!provider.base_url.contains_key(&Protocol::AnthropicMessages));
-    assert_eq!(provider.api_key, "sk-test");
+    assert_eq!(provider.api_key.as_deref(), Some("sk-test"),);
     assert!(provider.models.is_empty());
 }
 
@@ -185,7 +185,7 @@ fn update_provider_replaces_api_key_with_whole_record() {
                     Protocol::OpenaiCompletions,
                     "http://localhost:11434/v1".to_owned(),
                 )]),
-                api_key: "sk-old".to_owned(),
+                api_key: ApiKey::new("sk-old".to_owned()),
                 models: vec![ModelEntry {
                     id: "old-model".to_owned(),
                     display_name: Option::None,
@@ -205,7 +205,7 @@ fn update_provider_replaces_api_key_with_whole_record() {
                     Protocol::OpenaiCompletions,
                     "https://api.example.com/v1".to_owned(),
                 )]),
-                api_key: "sk-new".to_owned(),
+                api_key: ApiKey::new("sk-new".to_owned()),
                 models: vec![ModelEntry {
                     id: "new-model".to_owned(),
                     display_name: Option::None,
@@ -216,7 +216,11 @@ fn update_provider_replaces_api_key_with_whole_record() {
         )
         .unwrap();
     let provider = &store.get().unwrap().providers["ollama"];
-    assert_eq!(provider.api_key, "sk-new", "api_key 随整包替换覆盖为明文");
+    assert_eq!(
+        provider.api_key.as_deref(),
+        Some("sk-new"),
+        "api_key 随整包替换覆盖为明文"
+    );
     assert_eq!(
         provider
             .base_url
@@ -232,19 +236,21 @@ fn update_provider_replaces_api_key_with_whole_record() {
         .update_provider(
             "ollama",
             Provider {
-                api_key: String::new(),
+                api_key: ApiKey::unset(),
                 ..provider.clone()
             },
         )
         .unwrap();
-    assert_eq!(
-        store.get().unwrap().providers["ollama"].api_key,
-        "",
+    assert!(
+        !store.get().unwrap().providers["ollama"].api_key.is_set(),
         "api_key 为空串即清除凭证"
     );
 
     let reopened = Store::new();
-    assert_eq!(reopened.get().unwrap().providers["ollama"].api_key, "");
+    assert!(
+        !reopened.get().unwrap().providers["ollama"].api_key.is_set(),
+        "api_key 未设置"
+    );
 }
 
 #[test]
@@ -486,7 +492,7 @@ fn create_provider_preserves_other_providers_models_and_endpoints() {
 
     let reopened = Store::new();
     let openrouter = &reopened.get().unwrap().providers["openrouter"];
-    assert_eq!(openrouter.api_key, "sk-live");
+    assert_eq!(openrouter.api_key.as_deref(), Some("sk-live"),);
     assert_eq!(openrouter.models.len(), 2);
     assert_eq!(openrouter.models[0].id, "z-model");
     assert_eq!(openrouter.models[1].id, "a-model");
@@ -929,7 +935,7 @@ fn config_debug_output_never_contains_the_api_key() {
         .create_provider(
             "openrouter",
             Provider {
-                api_key: "sk-config-canary-4b7e".to_owned(),
+                api_key: ApiKey::new("sk-config-canary-4b7e".to_owned()),
                 ..Provider::default()
             },
         )
@@ -1374,7 +1380,7 @@ fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
             .map(String::as_str),
         Some("http://localhost:11434/v1")
     );
-    assert_eq!(provider.api_key, "sk-legacy");
+    assert_eq!(provider.api_key.as_deref(), Some("sk-legacy"),);
     assert_eq!(provider.models.len(), 1);
     assert_eq!(provider.models[0].id, "deepseek-chat");
     assert_eq!(

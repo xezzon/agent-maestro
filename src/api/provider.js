@@ -212,6 +212,8 @@ export async function listProviders() {
       custom_header: Object.entries(provider.custom_header ?? {})
         .map(([name, value]) => ({ name, value }))
         .sort((a, b) => compareByteOrder(a.name, b.name)),
+      // 后端的「未设置」约定：未配置的凭证恒为空串（`ApiKey` 类型的序列化形态，
+      // 见 src-tauri/src/provider.rs）。这一句是那条约定的唯一前端落点。
       api_key_set: !!provider.api_key,
       models: (provider.models ?? []).map(normalizeModel),
     }))

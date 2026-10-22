@@ -98,11 +98,10 @@ pub(super) fn set_enabled(
 /// Provider 插值失败 → 存储错误：与投影时（`interpolate_providers`）同因同报、
 /// 同款文案，只是提前到落盘前。
 fn interpolation_error(slug: &str, error: FieldError) -> StoreError {
-    let (field, reason) = error;
     StoreError::Interpolation {
         slug: slug.to_owned(),
-        field,
-        reason,
+        field: error.field,
+        reason: error.reason,
     }
 }
 

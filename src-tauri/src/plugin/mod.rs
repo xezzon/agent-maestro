@@ -48,7 +48,7 @@ use crate::{
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
-use manifest::{Manifest, PlatformDirs, SourceKind, parse_placed};
+use manifest::{Manifest, PlatformDirs, PluginSource, parse_placed};
 
 /// 落位目录中的 manifest 文件名。
 const PLACED_MANIFEST: &str = "manifest.json";
@@ -58,6 +58,12 @@ const PLACED_WASM: &str = "plugin.wasm";
 /// 落位目录中的插件配置文件名（ADR 0018）：与两个宿主产物混居，逐文件覆盖的
 /// 落位替换与重载完全不碰它。
 const PLACED_CONFIG: &str = "config.json";
+
+/// 插件注册表锁被毒化时对用户可见的原因（其它操作持锁期间 panic）。
+const REGISTRY_LOCK_POISONED: &str = "插件注册表不可用";
+
+/// 安装锁被毒化时对用户可见的原因（其它安装类操作持锁期间 panic）。
+const INSTALL_LOCK_POISONED: &str = "插件安装锁不可用";
 
 struct PlacedPlugin {
     plugin_dir: PathBuf,
@@ -349,19 +355,19 @@ impl PluginService {
     /// 当前注册表视图。
     pub(crate) fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
         let plugin_entries = store.read()?.list_plugins().map_err(|_| "配置文件损坏")?;
-        let plugins = self.entries.read().map_err(|_| "插件注册表不可用")?;
+        let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
         let plugin_view =
-            |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| {
-                let source_kind = SourceKind::from_source(&entry.source);
-                PluginView {
-                    source: entry.source.clone(),
-                    builtin: source_kind == Some(SourceKind::Builtin),
-                    enabled: entry.enabled,
-                    id: entry.id.clone(),
-                    config_dir: manifest.map(|m| m.config_dir.display().to_string()),
-                    settings_schema: manifest.and_then(|m| m.settings_schema.clone()),
-                    error,
-                }
+            |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| PluginView {
+                source: entry.source.clone(),
+                builtin: matches!(
+                    PluginSource::parse(&entry.source),
+                    Some(PluginSource::Builtin(_))
+                ),
+                enabled: entry.enabled,
+                id: entry.id.clone(),
+                config_dir: manifest.map(|m| m.config_dir.display().to_string()),
+                settings_schema: manifest.and_then(|m| m.settings_schema.clone()),
+                error,
             };
         Ok(plugin_entries
             .iter()
