@@ -126,7 +126,9 @@ export function normalizeModel(model) {
   return {
     ...model,
     limit,
-    capabilities: MODEL_CAPABILITIES.filter((capability) => selected.has(capability)),
+    capabilities: MODEL_CAPABILITIES.filter((capability) =>
+      selected.has(capability),
+    ),
   };
 }
 

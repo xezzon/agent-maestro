@@ -1,0 +1,14 @@
+# Prettier 只负责前端源码与根目录的前端配置。Rust 走 rustfmt；文档、CI 工作流、
+# 插件目录与包管理器生成的锁文件不在前端格式化的范围内。
+node_modules
+dist
+.scratch
+.agents
+.github
+crates
+docs
+plugins
+src-tauri
+*.md
+pnpm-lock.yaml
+skills-lock.json

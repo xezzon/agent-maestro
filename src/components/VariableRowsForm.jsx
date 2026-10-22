@@ -55,7 +55,12 @@ export default function VariableRowsForm({
         {(fields, { add, remove }) => (
           <div className="variable-rows">
             {fields.map((field) => (
-              <Flex key={field.key} align="center" gap={8} className="variable-row">
+              <Flex
+                key={field.key}
+                align="center"
+                gap={8}
+                className="variable-row"
+              >
                 <Flex vertical gap={8} className="variable-fields">
                   <Form.Item
                     name={[field.name, "name"]}

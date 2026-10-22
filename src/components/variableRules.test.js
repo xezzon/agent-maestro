@@ -31,7 +31,10 @@ function patternRule(rules) {
 }
 
 const EMPTY_FORM = makeForm({ variables: [] });
-const GLOBAL_VARIABLES = { GATEWAY_ID: "gw-1", BASE_URL: "https://api.example.com" };
+const GLOBAL_VARIABLES = {
+  GATEWAY_ID: "gw-1",
+  BASE_URL: "https://api.example.com",
+};
 
 describe("变量名格式", () => {
   it("letters_digits_and_underscores_pass_the_format_rule", () => {
@@ -68,7 +71,9 @@ describe("变量名格式", () => {
       globalVariableRules(EMPTY_FORM).name,
     );
 
-    expect(pattern.test("BAD-NAME"), "全局变量表用格式规则拦住非法名").toBe(false);
+    expect(pattern.test("BAD-NAME"), "全局变量表用格式规则拦住非法名").toBe(
+      false,
+    );
     expect(message).toContain("仅允许字母、数字和下划线");
   });
 });
@@ -134,9 +139,9 @@ describe("插件覆盖的变量名须已在全局变量表中声明", () => {
   it("an_undeclared_name_is_rejected", async () => {
     const rules = overrideVariableRules({ form, variables: GLOBAL_VARIABLES });
 
-    await expect(
-      validate(rules.name.at(-2), "NOT_DECLARED"),
-    ).rejects.toThrow("变量「NOT_DECLARED」未在全局变量表中声明");
+    await expect(validate(rules.name.at(-2), "NOT_DECLARED")).rejects.toThrow(
+      "变量「NOT_DECLARED」未在全局变量表中声明",
+    );
   });
 
   it("a_declared_name_passes", async () => {
@@ -166,7 +171,10 @@ describe("变量值不能为空白", () => {
   it("a_blank_global_default_is_rejected", () => {
     const valueRules = globalVariableRules(EMPTY_FORM).value;
 
-    expect(valueRules).toContainEqual({ required: true, message: "请输入默认值" });
+    expect(valueRules).toContainEqual({
+      required: true,
+      message: "请输入默认值",
+    });
     expect(valueRules).toContainEqual({
       whitespace: true,
       message: "默认值不能为空白",
@@ -179,7 +187,10 @@ describe("变量值不能为空白", () => {
       variables: GLOBAL_VARIABLES,
     }).value;
 
-    expect(valueRules).toContainEqual({ required: true, message: "请输入覆盖值" });
+    expect(valueRules).toContainEqual({
+      required: true,
+      message: "请输入覆盖值",
+    });
     expect(valueRules).toContainEqual({
       whitespace: true,
       message: "覆盖值不能为空白",

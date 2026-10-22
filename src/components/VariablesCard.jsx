@@ -16,39 +16,44 @@ export default function VariablesCard({ variables, onReload }) {
   const [editing, setEditing] = useState(false);
   const names = Object.keys(variables);
 
-  return <Card title="全局变量">
-    {editing
-      ? <VariablesForm
-        variables={variables}
-        onFinish={(refresh) => {
-          setEditing(false);
-          if (refresh) {
-            onReload();
-          }
-        }}
-      />
-      : <>
-        {names.length === 0 ? (
-          <Typography.Text type="secondary">
-            尚未定义变量。可在配置值中用 {"${NAME}"} 引用变量，投影时替换为默认值
-          </Typography.Text>
-        ) : (
-          <ul className="variable-list">
-            {names.map((name) => (
-              <li key={name}>
-                <Typography.Text code>{name}</Typography.Text>
-                <Typography.Text className="variable-value">{variables[name]}</Typography.Text>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="card-actions">
-          <Button onClick={() => setEditing(true)}>
-            编辑
-          </Button>
-        </div>
-      </>}
-  </Card>;
+  return (
+    <Card title="全局变量">
+      {editing ? (
+        <VariablesForm
+          variables={variables}
+          onFinish={(refresh) => {
+            setEditing(false);
+            if (refresh) {
+              onReload();
+            }
+          }}
+        />
+      ) : (
+        <>
+          {names.length === 0 ? (
+            <Typography.Text type="secondary">
+              尚未定义变量。可在配置值中用 {"${NAME}"}{" "}
+              引用变量，投影时替换为默认值
+            </Typography.Text>
+          ) : (
+            <ul className="variable-list">
+              {names.map((name) => (
+                <li key={name}>
+                  <Typography.Text code>{name}</Typography.Text>
+                  <Typography.Text className="variable-value">
+                    {variables[name]}
+                  </Typography.Text>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="card-actions">
+            <Button onClick={() => setEditing(true)}>编辑</Button>
+          </div>
+        </>
+      )}
+    </Card>
+  );
 }
 
 /**
@@ -75,16 +80,21 @@ function VariablesForm({ variables, onFinish }) {
     }
   }
 
-  return <VariableRowsForm
-    form={form}
-    initialRows={Object.entries(variables).map(([name, value]) => ({ name, value }))}
-    rules={globalVariableRules(form)}
-    nameInput={<Input placeholder="变量名，例如 GATEWAY_ID" />}
-    valuePlaceholder="默认值（必填）"
-    addLabel="添加变量"
-    removeLabel="删除变量"
-    saving={saving}
-    onSave={handleSave}
-    onCancel={() => onFinish(false)}
-  />;
+  return (
+    <VariableRowsForm
+      form={form}
+      initialRows={Object.entries(variables).map(([name, value]) => ({
+        name,
+        value,
+      }))}
+      rules={globalVariableRules(form)}
+      nameInput={<Input placeholder="变量名，例如 GATEWAY_ID" />}
+      valuePlaceholder="默认值（必填）"
+      addLabel="添加变量"
+      removeLabel="删除变量"
+      saving={saving}
+      onSave={handleSave}
+      onCancel={() => onFinish(false)}
+    />
+  );
 }

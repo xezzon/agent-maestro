@@ -13,7 +13,12 @@ import usePluginConfigSave from "./usePluginConfigSave";
  * @param {import("../../api/variables").Variables} param0.variables
  * @param {(refresh: boolean) => void} param0.onFinish
  */
-export default function PluginVariablesForm({ plugin, config, variables, onFinish }) {
+export default function PluginVariablesForm({
+  plugin,
+  config,
+  variables,
+  onFinish,
+}) {
   const [form] = Form.useForm();
   const [saving, saveConfig] = usePluginConfigSave(plugin.source);
 
@@ -25,10 +30,12 @@ export default function PluginVariablesForm({ plugin, config, variables, onFinis
   return (
     <VariableRowsForm
       form={form}
-      initialRows={Object.entries(config.variables ?? {}).map(([name, value]) => ({
-        name,
-        value,
-      }))}
+      initialRows={Object.entries(config.variables ?? {}).map(
+        ([name, value]) => ({
+          name,
+          value,
+        }),
+      )}
       rules={overrideVariableRules({ form, variables })}
       nameInput={
         <AutoComplete

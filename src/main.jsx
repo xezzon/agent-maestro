@@ -2,7 +2,13 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { error as logError, warn, info, debug, trace } from "@tauri-apps/plugin-log";
+import {
+  error as logError,
+  warn,
+  info,
+  debug,
+  trace,
+} from "@tauri-apps/plugin-log";
 import App from "./App";
 
 // 前端日志汇入统一日志文件（ADR 0008）：console.* 经 @tauri-apps/plugin-log
@@ -11,7 +17,8 @@ import App from "./App";
 // 不在这里重复记录——Rust 命令层已经记了。
 function formatReason(reason) {
   if (typeof reason === "string") return reason;
-  if (reason instanceof Error) return reason.stack || `${reason.name}: ${reason.message}`;
+  if (reason instanceof Error)
+    return reason.stack || `${reason.name}: ${reason.message}`;
   // 可能是对象或循环引用：String() 兜不住时以 JSON.stringify 兜底，防止兜底
   // 处理器自己抛出；JSON.stringify 对 undefined 与函数返回 undefined，须回落。
   try {

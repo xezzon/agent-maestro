@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  Alert,
-  Empty,
-  Spin,
-  Tabs,
-  Typography,
-} from "antd";
+import { Alert, Empty, Spin, Tabs, Typography } from "antd";
 import { getPluginConfig } from "../../api/plugins";
 import { listVariables } from "../../api/variables";
 import PluginVariablesCard from "./PluginVariablesCard";
@@ -88,11 +82,7 @@ export default function PluginConfigPage({ plugin }) {
               key: "form",
               label: "表单",
               children: plugin.settings_schema ? (
-                <PluginForm
-                  plugin={plugin}
-                  config={config}
-                  onReload={reload}
-                />
+                <PluginForm plugin={plugin} config={config} onReload={reload} />
               ) : (
                 <Empty description="该插件没有需要填写的配置项" />
               ),

@@ -32,7 +32,10 @@ export default function ProvidersPage() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [providers, variables] = await Promise.all([listProviders(), listVariables()]);
+      const [providers, variables] = await Promise.all([
+        listProviders(),
+        listVariables(),
+      ]);
       setProviders(providers);
       setVariables(variables);
       setLoadError(null);
@@ -93,7 +96,11 @@ export default function ProvidersPage() {
           >
             应用到工具
           </Button>
-          <Button type="primary" disabled={creating || loading} onClick={openCreate}>
+          <Button
+            type="primary"
+            disabled={creating || loading}
+            onClick={openCreate}
+          >
             新建
           </Button>
         </Flex>
@@ -127,32 +134,34 @@ export default function ProvidersPage() {
                   </Button>
                 </Empty>
               )}
-              {
-                creating && (
-                  <Card title="新建 Provider">
-                    <ProviderForm
-                      mode={MODE_CREATE}
-                      provider={{
-                        slug: "",
-                        base_url: normalizeEndpoints(),
-                        selected_protocol: null,
-                        models: [],
-                        enabled: true,
-                        api_key_set: false,
-                      }}
-                      providers={providers}
-                      onCancel={() => setCreating(false)}
-                      onSaved={() => {
-                        setCreating(false);
-                        reload();
-                      }}
-                    />
-                  </Card>
-                )
-              }
-              {providers.map((provider) =>
-                <ProviderCard key={provider.slug} provider={provider} onReload={reload} />
+              {creating && (
+                <Card title="新建 Provider">
+                  <ProviderForm
+                    mode={MODE_CREATE}
+                    provider={{
+                      slug: "",
+                      base_url: normalizeEndpoints(),
+                      selected_protocol: null,
+                      models: [],
+                      enabled: true,
+                      api_key_set: false,
+                    }}
+                    providers={providers}
+                    onCancel={() => setCreating(false)}
+                    onSaved={() => {
+                      setCreating(false);
+                      reload();
+                    }}
+                  />
+                </Card>
               )}
+              {providers.map((provider) => (
+                <ProviderCard
+                  key={provider.slug}
+                  provider={provider}
+                  onReload={reload}
+                />
+              ))}
             </Flex>
           )}
         </div>

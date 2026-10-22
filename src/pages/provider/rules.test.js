@@ -35,9 +35,7 @@ function validate(rule, value) {
 /** 跑完一组规则里的全部 validator：任一拒绝即整体拒绝。 */
 function validateAll(rules, value) {
   return Promise.all(
-    rules
-      .filter((rule) => rule.validator)
-      .map((rule) => validate(rule, value)),
+    rules.filter((rule) => rule.validator).map((rule) => validate(rule, value)),
   );
 }
 
@@ -181,9 +179,7 @@ describe("两个协议都配置时必须选定投影协议", () => {
   it("a_configured_protocol_can_be_selected", async () => {
     const rule = selectedProtocolRule(makeForm(bothFilled));
 
-    await expect(
-      validate(rule, "anthropic-messages"),
-    ).resolves.toBeUndefined();
+    await expect(validate(rule, "anthropic-messages")).resolves.toBeUndefined();
   });
 
   it("an_empty_selection_is_rejected_when_both_protocols_are_configured", async () => {
@@ -325,12 +321,12 @@ describe("providerFormRules", () => {
     await expect(validate(rules.slug.at(-1), "acme")).rejects.toThrow(
       "已被使用",
     );
-    await expect(validate(rules.baseUrl[OPENAI_COMPLETIONS].at(-1), "")).rejects.toThrow(
-      "请至少填写一个协议的 Base URL",
-    );
-    await expect(validate(rules.headerName.at(-1), "x-api-key")).rejects.toThrow(
-      "重复",
-    );
+    await expect(
+      validate(rules.baseUrl[OPENAI_COMPLETIONS].at(-1), ""),
+    ).rejects.toThrow("请至少填写一个协议的 Base URL");
+    await expect(
+      validate(rules.headerName.at(-1), "x-api-key"),
+    ).rejects.toThrow("重复");
     await expect(validate(rules.modelId.at(-1), "gpt-4o")).rejects.toThrow(
       "重复",
     );
