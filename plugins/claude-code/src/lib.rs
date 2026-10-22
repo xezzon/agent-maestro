@@ -12,12 +12,12 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use maestro_plugin_sdk::{CustomHeader, Endpoint, Guest, Protocol, Provider, export, get_config};
+use maestro_plugin_sdk::{
+    CustomHeader, Endpoint, Guest, Protocol, Provider, export, get_config, write_atomic,
+};
 
 /// 投影目标：`config_dir` 内的用户级 settings。
 const SETTINGS_FILE: &str = "settings.json";
-/// 原子写的同目录临时文件。
-const SETTINGS_TMP: &str = "settings.json.tmp";
 
 /// 本插件维护的键；顺序即首次写入时的落盘顺序。
 const KEY_BASE_URL: &str = "ANTHROPIC_BASE_URL";
@@ -235,9 +235,7 @@ fn write_settings(desired: &[(&str, String)]) -> Result<Vec<String>, String> {
     json.push('\n');
 
     // 原子写：先写同目录临时文件，成功后再改名替换。
-    let tmp = Path::new(SETTINGS_TMP);
-    fs::write(tmp, &json).map_err(|e| format!("写入 settings.json 临时文件失败\n原因：{e}"))?;
-    fs::rename(tmp, path).map_err(|e| format!("替换 settings.json 失败\n原因：{e}"))?;
+    write_atomic("", SETTINGS_FILE, json.as_bytes())?;
 
     Ok(vec![SETTINGS_FILE.to_owned()])
 }

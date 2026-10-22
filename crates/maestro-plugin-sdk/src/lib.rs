@@ -60,6 +60,17 @@
 //! 据此推断、不裁剪请求、不做跨字段一致性校验，怎么投影进工具配置由插件裁定
 //! （见 ADR 0019）。header 的值已完成宿主插值且**可能含凭证**，不得写进日志。
 //!
+//! # 原子写
+//!
+//! 插件把配置写进 `config_dir` 时用 [`write_atomic`]：先写同目录临时文件，
+//! 成功后再改名替换——目标文件要么是旧内容，要么完全没写，绝不半截。
+//!
+//! ```ignore
+//! use maestro_plugin_sdk::write_atomic;
+//!
+//! write_atomic("agent", "models.json", json.as_bytes())?;
+//! ```
+//!
 //! # 依赖方式
 //!
 //! 本 crate 不发布到 crates.io，插件作者以 git 依赖引用本仓库中的 `crates/maestro-plugin-sdk`，
@@ -84,6 +95,8 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+use std::{fs, path::Path};
+
 /// `maestro:plugin` v2 合同的全部 WIT 类型与 `Guest` trait。
 ///
 /// 类型与合同 v2 一一对应：加字段/加协议 = 合同升包版本 + 插件重编译。
@@ -98,3 +111,29 @@ pub use maestro::plugin::logger::{Level, log};
 /// 插件配置 import 绑定（`maestro:plugin` v2.1.0 起，见 [`get_config`]）：
 /// `get_config` 函数 re-export 到 crate 根，方便插件一行引入。
 pub use maestro::plugin::config::get_config;
+
+/// 原子写：先写同目录临时文件，成功后再改名替换。
+///
+/// 插件把配置写进 `config_dir` 时最怕「写到一半」——目标文件要么是旧内容，
+/// 要么完全没写，绝不半截。此前每个内置插件各写一遍 tmp + rename（连错误
+/// 文案都是三份模板），这里给出唯一一份实现。
+///
+/// 路径相对于 `config_dir`（宿主预开放为 "/"）：`dir` 是子目录（`""` 即根），
+/// `name` 是文件名。临时文件与目标文件同目录，故 rename 不跨文件系统、
+/// 必为原子替换。
+///
+/// ```ignore
+/// use maestro_plugin_sdk::write_atomic;
+///
+/// write_atomic("agent", "models.json", json.as_bytes())?;
+/// ```
+///
+/// 失败原因带相对路径：插件作者不必自己拼错误文案。
+pub fn write_atomic(dir: &str, name: &str, contents: &[u8]) -> Result<(), String> {
+    let relative = Path::new(dir).join(name);
+    let tmp = Path::new(dir).join(format!("{name}.tmp"));
+    let label = relative.to_string_lossy();
+    fs::write(&tmp, contents).map_err(|e| format!("写入 {label} 临时文件失败\n原因：{e}"))?;
+    fs::rename(&tmp, &relative).map_err(|e| format!("替换 {label} 失败\n原因：{e}"))?;
+    Ok(())
+}

@@ -13,6 +13,7 @@ use std::path::Path;
 
 use maestro_plugin_sdk::{
     CustomHeader, Endpoint, Guest, Level, Model, ModelCapability, Protocol, Provider, export, log,
+    write_atomic,
 };
 
 /// pi 的 models.json 中 provider 条目的字段名。
@@ -79,10 +80,7 @@ fn write_models_json(providers: &[Provider]) -> Result<(), String> {
     json.push('\n');
 
     // 原子写入：先写临时文件成功后再 rename，I/O 错误不会留下半截的 models.json。
-    let tmp = Path::new("agent/models.json.tmp");
-    fs::write(tmp, &json).map_err(|e| format!("写入 agent/models.json 临时文件失败\n原因：{e}"))?;
-    fs::rename(tmp, Path::new("agent/models.json"))
-        .map_err(|e| format!("替换 agent/models.json 失败\n原因：{e}"))?;
+    write_atomic("agent", "models.json", json.as_bytes())?;
 
     Ok(())
 }
