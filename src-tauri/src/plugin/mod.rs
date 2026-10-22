@@ -42,7 +42,8 @@ use wasmtime::Engine;
 use crate::{
     paths::MaestroPaths,
     plugin::builtin::BUILTINS,
-    store::{AppStore, Variables},
+    store::{AppStore, PluginEntry},
+    variables::Variables,
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
@@ -154,25 +155,6 @@ fn remove_placed_dir(plugin_dir: &Path) -> Result<(), String> {
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("删除插件目录 {} 失败：{e}", plugin_dir.display())),
     }
-}
-
-/// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
-///
-/// `source` 是条目唯一身份（内置 `builtin:<id>`、指向 manifest.json 的 https URL
-/// 或本机绝对路径），重复添加在 store 层拒绝；`id` 为插件 id，条目在安装成功后
-/// 写入（内置插件由启动时装载管线补写，与其余来源同一流程）——它是来源到落位
-/// 目录的唯一映射（见 ADR 0006）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PluginEntry {
-    pub(crate) source: String,
-    #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
-    #[serde(default)]
-    pub(crate) id: String,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// 插件列表视图（命令返回给前端的形态）。

@@ -9,7 +9,7 @@ use std::{
 
 use super::{
     PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport, PluginConfig,
-    PluginEntry, PluginState, PluginView, builtin,
+    PluginState, PluginView, builtin,
     manifest::is_https_url,
     projection::project_files,
     testutil::{
@@ -17,7 +17,7 @@ use super::{
         stub_service, temp_home, test_service,
     },
 };
-use crate::{paths::MaestroPaths, provider::Provider};
+use crate::{paths::MaestroPaths, provider::Provider, store::PluginEntry};
 
 const MANIFEST_URL: &str = "https://example.com/releases/download/v1/manifest.json";
 const WASM_URL: &str = "https://example.com/releases/download/v1/plugin.wasm";

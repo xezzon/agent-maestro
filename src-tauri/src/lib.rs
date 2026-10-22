@@ -5,6 +5,7 @@ mod paths;
 mod plugin;
 mod provider;
 mod store;
+mod variables;
 
 use command::{
     add_plugin, apply_providers, create_provider, delete_provider, get_plugin_config, list_plugins,

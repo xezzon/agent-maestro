@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{interpolate, paths::MaestroPaths, provider::Provider, store::Variables};
+use crate::{interpolate, paths::MaestroPaths, provider::Provider, variables::Variables};
 
 use super::{
     LoadedPlugin, PluginApplyReport, PluginService, PluginState, config::read_plugin_config,

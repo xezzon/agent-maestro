@@ -8,11 +8,11 @@ use std::{fs, path::Path, sync::Arc};
 
 use crate::{
     paths::MaestroPaths,
-    store::{AppStore, StoreError},
+    store::{AppStore, PluginEntry, StoreError},
 };
 
 use super::{
-    PlacedPlugin, PluginEntry, PluginService, PluginState, builtin,
+    PlacedPlugin, PluginService, PluginState, builtin,
     manifest::{SourceKind, is_https_url, parse_manifest},
     remove_placed_dir,
 };

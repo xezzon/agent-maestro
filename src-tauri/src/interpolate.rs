@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::provider::Provider;
-use crate::store::Variables;
+use crate::variables::Variables;
 
 /// 对单个字符串值插值；失败原因即库报错（只含变量名与位置，不含值与密钥）。
 pub(crate) fn interpolate_value(template: &str, variables: &Variables) -> Result<String, String> {

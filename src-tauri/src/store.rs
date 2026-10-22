@@ -9,8 +9,8 @@ use std::{
 use crate::{
     interpolate::interpolation_failure_message,
     paths::MaestroPaths,
-    plugin::PluginEntry,
     provider::{FieldError, Provider},
+    variables::Variables,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +20,6 @@ const CONFIG_VERSION: u32 = 1;
 /// 配置存储的锁被毒化（其它命令持锁期间 panic）时对用户可见的原因。
 /// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
 const STORE_LOCK_POISONED: &str = "配置存储不可用";
-
-/// 全局变量表（ADR 0015）：名 → 默认值，供投影前的占位符插值。
-/// 插值（`crate::interpolate`）与插件服务是它的消费方。
-pub type Variables = BTreeMap<String, String>;
 
 /// `~/.maestro/config.json` 的顶层文档（version 1 schema）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,10 +40,32 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             providers: BTreeMap::new(),
-            variables: BTreeMap::new(),
+            variables: Variables::new(),
             plugins: Vec::new(),
         }
     }
+}
+
+/// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
+///
+/// `source` 是条目唯一身份（内置 `builtin:<id>`、指向 manifest.json 的 https URL
+/// 或本机绝对路径），重复添加在 store 层拒绝；`id` 为插件 id，条目在安装成功后
+/// 写入（内置插件由启动时装载管线补写，与其余来源同一流程）——它是来源到落位
+/// 目录的唯一映射（见 ADR 0006）。
+///
+/// 条目住在存储层：它是配置文件的形状，不是插件服务的内部状态。插件服务消费
+/// 条目，不定义条目——否则存储层与插件服务会互相依赖成环。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PluginEntry {
+    pub(crate) source: String,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) id: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 配置存储的错误；转为 `String` 时面向最终用户。
