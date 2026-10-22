@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OPENAI_COMPLETIONS } from "../../api/provider";
+import { MODE_CREATE, MODE_UPDATE } from "./formMode.js";
 import {
   BASE_URL_RULES,
   HEADER_NAME_RULES,
@@ -29,6 +30,15 @@ function makeForm(values) {
 /** 直接调用规则对象，不经过 DOM：antd 的 validator 签名是 (rule, value)。 */
 function validate(rule, value) {
   return rule.validator(rule, value);
+}
+
+/** 跑完一组规则里的全部 validator：任一拒绝即整体拒绝。 */
+function validateAll(rules, value) {
+  return Promise.all(
+    rules
+      .filter((rule) => rule.validator)
+      .map((rule) => validate(rule, value)),
+  );
 }
 
 /** 取出规则组里带 pattern 的那条（格式规则本身不是函数，直接测它的正则）。 */
@@ -73,28 +83,20 @@ describe("slug 唯一性", () => {
   const providers = [{ slug: "acme" }, { slug: "other" }];
 
   it("new_slug_that_collides_with_an_existing_provider_is_rejected", async () => {
-    const rule = slugUniquenessRule({ providers, currentSlug: "" });
+    const rule = slugUniquenessRule({ providers });
 
     await expect(validate(rule, "acme")).rejects.toThrow("已被使用");
   });
 
   it("new_slug_that_is_not_taken_passes", async () => {
-    const rule = slugUniquenessRule({ providers, currentSlug: "" });
+    const rule = slugUniquenessRule({ providers });
 
     await expect(validate(rule, "fresh")).resolves.toBeUndefined();
   });
 
-  it("update_mode_skips_the_conflict_check", async () => {
-    // 更新态由 ProviderCard 传入空列表：slug 不可编辑，行为保持不变。
-    const rule = slugUniquenessRule({ providers: [], currentSlug: "acme" });
-
-    await expect(validate(rule, "acme")).resolves.toBeUndefined();
-  });
-
-  it("the_provider_under_edit_does_not_conflict_with_itself", async () => {
-    const rule = slugUniquenessRule({ providers, currentSlug: "acme" });
-
-    await expect(validate(rule, "acme")).resolves.toBeUndefined();
+  it("building_the_rule_without_the_provider_list_fails_loudly", () => {
+    // 缺列表时若静默当成空列表，冲突校验就形同虚设。
+    expect(() => slugUniquenessRule({})).toThrow("需要当前 Provider 列表");
   });
 });
 
@@ -316,8 +318,8 @@ describe("providerFormRules", () => {
     });
     const rules = providerFormRules({
       form,
+      mode: MODE_CREATE,
       providers: [{ slug: "acme" }],
-      currentSlug: "",
     });
 
     await expect(validate(rules.slug.at(-1), "acme")).rejects.toThrow(
@@ -343,12 +345,60 @@ describe("providerFormRules", () => {
     });
     const rules = providerFormRules({
       form,
+      mode: MODE_CREATE,
       providers: [],
-      currentSlug: "",
     });
 
     await expect(
       validate(rules.selectedProtocol.at(-1), undefined),
     ).rejects.toThrow("请选择投影使用的端点");
+  });
+});
+
+describe("表单模式", () => {
+  const providers = [{ slug: "acme" }];
+
+  it("create_mode_rejects_a_slug_that_is_already_taken", async () => {
+    const rules = providerFormRules({
+      form: makeForm({}),
+      mode: MODE_CREATE,
+      providers,
+    });
+
+    await expect(validateAll(rules.slug, "acme")).rejects.toThrow("已被使用");
+  });
+
+  it("create_mode_accepts_a_fresh_slug", async () => {
+    const rules = providerFormRules({
+      form: makeForm({}),
+      mode: MODE_CREATE,
+      providers,
+    });
+
+    await expect(validateAll(rules.slug, "fresh")).resolves.toBeDefined();
+  });
+
+  it("update_mode_does_not_check_slug_conflicts", async () => {
+    // 更新态 slug 只读：已占用的 slug 不会因为「模式」而被拒绝。
+    const rules = providerFormRules({
+      form: makeForm({}),
+      mode: MODE_UPDATE,
+      providers,
+    });
+
+    await expect(validateAll(rules.slug, "acme")).resolves.toBeDefined();
+  });
+
+  it("an_unknown_mode_fails_loudly_instead_of_falling_back_to_update", () => {
+    expect(() =>
+      providerFormRules({ form: makeForm({}), mode: "Create", providers }),
+    ).toThrow("未知的 Provider 表单模式");
+  });
+
+  it("create_mode_without_the_provider_list_fails_loudly", () => {
+    // 静默关掉冲突校验正是本票要消除的隐式信号。
+    expect(() =>
+      providerFormRules({ form: makeForm({}), mode: MODE_CREATE }),
+    ).toThrow("需要当前 Provider 列表");
   });
 });

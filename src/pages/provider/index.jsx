@@ -16,6 +16,7 @@ import { listVariables } from "../../api/variables";
 import VariablesCard from "../../components/VariablesCard";
 import ProviderCard from "./ProviderCard";
 import ProviderForm from "./ProviderForm";
+import { MODE_CREATE } from "./formMode";
 import ApplyResultList from "./ApplyResultList";
 
 export default function ProvidersPage() {
@@ -130,6 +131,7 @@ export default function ProvidersPage() {
                 creating && (
                   <Card title="新建 Provider">
                     <ProviderForm
+                      mode={MODE_CREATE}
                       provider={{
                         slug: "",
                         base_url: normalizeEndpoints(),
@@ -139,11 +141,10 @@ export default function ProvidersPage() {
                         api_key_set: false,
                       }}
                       providers={providers}
-                      onFinish={(refresh) => {
+                      onCancel={() => setCreating(false)}
+                      onSaved={() => {
                         setCreating(false);
-                        if (refresh) {
-                          reload();
-                        }
+                        reload();
                       }}
                     />
                   </Card>
