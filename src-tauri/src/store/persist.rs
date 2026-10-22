@@ -15,8 +15,7 @@ pub(super) fn persist(config_path: &Path, config: &Config) -> Result<(), StoreEr
     };
     fs::create_dir_all(dir).map_err(io_error)?;
 
-    let json = serde_json::to_string_pretty(config).map_err(|e| StoreError::Io {
-        path: config_path.to_path_buf(),
+    let json = serde_json::to_string_pretty(config).map_err(|e| StoreError::Serialize {
         detail: e.to_string(),
     })?;
 

@@ -69,6 +69,11 @@ pub(crate) enum StoreError {
     UnsupportedVersion { path: PathBuf, found: u32 },
     /// 读写配置文件时发生 IO 错误。
     Io { path: PathBuf, detail: String },
+    /// 配置读得出来，却写不出合法的 JSON（序列化失败）。
+    ///
+    /// 与 IO 失败是两件事：文件没坏、也不是写不动，而是内容写不成 JSON——
+    /// 混进 `Io` 会让报错指向错误的修复方向（去查磁盘权限，而不是查内容）。
+    Serialize { detail: String },
     /// 已存在同名 Provider。
     DuplicateSlug { slug: String },
     /// Provider 不存在（update/delete 不做 upsert，绝不静默覆盖）。
@@ -148,11 +153,11 @@ impl From<&StoreError> for String {
                 "配置文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用仅支持 {CONFIG_VERSION}。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
                 path.display()
             ),
-            StoreError::Io { path, detail } if path.as_os_str().is_empty() => {
-                format!("读写配置文件失败\n原因：{detail}")
-            }
             StoreError::Io { path, detail } => {
                 format!("读写配置文件失败：{}\n原因：{detail}", path.display())
+            }
+            StoreError::Serialize { detail } => {
+                format!("序列化配置文件失败\n原因：{detail}")
             }
             StoreError::DuplicateSlug { slug } => format!("已存在同名 Provider：{slug}"),
             StoreError::MissingSlug { slug } => format!("Provider 不存在：{slug}"),

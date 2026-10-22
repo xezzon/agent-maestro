@@ -366,9 +366,9 @@ impl PluginService {
 
     /// 当前注册表视图。
     pub(crate) fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
-        let plugin_entries = store
-            .with_read(|s| s.list_plugins())
-            .map_err(|_| "配置文件损坏".to_owned())?;
+        // 配置损坏时把原因原样带出去（哪个文件坏了、坏在哪）——「配置文件损坏」
+        // 这四个字会让用户去猜是哪个文件。
+        let plugin_entries = store.with_read(|s| s.list_plugins())?;
         let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
         let plugin_view =
             |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| PluginView {
