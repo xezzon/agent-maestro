@@ -62,6 +62,12 @@ export default function PluginsPage() {
           showIcon
           title="插件列表加载失败"
           description={<pre className="error-detail">{loadError}</pre>}
+          action={
+            // 加载失败不该把插件管理堵死到重新挂载页面：给一条重试路径。
+            <Button loading={loading} onClick={reload}>
+              重试
+            </Button>
+          }
         />
       </div>
     );
