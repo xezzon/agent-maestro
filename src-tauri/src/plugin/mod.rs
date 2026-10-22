@@ -30,6 +30,7 @@ pub(crate) mod testutil;
 
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt::Display,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -173,12 +174,39 @@ pub(crate) struct PluginView {
     error: Option<String>,
 }
 
+/// 逐插件投影的状态：已写入 / 失败 / 未执行。
+///
+/// 合法值由类型固定（此前是一根 `&'static str`，合法值只写在注释里），
+/// 线格式为小写词（`applied` / `failed` / `skipped`），前端按同一组词渲染标签。
+/// 序列化形态与线格式由本模块的测试钉住：改词即前端标签静默失效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ApplyStatus {
+    /// 已写入：插件执行成功并写出了文件。
+    Applied,
+    /// 失败：插件执行了但返回错误（不写任何文件）。
+    Failed,
+    /// 未执行投影：插件已禁用或装载失败。
+    Skipped,
+}
+
+impl Display for ApplyStatus {
+    /// 线格式词（与序列化形态一致）：日志摘要与序列化同源，不再各写一份。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ApplyStatus::Applied => "applied",
+            ApplyStatus::Failed => "failed",
+            ApplyStatus::Skipped => "skipped",
+        })
+    }
+}
+
 /// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
 #[derive(Debug, Serialize)]
 pub(crate) struct PluginApplyReport {
     pub(crate) id: String,
-    /// `applied` | `failed` | `skipped`（禁用或加载失败时不执行投影）。
-    pub(crate) status: &'static str,
+    /// 投影状态（`applied` / `failed` / `skipped`）。
+    pub(crate) status: ApplyStatus,
     /// 已写入文件的宿主绝对路径列表（插件返回相对 config_dir 的路径，由宿主拼接）。
     files: Vec<String>,
     skipped: Vec<SkippedProvider>,

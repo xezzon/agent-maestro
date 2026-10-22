@@ -175,7 +175,10 @@ mod tests {
     use std::{collections::BTreeMap, fs};
 
     use crate::{
-        plugin::testutil::{store_at, temp_home, test_service},
+        plugin::{
+            ApplyStatus,
+            testutil::{store_at, temp_home, test_service},
+        },
         provider::{Protocol, Provider},
         store::select_enabled_providers,
     };
@@ -218,7 +221,12 @@ mod tests {
         let first = service
             .write_providers(&select_enabled_providers(&providers), &BTreeMap::new())
             .unwrap();
-        assert_eq!(first[0].status, "applied", "{:?}", first[0].reason);
+        assert_eq!(
+            first[0].status,
+            ApplyStatus::Applied,
+            "{:?}",
+            first[0].reason
+        );
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
         assert_eq!(
@@ -230,7 +238,12 @@ mod tests {
         let second = service
             .write_providers(&select_enabled_providers(&providers), &BTreeMap::new())
             .unwrap();
-        assert_eq!(second[0].status, "applied", "{:?}", second[0].reason);
+        assert_eq!(
+            second[0].status,
+            ApplyStatus::Applied,
+            "{:?}",
+            second[0].reason
+        );
         let raw = fs::read_to_string(&models_path).unwrap();
         let written: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(

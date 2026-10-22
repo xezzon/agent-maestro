@@ -9,8 +9,8 @@ use std::{
 use crate::{interpolate, paths::MaestroPaths, provider::Provider, variables::Variables};
 
 use super::{
-    LoadedPlugin, PluginApplyReport, PluginService, PluginState, config::read_plugin_config,
-    execution::SkippedProvider,
+    ApplyStatus, LoadedPlugin, PluginApplyReport, PluginService, PluginState,
+    config::read_plugin_config, execution::SkippedProvider,
 };
 
 impl PluginService {
@@ -110,14 +110,14 @@ fn build_report(
     match projected {
         Ok((files, skipped)) => PluginApplyReport {
             id,
-            status: "applied",
+            status: ApplyStatus::Applied,
             files,
             skipped,
             reason: None,
         },
         Err(reason) => PluginApplyReport {
             id,
-            status: "failed",
+            status: ApplyStatus::Failed,
             files: Vec::new(),
             skipped: Vec::new(),
             reason: Some(reason),
@@ -129,7 +129,7 @@ fn build_report(
 fn skipped_report(id: String, reason: String) -> PluginApplyReport {
     PluginApplyReport {
         id,
-        status: "skipped",
+        status: ApplyStatus::Skipped,
         files: Vec::new(),
         skipped: Vec::new(),
         reason: Some(reason),

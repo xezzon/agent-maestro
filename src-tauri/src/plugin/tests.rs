@@ -8,8 +8,8 @@ use std::{
 };
 
 use super::{
-    PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport, PluginConfig,
-    PluginState, PluginView, builtin,
+    ApplyStatus, PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport,
+    PluginConfig, PluginState, PluginView, builtin,
     manifest::is_https_url,
     projection::project_files,
     testutil::{
@@ -911,7 +911,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         .collect();
     assert_eq!(reports.len(), 4, "每个注册表条目一份报告");
     let applied = by_id.get("pi2").unwrap();
-    assert_eq!(applied.status, "applied");
+    assert_eq!(applied.status, ApplyStatus::Applied);
     assert_eq!(applied.files.len(), 1);
     let reported = Path::new(&applied.files[0]);
     assert!(
@@ -920,7 +920,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         applied.files
     );
     let failed = by_id.get("pibad").unwrap();
-    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.status, ApplyStatus::Failed);
     assert!(
         failed
             .reason
@@ -930,12 +930,20 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         "{:?}",
         failed.reason
     );
-    assert_eq!(by_id.get("pi3").unwrap().status, "skipped", "禁用态跳过");
+    assert_eq!(
+        by_id.get("pi3").unwrap().status,
+        ApplyStatus::Skipped,
+        "禁用态跳过"
+    );
     assert_eq!(
         by_id.get("pi3").unwrap().reason.as_deref(),
         Some("插件已禁用")
     );
-    assert_eq!(by_id.get("pierr").unwrap().status, "skipped", "错误态跳过");
+    assert_eq!(
+        by_id.get("pierr").unwrap().status,
+        ApplyStatus::Skipped,
+        "错误态跳过"
+    );
     assert_eq!(
         by_id.get("pierr").unwrap().reason.as_deref(),
         Some("配置已损坏")
@@ -972,7 +980,12 @@ fn projection_path_never_logs_the_api_key() {
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+    assert_eq!(
+        reports[0].status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports[0].reason
+    );
     let logs = window.lines();
     // 先证捕获窗口确实覆盖了这条真实投影路径，canary 断言才有意义。
     assert!(
@@ -1016,7 +1029,12 @@ fn projection_path_never_logs_custom_header_values() {
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+    assert_eq!(
+        reports[0].status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports[0].reason
+    );
     let logs = window.lines();
     // 先证捕获窗口确实覆盖了这条真实投影路径，canary 断言才有意义。
     assert!(
@@ -1056,7 +1074,12 @@ fn write_providers_interpolates_placeholders_before_projection() {
 
     let reports = service.write_providers(&providers, &variables).unwrap();
 
-    assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+    assert_eq!(
+        reports[0].status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports[0].reason
+    );
     let written: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap(),
     )
@@ -1120,8 +1143,18 @@ fn write_providers_merges_plugin_variable_overrides_per_plugin() {
         .iter()
         .map(|report| (report.id.as_str(), report))
         .collect();
-    assert_eq!(by_id.get("pi").unwrap().status, "applied", "{:?}", reports);
-    assert_eq!(by_id.get("pi2").unwrap().status, "applied", "{:?}", reports);
+    assert_eq!(
+        by_id.get("pi").unwrap().status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports
+    );
+    assert_eq!(
+        by_id.get("pi2").unwrap().status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports
+    );
     let written: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap(),
     )
@@ -1167,7 +1200,7 @@ fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_er
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    assert_eq!(reports[0].status, "failed");
+    assert_eq!(reports[0].status, ApplyStatus::Failed);
     let reason = reports[0].reason.as_deref().unwrap();
     assert!(reason.contains("gateway"), "{reason}");
     assert!(reason.contains("base_url.openai-completions"), "{reason}");
@@ -1215,7 +1248,7 @@ fn write_providers_fails_the_whole_plugin_when_its_plugin_config_is_corrupt() {
         .unwrap();
 
     let report = plugin_report(&reports, "pi");
-    assert_eq!(report.status, "failed");
+    assert_eq!(report.status, ApplyStatus::Failed);
     let reason = report.reason.as_deref().unwrap();
     assert!(reason.contains("插件配置已损坏"), "{reason}");
     assert!(
@@ -1256,7 +1289,12 @@ fn endpoint_that_interpolates_to_empty_counts_as_unconfigured() {
 
     let reports = service.write_providers(&providers, &variables).unwrap();
 
-    assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+    assert_eq!(
+        reports[0].status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports[0].reason
+    );
     assert_eq!(reports[0].skipped.len(), 1);
     assert_eq!(reports[0].skipped[0].slug, "gateway");
     assert_eq!(reports[0].skipped[0].reason, "未配置任何协议端点");
@@ -1433,5 +1471,25 @@ fn project_files_rejects_paths_outside_the_config_dir() {
     ] {
         let err = project_files(&config_dir, vec![file.to_owned()]).unwrap_err();
         assert!(err.contains(file), "{file} 应被拒绝：{err}");
+    }
+}
+
+/// 投影状态的线格式钉死：序列化与 `Display` 同为 `applied` / `failed` /
+/// `skipped` 三个小写词。前端按同一组词渲染标签（见
+/// `src/pages/provider/applyStatus.js`），改词即前端标签静默失效——
+/// 故这三条断言是跨端契约的护栏。
+#[test]
+fn apply_status_wire_values_are_pinned() {
+    for (status, wire) in [
+        (ApplyStatus::Applied, "applied"),
+        (ApplyStatus::Failed, "failed"),
+        (ApplyStatus::Skipped, "skipped"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!(wire),
+            "序列化形态与线格式词一致"
+        );
+        assert_eq!(status.to_string(), wire, "Display 与线格式词一致");
     }
 }

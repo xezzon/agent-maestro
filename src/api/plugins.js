@@ -15,10 +15,16 @@
  * @property {string} reason 跳过原因（当前仅未配置任何协议端点）。
  */
 /**
+ * 逐插件投影状态：与后端 `ApplyStatus` 枚举一一对应（线格式为小写词）。
+ * applied = 已写入；failed = 插件执行了但返回错误；skipped = 已禁用或加载失败
+ * （未执行投影）。
+ * @typedef {'applied' | 'failed' | 'skipped'} ApplyStatus
+ */
+/**
  * 逐插件投影报告。
  * @typedef {Object} PluginApplyReport
  * @property {string} id 插件 id。
- * @property {'applied' | 'failed' | 'skipped'} status
+ * @property {ApplyStatus} status
  *   skipped = 已禁用或加载失败（未执行投影）；failed = 插件执行了但返回错误。
  * @property {string[]} files 已写入文件的宿主绝对路径列表，第一个是主文件（可为空）。
  * @property {SkippedProvider[]} skipped
@@ -32,6 +38,19 @@
  * @property {Object=} form 表单数据，形状由 manifest 的 settings_schema 声明（ADR 0017），宿主不解释
  */
 import { invoke } from "@tauri-apps/api/core";
+
+/** @type {ApplyStatus} 已写入：插件执行成功并写出了文件。 */
+export const APPLY_STATUS_APPLIED = "applied";
+/** @type {ApplyStatus} 失败：插件执行了但返回错误。 */
+export const APPLY_STATUS_FAILED = "failed";
+/** @type {ApplyStatus} 未执行投影：插件已禁用或装载失败。 */
+export const APPLY_STATUS_SKIPPED = "skipped";
+/** @type {ApplyStatus[]} 投影状态的全体取值（与后端 `ApplyStatus` 枚举一一对应）。 */
+export const APPLY_STATUSES = [
+  APPLY_STATUS_APPLIED,
+  APPLY_STATUS_FAILED,
+  APPLY_STATUS_SKIPPED,
+];
 
 /**
  * @returns {Promise<PluginView[]>}
