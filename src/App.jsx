@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Layout, Menu } from "antd";
-import PluginsPage from "./PluginsPage";
-import PluginConfigPage from "./PluginConfigPage";
-import ProvidersPage from "./ProvidersPage";
+import PluginsPage from "./pages/plugins";
+import PluginConfigPage from "./pages/plugin-config";
+import ProvidersPage from "./pages/provider";
 import { listPlugins } from "./api/plugins";
 import "./App.css";
 

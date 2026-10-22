@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    interpolate::interpolation_failure_message,
     paths::MaestroPaths,
     plugin::PluginEntry,
     provider::{FieldError, Provider},
@@ -70,7 +71,8 @@ pub(crate) enum StoreError {
     DuplicateId { id: String, source: String },
     /// Provider 对（变更后的）全局变量表插值失败：变量未定义或占位符语法
     /// 错误。与投影时的插值失败同因同报，只是提前到落盘前拦截
-    /// （provider↔variables 一致性，ADR 0015）。
+    /// （provider↔variables 一致性，ADR 0015）。文案由
+    /// [`interpolation_failure_message`] 一处产出，与投影时逐字一致。
     Interpolation {
         slug: String,
         field: String,
@@ -78,6 +80,51 @@ pub(crate) enum StoreError {
     },
     /// 变量名不合法：占位符无法引用（变量名语法见 ADR 0014）。
     InvalidVariableName { name: String },
+}
+
+impl StoreError {
+    /// 「Provider 不存在」错误：update/delete 不做 upsert，绝不静默覆盖。
+    fn missing_slug(slug: &str) -> Self {
+        Self::MissingSlug {
+            slug: slug.to_owned(),
+        }
+    }
+
+    /// 「已存在同名 Provider」错误。
+    fn duplicate_slug(slug: &str) -> Self {
+        Self::DuplicateSlug {
+            slug: slug.to_owned(),
+        }
+    }
+
+    /// 「插件条目不存在」错误：按来源定位不到条目即报错，绝不静默写入。
+    fn missing_source(source: &str) -> Self {
+        Self::MissingSource {
+            source: source.to_owned(),
+        }
+    }
+
+    /// 「已存在同一来源的插件条目」错误。
+    fn duplicate_source(source: &str) -> Self {
+        Self::DuplicateSource {
+            source: source.to_owned(),
+        }
+    }
+
+    /// 「同一 id 已被其它来源的插件条目持有」错误。
+    fn duplicate_id(id: &str, source: &str) -> Self {
+        Self::DuplicateId {
+            id: id.to_owned(),
+            source: source.to_owned(),
+        }
+    }
+
+    /// 「变量名不合法」错误：占位符无法引用。
+    fn invalid_variable_name(name: &str) -> Self {
+        Self::InvalidVariableName {
+            name: name.to_owned(),
+        }
+    }
 }
 
 impl From<&StoreError> for String {
@@ -110,7 +157,7 @@ impl From<&StoreError> for String {
                 slug,
                 field,
                 reason,
-            } => format!("Provider「{slug}」的 {field} 插值失败：{reason}"),
+            } => interpolation_failure_message(slug, field, reason),
             StoreError::InvalidVariableName { name } => format!(
                 "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
             ),
@@ -131,6 +178,17 @@ impl From<StoreError> for String {
 pub(crate) struct Store {
     config_path: PathBuf,
     state: Result<Config, StoreError>,
+}
+
+/// 一次配置变更的结果：要不要落盘，以及要带回给调用方的领域值。
+///
+/// `Changed` 落盘并替换内存状态；`Unchanged` 什么都不做（幂等路径：
+/// 状态未变即不写盘）。两者都带回领域值——「没变化」不等于「没有返回值」。
+enum Change<T> {
+    /// 有变化：落盘成功后替换内存状态。
+    Changed(T),
+    /// 无变化：不写盘、不动内存状态。
+    Unchanged(T),
 }
 
 impl Store {
@@ -168,6 +226,28 @@ impl Store {
         self.state.as_ref()
     }
 
+    /// 唯一的配置写路径：取当前配置 → clone → 交闭包改 → 落盘 → 换 state。
+    ///
+    /// 闭包只写自己的领域变更与校验，「要不要落盘」由返回值决定
+    /// （`Change::Unchanged` 即无变化：不写盘、不换 state）。
+    /// 任何失败——保护态、校验不通过、目标不存在、落盘 IO 错误——都不改 state：
+    /// 草稿随之丢弃，state 保持原样。
+    fn mutate<T>(
+        &mut self,
+        f: impl FnOnce(&mut Config) -> Result<Change<T>, StoreError>,
+    ) -> Result<T, StoreError> {
+        let config = self.state.as_ref().map_err(Clone::clone)?;
+        let mut next = config.clone();
+        match f(&mut next)? {
+            Change::Unchanged(value) => Ok(value),
+            Change::Changed(value) => {
+                self.persist(&next)?;
+                self.state = Ok(next);
+                Ok(value)
+            }
+        }
+    }
+
     /// 新建一条 Provider（slug 唯一），成功后原子写回磁盘。
     /// 落盘前对当前变量表插值一次：占位符引用必须可解析（变量已定义，或带
     /// 内联默认值），语法错误同样拦截——provider↔variables 一致性；
@@ -177,60 +257,47 @@ impl Store {
         slug: &str,
         provider: Provider,
     ) -> Result<(), StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        if config.providers.contains_key(slug) {
-            return Err(StoreError::DuplicateSlug {
-                slug: slug.to_owned(),
-            });
-        }
-        validate_provider(slug, &provider, &config.variables)?;
-        let mut next = config.clone();
-        next.providers.insert(slug.to_owned(), provider);
-        self.persist(&next)?;
-        self.state = Ok(next);
-        Ok(())
+        self.mutate(|config| {
+            if config.providers.contains_key(slug) {
+                return Err(StoreError::duplicate_slug(slug));
+            }
+            validate_provider(slug, &provider, &config.variables)?;
+            config.providers.insert(slug.to_owned(), provider);
+            Ok(Change::Changed(()))
+        })
     }
 
     /// 整包替换指定 Provider 的端点、模型列表与 API Key（明文）。
     /// slug 不存在时报错，不做 upsert；落盘前对当前变量表插值一次，占位符
     /// 引用必须可解析（同 `create_provider`，禁用状态不影响校验）。
+    /// 返回被替换的原记录。
     pub(crate) fn update_provider(
         &mut self,
         slug: &str,
         provider: Provider,
     ) -> Result<Provider, StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        let mut next = config.clone();
-
-        match next.providers.get(slug).cloned() {
-            Some(original) => {
-                validate_provider(slug, &provider, &next.variables)?;
-                next.providers.insert(slug.to_owned(), provider);
-                self.persist(&next)?;
-                self.state = Ok(next);
-                Ok(original)
-            }
-            None => Err(StoreError::MissingSlug {
-                slug: slug.to_owned(),
-            }),
-        }
+        self.mutate(|config| {
+            let original = config
+                .providers
+                .get(slug)
+                .cloned()
+                .ok_or_else(|| StoreError::missing_slug(slug))?;
+            validate_provider(slug, &provider, &config.variables)?;
+            config.providers.insert(slug.to_owned(), provider);
+            Ok(Change::Changed(original))
+        })
     }
 
     /// 删除 Provider，其端点、模型与 API Key 随记录一并移除，不留孤儿数据。
+    /// 返回被删除的记录。
     pub(crate) fn delete_provider(&mut self, slug: &str) -> Result<Provider, StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        let mut next = config.clone();
-
-        match next.providers.remove(slug) {
-            Some(original) => {
-                self.persist(&next)?;
-                self.state = Ok(next);
-                Ok(original)
-            }
-            None => Err(StoreError::MissingSlug {
-                slug: slug.to_owned(),
-            }),
-        }
+        self.mutate(|config| {
+            let removed = config
+                .providers
+                .remove(slug)
+                .ok_or_else(|| StoreError::missing_slug(slug))?;
+            Ok(Change::Changed(removed))
+        })
     }
 
     /// 整包替换全局变量表（ADR 0015）：新增、修改与删除都走同一条全量保存路径。
@@ -239,22 +306,19 @@ impl Store {
     /// 引用无法解析时整表拒绝（provider↔variables 一致性）。空默认值合法
     /// （`${EMPTY}`）。
     pub(crate) fn set_variables(&mut self, variables: Variables) -> Result<(), StoreError> {
+        // 变量名合法性先于存储状态：非法名整表拒绝，与当前配置是否可读无关。
         for name in variables.keys() {
             if !is_valid_variable_name(name) {
-                return Err(StoreError::InvalidVariableName {
-                    name: name.to_owned(),
-                });
+                return Err(StoreError::invalid_variable_name(name));
             }
         }
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        for (slug, provider) in &config.providers {
-            validate_provider(slug, provider, &variables)?;
-        }
-        let mut next = config.clone();
-        next.variables = variables;
-        self.persist(&next)?;
-        self.state = Ok(next);
-        Ok(())
+        self.mutate(|config| {
+            for (slug, provider) in &config.providers {
+                validate_provider(slug, provider, &variables)?;
+            }
+            config.variables = variables;
+            Ok(Change::Changed(()))
+        })
     }
 
     /// 新增插件条目，追加在现有条目之后。
@@ -266,45 +330,33 @@ impl Store {
     /// 此处写入分属两次加锁，两次锁之间另一来源可能已占用同一 id。
     pub(crate) fn add_plugin(&mut self, plugin_entry: &PluginEntry) -> Result<(), StoreError> {
         let source = plugin_entry.source.clone();
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        if config.plugins.iter().any(|plugin| plugin.source == source) {
-            return Err(StoreError::DuplicateSource {
-                source: source.to_owned(),
-            });
-        }
-        if let Some(other) = config
-            .plugins
-            .iter()
-            .find(|plugin| plugin.source != source && plugin.id == plugin_entry.id)
-        {
-            return Err(StoreError::DuplicateId {
-                id: plugin_entry.id.to_owned(),
-                source: other.source.to_owned(),
-            });
-        }
-        let mut next = config.clone();
-        next.plugins.push(plugin_entry.clone());
-        self.persist(&next)?;
-        self.state = Ok(next);
-
-        Ok(())
+        self.mutate(|config| {
+            if config.plugins.iter().any(|plugin| plugin.source == source) {
+                return Err(StoreError::duplicate_source(&source));
+            }
+            if let Some(other) = config
+                .plugins
+                .iter()
+                .find(|plugin| plugin.source != source && plugin.id == plugin_entry.id)
+            {
+                return Err(StoreError::duplicate_id(&plugin_entry.id, &other.source));
+            }
+            config.plugins.push(plugin_entry.clone());
+            Ok(Change::Changed(()))
+        })
     }
 
     /// 删除插件条目，返回被删除的条目（调用方据此删除落位目录）。
     pub(crate) fn delete_plugin(&mut self, source: &str) -> Result<PluginEntry, StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        let mut next = config.clone();
-        let index = next
-            .plugins
-            .iter()
-            .position(|plugin| plugin.source == source)
-            .ok_or_else(|| StoreError::MissingSource {
-                source: source.to_owned(),
-            })?;
-        let removed = next.plugins.remove(index);
-        self.persist(&next)?;
-        self.state = Ok(next);
-        Ok(removed)
+        self.mutate(|config| {
+            let index = config
+                .plugins
+                .iter()
+                .position(|plugin| plugin.source == source)
+                .ok_or_else(|| StoreError::missing_source(source))?;
+            let removed = config.plugins.remove(index);
+            Ok(Change::Changed(removed))
+        })
     }
 
     pub(crate) fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
@@ -320,27 +372,7 @@ impl Store {
             .iter()
             .find(|plugin| plugin.source == source)
             .cloned()
-            .ok_or_else(|| StoreError::MissingSource {
-                source: source.to_owned(),
-            })
-    }
-
-    /// 以 `source` 定位并原位修改 plugins 段；找不到即报错，绝不静默写入。
-    fn update_plugins(
-        &mut self,
-        source: &str,
-        f: impl FnOnce(&mut Vec<PluginEntry>) -> bool,
-    ) -> Result<(), StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        let mut next = config.clone();
-        if !f(&mut next.plugins) {
-            return Err(StoreError::MissingSource {
-                source: source.to_owned(),
-            });
-        }
-        self.persist(&next)?;
-        self.state = Ok(next);
-        Ok(())
+            .ok_or_else(|| StoreError::missing_source(source))
     }
 
     /// 启用/禁用插件条目。
@@ -349,14 +381,14 @@ impl Store {
         source: &str,
         enabled: bool,
     ) -> Result<(), StoreError> {
-        self.update_plugins(source, |plugins| {
-            for plugin in plugins.iter_mut() {
-                if plugin.source == source {
-                    plugin.enabled = enabled;
-                    return true;
-                }
-            }
-            false
+        self.mutate(|config| {
+            let entry = config
+                .plugins
+                .iter_mut()
+                .find(|plugin| plugin.source == source)
+                .ok_or_else(|| StoreError::missing_source(source))?;
+            entry.enabled = enabled;
+            Ok(Change::Changed(()))
         })
     }
 
@@ -370,23 +402,17 @@ impl Store {
         slug: &str,
         enabled: bool,
     ) -> Result<(), StoreError> {
-        let config = self.state.as_ref().map_err(Clone::clone)?;
-        let current = config
-            .providers
-            .get(slug)
-            .ok_or_else(|| StoreError::MissingSlug {
-                slug: slug.to_owned(),
-            })?;
-        if current.enabled == enabled {
-            return Ok(());
-        }
-        let mut next = config.clone();
-        if let Some(provider) = next.providers.get_mut(slug) {
+        self.mutate(|config| {
+            let provider = config
+                .providers
+                .get_mut(slug)
+                .ok_or_else(|| StoreError::missing_slug(slug))?;
+            if provider.enabled == enabled {
+                return Ok(Change::Unchanged(()));
+            }
             provider.enabled = enabled;
-        }
-        self.persist(&next)?;
-        self.state = Ok(next);
-        Ok(())
+            Ok(Change::Changed(()))
+        })
     }
 
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
@@ -1467,6 +1493,50 @@ mod tests {
         );
     }
 
+    /// 落盘前拦截的文案逐字断言：slug、字段名、原因三者都在句子里，且与投影时
+    /// 拦截同一句式（ADR 0015「报错与投影时同因同报」；共享构造函数见 issue #128）。
+    #[test]
+    fn interpolation_store_error_message_is_verbatim() {
+        let err = StoreError::Interpolation {
+            slug: "gateway".to_owned(),
+            field: "base_url.openai-completions".to_owned(),
+            reason: "No such variable: $HOST".to_owned(),
+        };
+
+        assert_eq!(
+            String::from(err),
+            "Provider「gateway」的 base_url.openai-completions 插值失败：No such variable: $HOST"
+        );
+    }
+
+    /// 落盘前拦截与投影时拦截逐字同报：同一份配置、同一个原因，两条路径给出
+    /// 完全相同的一句文案（ADR 0015「报错与投影时同因同报」；共享构造函数见
+    /// issue #128）。
+    #[test]
+    fn store_and_projection_report_interpolation_failures_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        let provider = Provider {
+            base_url: BTreeMap::from([(
+                Protocol::OpenaiCompletions,
+                "https://${HOST}/v1".to_owned(),
+            )]),
+            ..Provider::default()
+        };
+        let mut providers = BTreeMap::new();
+        providers.insert("gateway".to_owned(), provider.clone());
+
+        let stored = String::from(store.create_provider("gateway", provider).unwrap_err());
+        let projected =
+            crate::interpolate::interpolate_providers(&providers, &Variables::new()).unwrap_err();
+
+        assert_eq!(
+            stored, projected,
+            "落盘前拦截与投影时拦截逐字同报：{stored}"
+        );
+    }
+
     /// 已定义的变量与带内联默认值的引用都可通过；存储层原样保存，插值发生在投影时。
     #[test]
     fn create_provider_accepts_defined_variables_and_inline_defaults() {
@@ -1941,6 +2011,56 @@ mod tests {
 
         let err = store.set_provider_enabled("missing", false).unwrap_err();
         assert!(matches!(err, StoreError::MissingSlug { .. }));
+    }
+
+    /// 幂等调用**不写盘**（不只是状态不变）。
+    ///
+    /// 钉「写没写」而非「状态变没变」：先把磁盘内容手工改成与内存不同的样子
+    /// （`enabled` 翻成 false），再发一次状态未变的调用；若实现落了盘，文件会被
+    /// 改写成内存状态，断言随即失败。末尾再翻一次状态作对照，证明文件确实
+    /// 可被改写且翻转被记录——否则「文件没变」可能只是文件坏了。
+    #[test]
+    fn set_provider_enabled_does_not_write_to_disk_when_state_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        MaestroPaths::init(dir.path());
+        let mut store = Store::new();
+        store
+            .create_provider("ollama", Provider::default())
+            .unwrap();
+        let path = MaestroPaths::get().config_path();
+
+        // 手工把磁盘内容改成与内存不同的样子：ollama 在盘上是禁用态。
+        let hand_edited = r#"{
+  "version": 1,
+  "providers": { "ollama": { "enabled": false } },
+  "variables": {}
+}
+"#;
+        fs::write(&path, hand_edited).unwrap();
+
+        store.set_provider_enabled("ollama", true).unwrap();
+
+        assert!(
+            store.get().unwrap().providers["ollama"].enabled,
+            "幂等调用后内存状态不变"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            hand_edited,
+            "状态未变的幂等调用不得写盘"
+        );
+
+        // 对照：状态确实变化时必须落盘，且翻转被记录。
+        store.set_provider_enabled("ollama", false).unwrap();
+        assert_ne!(
+            fs::read_to_string(&path).unwrap(),
+            hand_edited,
+            "状态变化时必须写盘"
+        );
+        assert!(
+            !Store::new().get().unwrap().providers["ollama"].enabled,
+            "翻转后的启用态必须落盘"
+        );
     }
 
     /// 禁用的 Provider 同样受插值校验约束：落盘内容始终对变量表可解析，

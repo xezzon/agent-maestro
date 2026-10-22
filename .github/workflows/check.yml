@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   frontend:
-    name: Frontend build
+    name: Frontend (lint, format, test, build)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -33,6 +33,16 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # 与 Rust job 的 fmt/clippy 对应：前端先过静态检查，再跑测试与构建。
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Test
+        run: pnpm test
 
       - name: Build
         run: pnpm build

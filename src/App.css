@@ -63,7 +63,7 @@ body {
   margin-top: 4px;
 }
 
-/* 禁用的 Provider 卡片整体弱化（src/ProvidersPage.jsx，issue #94） */
+/* 禁用的 Provider 卡片整体弱化（src/pages/provider/，issue #94） */
 .provider-disabled .ant-card-body {
   opacity: 0.6;
 }
@@ -103,7 +103,7 @@ body {
   margin-bottom: 0;
 }
 
-/* Provider 表单里的自定义 header 行（src/ProvidersPage.jsx，issue #107），与模型行同构。 */
+/* Provider 表单里的自定义 header 行（src/pages/provider/，issue #107），与模型行同构。 */
 .header-rows {
   display: flex;
   flex-direction: column;
@@ -144,7 +144,7 @@ body {
   gap: 8px;
 }
 
-/* 全局变量表卡片（src/VariablesCard.jsx，issue #90） */
+/* 变量行表单（src/components/VariableRowsForm.jsx）：全局变量表与插件变量覆盖共用，issue #123 */
 .variable-rows {
   display: flex;
   flex-direction: column;
