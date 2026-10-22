@@ -49,5 +49,5 @@ pub(crate) fn store_at(home: &Path) -> AppStore {
 
 /// 测试读取配置快照：走与服务同一套短锁访问。
 pub(super) fn snapshot(store: &AppStore) -> Config {
-    store.read().unwrap().config_snapshot().unwrap()
+    store.with_read(|s| s.config_snapshot()).unwrap()
 }

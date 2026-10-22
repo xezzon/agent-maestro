@@ -28,7 +28,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::RwLock,
 };
 
 use crate::{paths::MaestroPaths, provider::Provider, variables::Variables};
@@ -262,19 +262,44 @@ pub(crate) struct AppStore {
 }
 
 impl AppStore {
-    /// 取只读守卫；调用方仅读取配置时使用。
-    /// 其它命令持写锁期间 panic 会毒化锁，此时报错而非静默继续。
-    pub(crate) fn read(&self) -> Result<RwLockReadGuard<'_, Store>, String> {
-        self.store
+    /// 在读锁内执行闭包：闭包的返回值即脱离锁的那份自有值。
+    ///
+    /// 锁守卫不出作用域——「不得持锁做 IO」这条纪律因此由类型保证，而不是靠
+    /// 注释提醒（此前散在 4 处注释里）。读多写少：list_plugins、
+    /// plugin_by_source、provider 列表等只读路径在同一 Store 上并发；写操作
+    /// 走 [`AppStore::with_write`] 独占。
+    ///
+    /// 闭包报出的错误按 `Into<String>` 归一：存储错误（`StoreError`）转成
+    /// 面向用户的原因，闭包自己造的文案原样带出。
+    pub(crate) fn with_read<T, E>(
+        &self,
+        f: impl FnOnce(&Store) -> Result<T, E>,
+    ) -> Result<T, String>
+    where
+        E: Into<String>,
+    {
+        let guard = self
+            .store
             .read()
-            .map_err(|_| STORE_LOCK_POISONED.to_owned())
+            .map_err(|_| STORE_LOCK_POISONED.to_owned())?;
+        f(&guard).map_err(Into::into)
     }
 
-    /// 取写守卫；调用方对配置做修改时使用。独占期间所有读守卫与其它写守卫
-    /// 均需等待。锁被毒化同样报错。
-    pub(crate) fn write(&self) -> Result<RwLockWriteGuard<'_, Store>, String> {
-        self.store
+    /// 在写锁内执行闭包：独占期间所有读守卫与其它写守卫均需等待。
+    ///
+    /// 锁被毒化同样报错。闭包只应做「改内存里的配置」这一件事——落盘由
+    /// [`Store`] 在闭包返回后完成，故闭包里不做 IO。
+    pub(crate) fn with_write<T, E>(
+        &self,
+        f: impl FnOnce(&mut Store) -> Result<T, E>,
+    ) -> Result<T, String>
+    where
+        E: Into<String>,
+    {
+        let mut guard = self
+            .store
             .write()
-            .map_err(|_| STORE_LOCK_POISONED.to_owned())
+            .map_err(|_| STORE_LOCK_POISONED.to_owned())?;
+        f(&mut guard).map_err(Into::into)
     }
 }

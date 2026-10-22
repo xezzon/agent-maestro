@@ -56,10 +56,7 @@ impl From<ProviderRequest> for Provider {
 pub(crate) fn list_providers(
     store: State<'_, AppStore>,
 ) -> Result<BTreeMap<String, Provider>, String> {
-    let outcome = (|| -> Result<BTreeMap<String, Provider>, String> {
-        let guard = store.read()?;
-        Ok(guard.providers_snapshot()?)
-    })();
+    let outcome = store.with_read(|s| s.providers_snapshot());
     log_outcome("list_providers", None, &outcome);
     outcome
 }
@@ -71,10 +68,7 @@ pub(crate) fn create_provider(
 ) -> Result<(), String> {
     let slug = provider.slug.clone();
     let context = format!("slug={slug}");
-    let outcome = (move || {
-        let mut guard = store.write()?;
-        Ok(guard.create_provider(&slug, provider.into())?)
-    })();
+    let outcome = store.with_write(move |s| s.create_provider(&slug, provider.into()));
     log_outcome("create_provider", Some(&context), &outcome);
     outcome
 }
@@ -86,22 +80,14 @@ pub(crate) fn update_provider(
 ) -> Result<(), String> {
     let slug = provider.slug.clone();
     let context = format!("slug={slug}");
-    let outcome = (move || {
-        let mut guard = store.write()?;
-        guard.update_provider(&slug, provider.into())?;
-        Ok(())
-    })();
+    let outcome = store.with_write(move |s| s.update_provider(&slug, provider.into()).map(|_| ()));
     log_outcome("update_provider", Some(&context), &outcome);
     outcome
 }
 
 #[tauri::command]
 pub(crate) fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
-    let outcome = (|| {
-        let mut guard = store.write()?;
-        guard.delete_provider(&slug)?;
-        Ok(())
-    })();
+    let outcome = store.with_write(|s| s.delete_provider(&slug).map(|_| ()));
     log_outcome("delete_provider", Some(&format!("slug={slug}")), &outcome);
     outcome
 }
@@ -114,11 +100,7 @@ pub(crate) fn set_provider_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let context = format!("slug={slug} enabled={enabled}");
-    let outcome = (|| {
-        let mut guard = store.write()?;
-        guard.set_provider_enabled(&slug, enabled)?;
-        Ok(())
-    })();
+    let outcome = store.with_write(|s| s.set_provider_enabled(&slug, enabled));
     log_outcome("set_provider_enabled", Some(&context), &outcome);
     outcome
 }

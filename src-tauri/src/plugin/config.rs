@@ -4,7 +4,10 @@
 
 use std::{fs, io::ErrorKind, path::Path};
 
-use crate::{paths::MaestroPaths, store::AppStore};
+use crate::{
+    paths::MaestroPaths,
+    store::{AppStore, PluginEntry},
+};
 
 use super::{INSTALL_LOCK_POISONED, PLACED_CONFIG, PluginConfig, PluginService, write_placed_file};
 
@@ -17,7 +20,7 @@ impl PluginService {
         store: &AppStore,
         source: &str,
     ) -> Result<PluginConfig, String> {
-        let entry = store.read()?.plugin_by_source(source)?;
+        let entry = store.with_read(|s| s.plugin_by_source(source))?;
         read_plugin_config(&MaestroPaths::get().plugin_dir(&entry.id))
     }
 
@@ -39,9 +42,8 @@ impl PluginService {
             .map_err(|_| INSTALL_LOCK_POISONED)?;
 
         // 短锁内完成条目读取与校验：声明的真相源就是当前全局变量表。
-        let entry = {
-            let guard = store.read()?;
-            let variables = guard.variables_snapshot()?;
+        let entry = store.with_read(|guard| -> Result<PluginEntry, String> {
+            let variables = guard.variables_snapshot().map_err(String::from)?;
             for name in plugin_config.variables.keys() {
                 if !variables.contains_key(name) {
                     return Err(format!(
@@ -49,8 +51,8 @@ impl PluginService {
                     ));
                 }
             }
-            guard.plugin_by_source(source)?
-        };
+            guard.plugin_by_source(source).map_err(String::from)
+        })?;
 
         let plugin_dir = MaestroPaths::get().plugin_dir(&entry.id);
         fs::create_dir_all(&plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;

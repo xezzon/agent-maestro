@@ -291,20 +291,13 @@ impl PluginService {
         PlatformDirs::init_from_system()?;
 
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
-        let plugin_entries = {
-            let store_guard = match store.read() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    log::error!("failed to lock store during plugin startup");
-                    return Ok(());
-                }
-            };
-            match store_guard.list_plugins() {
-                Ok(plugin_entries) => plugin_entries,
-                Err(_) => {
-                    log::error!("failed to list plugins from store during plugin startup");
-                    return Ok(());
-                }
+        let plugin_entries = match store.with_read(|s| s.list_plugins()) {
+            Ok(plugin_entries) => plugin_entries,
+            Err(reason) => {
+                log::error!(
+                    "failed to read plugin entries from store during plugin startup: {reason}"
+                );
+                return Ok(());
             }
         };
         // 将插件装载进内存
@@ -354,7 +347,9 @@ impl PluginService {
 
     /// 当前注册表视图。
     pub(crate) fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
-        let plugin_entries = store.read()?.list_plugins().map_err(|_| "配置文件损坏")?;
+        let plugin_entries = store
+            .with_read(|s| s.list_plugins())
+            .map_err(|_| "配置文件损坏".to_owned())?;
         let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
         let plugin_view =
             |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| PluginView {

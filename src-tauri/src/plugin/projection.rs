@@ -7,7 +7,11 @@ use std::{
 };
 
 use crate::{
-    interpolate, paths::MaestroPaths, provider::Provider, store::AppStore, variables::Variables,
+    interpolate,
+    paths::MaestroPaths,
+    provider::Provider,
+    store::{AppStore, StoreError},
+    variables::Variables,
 };
 
 use super::{
@@ -25,10 +29,9 @@ impl PluginService {
         &self,
         store: &AppStore,
     ) -> Result<Vec<PluginApplyReport>, String> {
-        let (providers, variables) = {
-            let guard = store.read()?;
-            (guard.enabled_providers()?, guard.variables_snapshot()?)
-        };
+        let (providers, variables) = store.with_read(|s| -> Result<_, StoreError> {
+            Ok((s.enabled_providers()?, s.variables_snapshot()?))
+        })?;
         let reports = self.write_providers(&providers, &variables)?;
         // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
         // 在此按插件各记一条，失败原因与插件 id 一起留在日志里。

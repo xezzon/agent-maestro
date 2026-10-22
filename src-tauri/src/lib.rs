@@ -105,18 +105,13 @@ pub fn run() {
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
             service.startup(&app_store)?;
-            match app_store.read() {
-                Ok(guard) => match guard.config_snapshot() {
-                    Ok(config) => log::info!(
-                        "startup complete: {} providers, {} plugins",
-                        config.providers.len(),
-                        config.plugins.len()
-                    ),
-                    Err(err) => {
-                        log::error!("startup: config store unavailable: {}", String::from(err))
-                    }
-                },
-                Err(err) => log::error!("startup: {err}"),
+            match app_store.with_read(|guard| guard.config_snapshot()) {
+                Ok(config) => log::info!(
+                    "startup complete: {} providers, {} plugins",
+                    config.providers.len(),
+                    config.plugins.len()
+                ),
+                Err(err) => log::error!("startup: config store unavailable: {err}"),
             }
             Ok(())
         })

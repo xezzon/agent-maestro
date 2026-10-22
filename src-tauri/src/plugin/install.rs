@@ -48,8 +48,7 @@ impl PluginService {
 
         // 1. 来源即条目唯一身份：重复添加在发起下载之前拒绝。
         let duplicate = store
-            .read()?
-            .list_plugins()?
+            .with_read(|s| s.list_plugins())?
             .iter()
             .any(|plugin| plugin.source == source_text);
         if duplicate {
@@ -63,9 +62,7 @@ impl PluginService {
         //    `load` 顺带解析 `config_dir`，解析先于 validate() 与 save()。
         let loaded = self.fetch_placed(&parsed)?.load()?;
         // id 冲突预检：与写入时的复检问同一句规则（见 `Store::check_plugin_id_conflict`）。
-        store
-            .read()?
-            .check_plugin_id_conflict(&source_text, &loaded.manifest.id)?;
+        store.with_read(|s| s.check_plugin_id_conflict(&source_text, &loaded.manifest.id))?;
         // 链接期校验先于落位：wasm 不是组件或接口不兼容时不落位、不写条目。
         // 仅做字节反序列化与类型检查，不触发组件 init、不预开放真实配置目录；
         // 避免未授权的 init 代码在安装失败时仍写入 plugin config_dir。
@@ -79,7 +76,7 @@ impl PluginService {
             enabled: true,
             id: loaded.manifest.id.clone(),
         };
-        if let Err(e) = store.write()?.add_plugin(&entry) {
+        if let Err(e) = store.with_write(|s| s.add_plugin(&entry)) {
             // 条目写不进去，就不能留下注册表看不见的落位目录。
             // 清理失败时把残留路径一并回报：避免注释承诺与实际行为偏离。
             if let Err(uninstall_err) = loaded.plugin.uninstall() {
@@ -90,7 +87,7 @@ impl PluginService {
                     loaded.plugin.path().display()
                 ));
             }
-            return Err(e.into());
+            return Err(e);
         }
         self.entries
             .write()
@@ -183,7 +180,7 @@ impl PluginService {
             .lock()
             .map_err(|_| INSTALL_LOCK_POISONED)?;
 
-        let entry = store.read()?.plugin_by_source(source)?;
+        let entry = store.with_read(|s| s.plugin_by_source(source))?;
         if entry.enabled {
             return Ok(());
         }
@@ -192,17 +189,19 @@ impl PluginService {
         let placed = PlacedPlugin::from_plugin_dir(&MaestroPaths::get().plugin_dir(&entry.id))?;
         let loaded = placed.load()?;
 
-        let entry = {
-            let mut guard = store.write()?;
-            // 复检：条目可能已被移除，不得按过期条目继续写。
-            // install_lock 已让移除与本流程互斥，此处是纵深防御。
+        // 复检：条目可能已被移除，不得按过期条目继续写。install_lock 已让
+        // 移除与本流程互斥，此处是纵深防御。并发方已完成同样的切换时返回
+        // `None`（配置与注册表均已同步，直接成功）。
+        let entry = store.with_write(|guard| -> Result<Option<PluginEntry>, StoreError> {
             let entry = guard.plugin_by_source(source)?;
             if entry.enabled {
-                // 并发方已完成同样的切换：配置与注册表均已同步，直接成功。
-                return Ok(());
+                return Ok(None);
             }
             guard.set_plugin_enabled(source, true)?;
-            entry
+            Ok(Some(entry))
+        })?;
+        let Some(entry) = entry else {
+            return Ok(());
         };
 
         self.entries
@@ -224,21 +223,23 @@ impl PluginService {
             .lock()
             .map_err(|_| INSTALL_LOCK_POISONED)?;
 
-        let entry = store.read()?.plugin_by_source(source)?;
+        let entry = store.with_read(|s| s.plugin_by_source(source))?;
         if !entry.enabled {
             return Ok(());
         }
 
-        let entry = {
-            let mut guard = store.write()?;
-            // 复检：条目可能已被移除，不得按过期条目继续写。
+        // 复检：条目可能已被移除，不得按过期条目继续写。并发方已完成同样的
+        // 切换时返回 `None`（配置与注册表均已同步，直接成功）。
+        let entry = store.with_write(|guard| -> Result<Option<PluginEntry>, StoreError> {
             let entry = guard.plugin_by_source(source)?;
             if !entry.enabled {
-                // 并发方已完成同样的切换：配置与注册表均已同步，直接成功。
-                return Ok(());
+                return Ok(None);
             }
             guard.set_plugin_enabled(source, false)?;
-            entry
+            Ok(Some(entry))
+        })?;
+        let Some(entry) = entry else {
+            return Ok(());
         };
 
         let mut entries = self.entries.write().map_err(|_| REGISTRY_LOCK_POISONED)?;
@@ -269,22 +270,29 @@ impl PluginService {
             return Err(format!("内置插件不可移除：{source}"));
         }
 
-        let mut guard = store.write()?;
-        let entry = match guard.plugin_by_source(source) {
-            Ok(entry) => entry,
-            // 条目已不存在：上一次移除已连同落位目录一并删除，幂等成功。
-            Err(StoreError::MissingSource { .. }) => return Ok(()),
-            Err(e) => return Err(e.into()),
+        // 读条目、卸载注册表与删条目同处一个临界区（锁内读-改-写）；删落位
+        // 目录是 IO，**不**在锁内——锁纪律由 `with_write` 的作用域保证。
+        let entry = store.with_write(|guard| -> Result<Option<PluginEntry>, String> {
+            let entry = match guard.plugin_by_source(source) {
+                Ok(entry) => entry,
+                // 条目已不存在：上一次移除已连同落位目录一并删除，幂等成功。
+                Err(StoreError::MissingSource { .. }) => return Ok(None),
+                Err(e) => return Err(String::from(e)),
+            };
+
+            // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
+            self.entries
+                .write()
+                .map_err(|_| REGISTRY_LOCK_POISONED.to_owned())?
+                .remove(&entry.id);
+
+            // 2. 删配置条目（锁内读-改-写，与读条目同处一个临界区）。
+            guard.delete_plugin(source).map_err(String::from)?;
+            Ok(Some(entry))
+        })?;
+        let Some(entry) = entry else {
+            return Ok(());
         };
-
-        // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
-        self.entries
-            .write()
-            .map_err(|_| REGISTRY_LOCK_POISONED)?
-            .remove(&entry.id);
-
-        // 2. 删配置条目（锁内读-改-写，与读条目同处一个临界区）。
-        guard.delete_plugin(source)?;
 
         // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
         remove_placed_dir(&MaestroPaths::get().plugin_dir(&entry.id))
@@ -307,7 +315,7 @@ impl PluginService {
             .map_err(|_| INSTALL_LOCK_POISONED)?;
 
         // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
-        let entry = store.read()?.plugin_by_source(source)?;
+        let entry = store.with_read(|s| s.plugin_by_source(source))?;
 
         // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。
         //    `load` 顺带解析 `config_dir`，解析先于 validate() 与 save()。

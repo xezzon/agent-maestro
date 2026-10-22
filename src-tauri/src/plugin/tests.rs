@@ -463,12 +463,12 @@ fn remove_plugin_unloads_memory_deletes_entry_then_dir() {
     service.add_plugin(&store, MANIFEST_URL).unwrap();
     // 插件配置随插件存在（ADR 0018）：移除连落位目录带 config.json 一并删除。
     store
-        .write()
-        .unwrap()
-        .set_variables(BTreeMap::from([(
-            "HOST".to_owned(),
-            "api.example.com".to_owned(),
-        )]))
+        .with_write(|s| {
+            s.set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+        })
         .unwrap();
     service
         .set_config(
@@ -1110,9 +1110,7 @@ fn write_providers_merges_plugin_variable_overrides_per_plugin() {
     service.add_plugin(&store, MANIFEST_URL).unwrap();
     let variables = BTreeMap::from([("HOST".to_owned(), "api.example.com".to_owned())]);
     store
-        .write()
-        .unwrap()
-        .set_variables(variables.clone())
+        .with_write(|s| s.set_variables(variables.clone()))
         .unwrap();
 
     let providers = BTreeMap::from([(
@@ -1328,12 +1326,12 @@ fn set_plugin_config_persists_variables_and_form_and_reads_back() {
     let service = test_service(home.path());
     service.startup(&store).unwrap();
     store
-        .write()
-        .unwrap()
-        .set_variables(BTreeMap::from([(
-            "HOST".to_owned(),
-            "api.example.com".to_owned(),
-        )]))
+        .with_write(|s| {
+            s.set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+        })
         .unwrap();
 
     let config = PluginConfig {
@@ -1425,12 +1423,12 @@ fn set_plugin_config_survives_a_plugin_reload() {
     let service = test_service(home.path());
     service.startup(&store).unwrap();
     store
-        .write()
-        .unwrap()
-        .set_variables(BTreeMap::from([(
-            "HOST".to_owned(),
-            "api.example.com".to_owned(),
-        )]))
+        .with_write(|s| {
+            s.set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+        })
         .unwrap();
 
     let config = PluginConfig {

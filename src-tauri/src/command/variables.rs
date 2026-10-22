@@ -9,10 +9,7 @@ use crate::store::AppStore;
 pub(crate) fn list_variables(
     store: State<'_, AppStore>,
 ) -> Result<BTreeMap<String, String>, String> {
-    let outcome = (|| -> Result<BTreeMap<String, String>, String> {
-        let guard = store.read()?;
-        Ok(guard.variables_snapshot()?)
-    })();
+    let outcome = store.with_read(|s| s.variables_snapshot());
     log_outcome("list_variables", None, &outcome);
     outcome
 }
@@ -24,11 +21,7 @@ pub(crate) fn set_variables(
     store: State<'_, AppStore>,
     variables: BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let outcome = (|| {
-        let mut guard = store.write()?;
-        guard.set_variables(variables)?;
-        Ok(())
-    })();
+    let outcome = store.with_write(|s| s.set_variables(variables));
     log_outcome("set_variables", None, &outcome);
     outcome
 }
