@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { DeleteOutlined } from "@ant-design/icons";
-import { Button, Card, Flex, Form, Input, Typography, message } from "antd";
+import { Button, Card, Form, Input, Typography, message } from "antd";
 import { setVariables as saveVariables } from "../api/variables";
-import FormActions from "./FormActions";
+import VariableRowsForm from "./VariableRowsForm";
+import { globalVariableRules } from "./variableRules";
 
 /**
  * 全局变量表卡片（issue #90）：维护全局配置里的变量表（名 → 默认值，ADR 0015）。
@@ -52,45 +52,21 @@ export default function VariablesCard({ variables, onReload }) {
 }
 
 /**
- * 全局变量编辑表单：名与默认值必填；变量名仅允许 `[A-Za-z0-9_]+`（ADR 0014），
- * 同表内唯一（大小写敏感）。保存即整包替换全局变量表。
+ * 全局变量编辑表单：名与默认值必填；规则见 `variableRules`（名仅允许
+ * `[A-Za-z0-9_]+`，同表内唯一，大小写敏感）。保存即整包替换全局变量表。
  * @param {Object} param0
  * @param {import("../api/variables").Variables} param0.variables
  * @param {(refresh: boolean) => void} param0.onFinish
  */
 function VariablesForm({ variables, onFinish }) {
-  const NAME_PATTERN = /^[A-Za-z0-9_]+$/;
-  // 唯一性校验依赖当前表单内全部变量行的实时值。
-  const NAME_RULES = [
-    { required: true, message: "请输入变量名" },
-    { pattern: NAME_PATTERN, message: "变量名仅允许字母、数字和下划线" },
-    {
-      validator: (_, value) => {
-        if (!value) return Promise.resolve();
-        const occurrences = (form.getFieldValue("variables") ?? []).filter(
-          (variable) => variable?.name === value,
-        ).length;
-        return occurrences > 1
-          ? Promise.reject(new Error(`变量名「${value}」重复`))
-          : Promise.resolve();
-      },
-    },
-  ];
-  const VALUE_RULES = [
-    { required: true, message: "请输入默认值" },
-    { whitespace: true, message: "默认值不能为空白" },
-  ];
-
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
 
   // 命令成功即已落盘，由父组件刷新列表。
-  async function handleSubmit(values) {
+  async function handleSave(variableValues) {
     setSaving(true);
     try {
-      await saveVariables(Object.fromEntries(
-        values.variables.map((variable) => [variable.name, variable.value]),
-      ));
+      await saveVariables(variableValues);
       onFinish(true);
     } catch (err) {
       message.error(String(err));
@@ -99,57 +75,16 @@ function VariablesForm({ variables, onFinish }) {
     }
   }
 
-  return <Form
+  return <VariableRowsForm
     form={form}
-    layout="vertical"
-    initialValues={{
-      variables: Object.entries(variables).map(([name, value]) => ({ name, value })),
-    }}
-    onFinish={handleSubmit}
-  >
-    <Form.List name="variables">
-      {(fields, { add, remove }) => (
-        <div className="variable-rows">
-          {fields.map((field) => (
-            <Flex key={field.key} align="center" gap={8} className="variable-row">
-              <Flex vertical gap={8} className="variable-fields">
-                <Form.Item
-                  name={[field.name, "name"]}
-                  rules={NAME_RULES}
-                  className="variable-name"
-                >
-                  <Input placeholder="变量名，例如 GATEWAY_ID" />
-                </Form.Item>
-                <Form.Item
-                  name={[field.name, "value"]}
-                  rules={VALUE_RULES}
-                  className="variable-field"
-                >
-                  <Input placeholder="默认值（必填）" />
-                </Form.Item>
-              </Flex>
-              <Button
-                type="text"
-                danger
-                aria-label="删除变量"
-                title="删除"
-                icon={<DeleteOutlined />}
-                disabled={saving}
-                onClick={() => remove(field.name)}
-              />
-            </Flex>
-          ))}
-          <Button type="dashed" block disabled={saving} onClick={() => add()}>
-            添加变量
-          </Button>
-        </div>
-      )}
-    </Form.List>
-
-    <FormActions
-      saving={saving}
-      onCancel={() => onFinish(false)}
-      onSave={() => form.submit()}
-    />
-  </Form>;
+    initialRows={Object.entries(variables).map(([name, value]) => ({ name, value }))}
+    rules={globalVariableRules(form)}
+    nameInput={<Input placeholder="变量名，例如 GATEWAY_ID" />}
+    valuePlaceholder="默认值（必填）"
+    addLabel="添加变量"
+    removeLabel="删除变量"
+    saving={saving}
+    onSave={handleSave}
+    onCancel={() => onFinish(false)}
+  />;
 }

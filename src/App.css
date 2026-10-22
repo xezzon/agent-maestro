@@ -144,7 +144,7 @@ body {
   gap: 8px;
 }
 
-/* 全局变量表卡片（src/components/VariablesCard.jsx，issue #90） */
+/* 变量行表单（src/components/VariableRowsForm.jsx）：全局变量表与插件变量覆盖共用，issue #123 */
 .variable-rows {
   display: flex;
   flex-direction: column;
