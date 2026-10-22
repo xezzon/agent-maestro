@@ -153,13 +153,21 @@ impl PluginService {
     /// 禁用：先改配置条目，再把内存注册表换成 Disabled 态（保留 manifest 供列表展示）。
     /// 启用：先从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步注册表
     /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
-    /// 两次加锁之间条目可能被移除：写配置前按来源复检，条目已消失即报错。
+    ///
+    /// 整个流程在 `install_lock` 内独占：与添加、移除、重新加载互斥。
+    /// 否则移除可能插进「写配置条目」与「同步注册表」之间，留下条目与落位文件
+    /// 都已不在、注册表却仍记着已装载的僵尸项；重新加载则可能读走过期的
+    /// `enabled` 并按它覆盖注册表，与刚落盘的配置对不上。
+    /// 锁序 `install_lock` → store → entries，与其余安装类流程一致；
+    /// 本流程只读本机文件、不联网，临界区比含下载的流程短。
     pub(crate) fn set_enabled(
         &self,
         store: &AppStore,
         source: &str,
         enabled: bool,
     ) -> Result<(), String> {
+        let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
+
         let entry = store.read()?.plugin_by_source(source)?;
         if entry.enabled == enabled {
             return Ok(());
@@ -175,7 +183,8 @@ impl PluginService {
 
         let entry = {
             let mut guard = store.write()?;
-            // 复检：装载期间条目可能已被移除，不得按过期条目继续写。
+            // 复检：条目可能已被移除，不得按过期条目继续写。
+            // install_lock 已让移除与本流程互斥，此处是纵深防御。
             let entry = guard.plugin_by_source(source)?;
             if entry.enabled == enabled {
                 // 并发方已完成同样的切换：配置与注册表均已同步，直接成功。

@@ -350,6 +350,49 @@ fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
     );
 }
 
+/// 启停与添加/移除/重载共用 install_lock：安装类操作在途时，启停必须等待。
+/// 修复前的 race：移除可插进「写配置条目」与「同步注册表」之间，
+/// 留下条目与落位文件都已不在、注册表却仍记着已装载的僵尸项。
+#[test]
+fn set_enabled_waits_for_the_install_lock() {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    let home = temp_home();
+    let home_path = home.path().to_path_buf();
+    let store = Arc::new(store_at(home.path()));
+    let service = Arc::new(stub_service(home.path(), https_stub("pi2")));
+    service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+    // 主线程占住安装锁：模拟一次进行中的安装类操作。
+    let guard = service.install_lock.lock().unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let handle = {
+        let store = Arc::clone(&store);
+        let service = Arc::clone(&service);
+        let home = home_path.clone();
+        thread::spawn(move || {
+            // 子线程 thread_local 为空，需重新设置全局目录。
+            crate::plugin::testutil::setup_test_dirs(&home);
+            tx.send(service.set_enabled(&store, MANIFEST_URL, false))
+                .unwrap();
+        })
+    };
+
+    // 锁未释放前启停不得完成：抢到锁即说明它没与安装类流程互斥。
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "启停必须在 install_lock 上等待"
+    );
+
+    drop(guard);
+    handle.join().unwrap();
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .expect("锁释放后启停应当完成");
+    assert!(!snapshot(&store).plugins[0].enabled);
+}
+
 #[test]
 fn set_enabled_disables_and_re_enables_the_plugin() {
     let home = temp_home();
