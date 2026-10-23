@@ -32,6 +32,7 @@ export function pluginNavItems(plugins) {
  */
 export function currentPluginOf(plugins, current) {
   if (!current.startsWith(PLUGIN_KEY_PREFIX)) return null;
-  const source = current.slice(PLUGIN_KEY_PREFIX.length);
-  return plugins.find((plugin) => plugin.id === source) ?? null;
+  // 前缀之后是插件 id（`PluginView.id`），不是 `source`（`builtin:<id>`）。
+  const id = current.slice(PLUGIN_KEY_PREFIX.length);
+  return plugins.find((plugin) => plugin.id === id) ?? null;
 }
