@@ -6,14 +6,49 @@ use std::{
     sync::Arc,
 };
 
-use crate::{interpolate, paths::MaestroPaths, provider::Provider, store::Variables};
+use crate::{
+    interpolate,
+    paths::MaestroPaths,
+    provider::Provider,
+    store::{AppStore, StoreError},
+    variables::Variables,
+};
 
 use super::{
-    LoadedPlugin, PluginApplyReport, PluginService, PluginState, config::read_plugin_config,
-    execution::SkippedProvider,
+    ApplyStatus, LoadedPlugin, PluginApplyReport, PluginService, PluginState,
+    REGISTRY_LOCK_POISONED, config::read_plugin_config, execution::SkippedProvider,
 };
 
 impl PluginService {
+    /// 应用到工具：把 Provider 投影进各插件，返回逐插件结果。
+    ///
+    /// 禁用 Provider（`enabled == false`）在读取配置时即剔除（#94），不进入插值
+    /// 与写入。store 锁在读取 providers 后即释放，注册表锁也仅用于快照：
+    /// 插件执行时长不受应用控制，执行全程不持锁，不得阻塞其它命令。
+    pub(crate) fn apply_providers(
+        &self,
+        store: &AppStore,
+    ) -> Result<Vec<PluginApplyReport>, String> {
+        let (providers, variables) = store.with_read(|s| -> Result<_, StoreError> {
+            Ok((s.enabled_providers()?, s.variables_snapshot()?))
+        })?;
+        let reports = self.write_providers(&providers, &variables)?;
+        // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
+        // 在此按插件各记一条（ADR 0008：服务层的投影步骤打 DEBUG，默认级别
+        // 下不落盘；命令层的结果行按插件携带状态摘要）。
+        for report in &reports {
+            if report.status != ApplyStatus::Applied {
+                log::debug!(
+                    "plugin projection {status}: id={id} reason={reason}",
+                    status = report.status,
+                    id = report.id,
+                    reason = report.reason.as_deref().unwrap_or(""),
+                );
+            }
+        }
+        Ok(reports)
+    }
+
     /// 对注册表中的每个插件执行投影，返回逐插件报告：
     /// Loaded 交给 [`Self::project_one_plugin`]；Disabled 与 Error 态不执行投影。
     /// 单个插件的失败不影响其它插件，失败原因写入该插件的报告——即该插件整体
@@ -30,7 +65,7 @@ impl PluginService {
         variables: &Variables,
     ) -> Result<Vec<PluginApplyReport>, String> {
         let (mut reports, loaded) = {
-            let entries = self.entries.read().map_err(|_| "插件注册表不可用")?;
+            let entries = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
             let mut reports = Vec::with_capacity(entries.len());
             let mut loaded = Vec::new();
             for (id, state) in entries.iter() {
@@ -110,14 +145,14 @@ fn build_report(
     match projected {
         Ok((files, skipped)) => PluginApplyReport {
             id,
-            status: "applied",
+            status: ApplyStatus::Applied,
             files,
             skipped,
             reason: None,
         },
         Err(reason) => PluginApplyReport {
             id,
-            status: "failed",
+            status: ApplyStatus::Failed,
             files: Vec::new(),
             skipped: Vec::new(),
             reason: Some(reason),
@@ -129,7 +164,7 @@ fn build_report(
 fn skipped_report(id: String, reason: String) -> PluginApplyReport {
     PluginApplyReport {
         id,
-        status: "skipped",
+        status: ApplyStatus::Skipped,
         files: Vec::new(),
         skipped: Vec::new(),
         reason: Some(reason),

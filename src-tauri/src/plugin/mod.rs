@@ -30,6 +30,7 @@ pub(crate) mod testutil;
 
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt::Display,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -42,11 +43,12 @@ use wasmtime::Engine;
 use crate::{
     paths::MaestroPaths,
     plugin::builtin::BUILTINS,
-    store::{AppStore, Variables},
+    store::{AppStore, PluginEntry},
+    variables::Variables,
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
-use manifest::{Manifest, PlatformDirs, SourceKind, parse_placed};
+use manifest::{Manifest, PlatformDirs, PluginSource, parse_placed};
 
 /// 落位目录中的 manifest 文件名。
 const PLACED_MANIFEST: &str = "manifest.json";
@@ -56,6 +58,12 @@ const PLACED_WASM: &str = "plugin.wasm";
 /// 落位目录中的插件配置文件名（ADR 0018）：与两个宿主产物混居，逐文件覆盖的
 /// 落位替换与重载完全不碰它。
 const PLACED_CONFIG: &str = "config.json";
+
+/// 插件注册表锁被毒化时对用户可见的原因（其它操作持锁期间 panic）。
+const REGISTRY_LOCK_POISONED: &str = "插件注册表不可用";
+
+/// 安装锁被毒化时对用户可见的原因（其它安装类操作持锁期间 panic）。
+const INSTALL_LOCK_POISONED: &str = "插件安装锁不可用";
 
 struct PlacedPlugin {
     plugin_dir: PathBuf,
@@ -156,25 +164,6 @@ fn remove_placed_dir(plugin_dir: &Path) -> Result<(), String> {
     }
 }
 
-/// 插件条目（config.json 的 `plugins` 段，纯增量字段；见 issue #34）。
-///
-/// `source` 是条目唯一身份（内置 `builtin:<id>`、指向 manifest.json 的 https URL
-/// 或本机绝对路径），重复添加在 store 层拒绝；`id` 为插件 id，条目在安装成功后
-/// 写入（内置插件由启动时装载管线补写，与其余来源同一流程）——它是来源到落位
-/// 目录的唯一映射（见 ADR 0006）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PluginEntry {
-    pub(crate) source: String,
-    #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
-    #[serde(default)]
-    pub(crate) id: String,
-}
-
-fn default_true() -> bool {
-    true
-}
-
 /// 插件列表视图（命令返回给前端的形态）。
 #[derive(Debug, Serialize)]
 pub(crate) struct PluginView {
@@ -191,16 +180,62 @@ pub(crate) struct PluginView {
     error: Option<String>,
 }
 
+/// 逐插件投影的状态：已写入 / 失败 / 未执行。
+///
+/// 合法值由类型固定（此前是一根 `&'static str`，合法值只写在注释里），
+/// 线格式为小写词（`applied` / `failed` / `skipped`），前端按同一组词渲染标签。
+/// 序列化形态与线格式由本模块的测试钉住：改词即前端标签静默失效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ApplyStatus {
+    /// 已写入：插件执行成功并写出了文件。
+    Applied,
+    /// 失败：插件执行了但返回错误（不写任何文件）。
+    Failed,
+    /// 未执行投影：插件已禁用或装载失败。
+    Skipped,
+}
+
+impl Display for ApplyStatus {
+    /// 线格式词（与序列化形态一致）：日志摘要与序列化同源，不再各写一份。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ApplyStatus::Applied => "applied",
+            ApplyStatus::Failed => "failed",
+            ApplyStatus::Skipped => "skipped",
+        })
+    }
+}
+
 /// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
 #[derive(Debug, Serialize)]
 pub(crate) struct PluginApplyReport {
     pub(crate) id: String,
-    /// `applied` | `failed` | `skipped`（禁用或加载失败时不执行投影）。
-    pub(crate) status: &'static str,
+    /// 投影状态（`applied` / `failed` / `skipped`）。
+    pub(crate) status: ApplyStatus,
     /// 已写入文件的宿主绝对路径列表（插件返回相对 config_dir 的路径，由宿主拼接）。
     files: Vec<String>,
     skipped: Vec<SkippedProvider>,
     pub(crate) reason: Option<String>,
+}
+
+/// 逐插件状态摘要（`id:status` 逐项，空格分隔）：命令层结果行的识别参数。
+///
+/// 结果行按 ADR 0008 携带逐插件状态摘要——某个插件投影失败时，日志里要能
+/// 看出是哪一个。摘要由本模块产出（命令层只负责把它交给 `log_outcome`，
+/// 不自己拼串）。没有插件时返回 `None`：成功行不带上下文，不留尾随的
+/// 冒号与空格。
+pub(crate) fn apply_summary(reports: &[PluginApplyReport]) -> Option<String> {
+    if reports.is_empty() {
+        return None;
+    }
+    Some(
+        reports
+            .iter()
+            .map(|report| format!("{}:{}", report.id, report.status))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// 插件配置（落位目录 `<id>/config.json`，ADR 0018）：该插件对全局变量的覆盖
@@ -275,20 +310,13 @@ impl PluginService {
         PlatformDirs::init_from_system()?;
 
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
-        let plugin_entries = {
-            let store_guard = match store.read() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    log::error!("failed to lock store during plugin startup");
-                    return Ok(());
-                }
-            };
-            match store_guard.list_plugins() {
-                Ok(plugin_entries) => plugin_entries,
-                Err(_) => {
-                    log::error!("failed to list plugins from store during plugin startup");
-                    return Ok(());
-                }
+        let plugin_entries = match store.with_read(|s| s.list_plugins()) {
+            Ok(plugin_entries) => plugin_entries,
+            Err(reason) => {
+                log::error!(
+                    "failed to read plugin entries from store during plugin startup: {reason}"
+                );
+                return Ok(());
             }
         };
         // 将插件装载进内存
@@ -322,14 +350,14 @@ impl PluginService {
         }
 
         // 筛选出配置中缺失的内置插件：随后的安装管线会为其落位并补写条目。
-        let missing_builtins: Vec<&str> = BUILTINS
+        let missing_builtins: Vec<String> = BUILTINS
             .iter()
             .filter(|plugin| !plugin_entries.iter().any(|entry| entry.id == plugin.id))
-            .map(|plugin| plugin.source)
+            .map(|plugin| plugin.source())
             .collect();
 
         for builtin_source in missing_builtins {
-            if let Err(err) = self.add_plugin(store, builtin_source) {
+            if let Err(err) = self.add_plugin(store, &builtin_source) {
                 log::warn!("failed to install builtin plugin {builtin_source}: {err}");
             }
         }
@@ -338,20 +366,22 @@ impl PluginService {
 
     /// 当前注册表视图。
     pub(crate) fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
-        let plugin_entries = store.read()?.list_plugins().map_err(|_| "配置文件损坏")?;
-        let plugins = self.entries.read().map_err(|_| "插件注册表不可用")?;
+        // 配置损坏时把原因原样带出去（哪个文件坏了、坏在哪）——「配置文件损坏」
+        // 这四个字会让用户去猜是哪个文件。
+        let plugin_entries = store.with_read(|s| s.list_plugins())?;
+        let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
         let plugin_view =
-            |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| {
-                let source_kind = SourceKind::from_source(&entry.source);
-                PluginView {
-                    source: entry.source.clone(),
-                    builtin: source_kind == Some(SourceKind::Builtin),
-                    enabled: entry.enabled,
-                    id: entry.id.clone(),
-                    config_dir: manifest.map(|m| m.config_dir.display().to_string()),
-                    settings_schema: manifest.and_then(|m| m.settings_schema.clone()),
-                    error,
-                }
+            |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| PluginView {
+                source: entry.source.clone(),
+                builtin: matches!(
+                    PluginSource::parse(&entry.source),
+                    Some(PluginSource::Builtin(_))
+                ),
+                enabled: entry.enabled,
+                id: entry.id.clone(),
+                config_dir: manifest.map(|m| m.config_dir.display().to_string()),
+                settings_schema: manifest.and_then(|m| m.settings_schema.clone()),
+                error,
             };
         Ok(plugin_entries
             .iter()

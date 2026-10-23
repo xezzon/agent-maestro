@@ -2,7 +2,9 @@ import {
   ANTHROPIC_MESSAGES,
   OPENAI_COMPLETIONS,
   PROVIDER_PROTOCOLS,
-} from "../../api/provider";
+  configuredProtocols,
+} from "@/api/provider";
+import { urlRule } from "@/components/urlRules";
 import { MODE_CREATE, MODE_UPDATE } from "./formMode";
 
 /**
@@ -34,7 +36,7 @@ export const SLUG_RULES = [
  * 更新态的 slug 只读，不需要（也不应该）拿它去撞已有记录。
  * 缺 `providers` 时直接抛错：静默当成空列表会让冲突校验形同虚设。
  * @param {Object} deps
- * @param {import("../../api/provider").Provider[]} deps.providers 当前存在的 Provider
+ * @param {import("@/api/provider").Provider[]} deps.providers 当前存在的 Provider
  */
 export function slugUniquenessRule({ providers }) {
   if (!providers) {
@@ -53,32 +55,26 @@ export function slugUniquenessRule({ providers }) {
  * 两个协议槽位共用同一组规则。
  */
 export const BASE_URL_RULES = [
-  {
-    validator: (_, value) => {
-      if (!value) return Promise.resolve();
-      let url;
-      try {
-        url = new URL(value);
-      } catch {
-        return Promise.reject(new Error("Base URL 不是合法的 URL"));
-      }
-      if (url.protocol !== "http:" && url.protocol !== "https:") {
-        return Promise.reject(new Error("Base URL 仅支持 http(s) 地址"));
-      }
-      return Promise.resolve();
-    },
-  },
+  urlRule({
+    schemes: ["http:", "https:"],
+    invalidUrl: "Base URL 不是合法的 URL",
+    badScheme: "Base URL 仅支持 http(s) 地址",
+  }),
 ];
 
 /**
  * 已配置的协议：端点只填空白视为未配置，与写入前的归一化同一口径。
  * @param {{ getFieldValue: (name: any) => any }} form
- * @returns {import("../../api/provider").ProviderProtocol[]}
+ * @returns {import("@/api/provider").ProviderProtocol[]}
  */
 function filledProtocols(form) {
-  return PROVIDER_PROTOCOLS.filter(
-    (protocol) =>
-      (form.getFieldValue(["base_url", protocol]) ?? "").trim() !== "",
+  return configuredProtocols(
+    Object.fromEntries(
+      PROVIDER_PROTOCOLS.map((protocol) => [
+        protocol,
+        form.getFieldValue(["base_url", protocol]),
+      ]),
+    ),
   );
 }
 
@@ -185,7 +181,7 @@ export function modelIdRule(form) {
  * @param {Object} deps
  * @param {{ getFieldValue: (name: any) => any }} deps.form
  * @param {"create" | "update"} deps.mode
- * @param {import("../../api/provider").Provider[]=} deps.providers 创建态必传
+ * @param {import("@/api/provider").Provider[]=} deps.providers 创建态必传
  */
 export function providerFormRules({ form, mode, providers }) {
   if (mode !== MODE_CREATE && mode !== MODE_UPDATE) {

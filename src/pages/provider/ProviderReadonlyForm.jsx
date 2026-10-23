@@ -1,11 +1,9 @@
-import { useState } from "react";
 import {
   Badge,
   Button,
   Flex,
   Form,
   Input,
-  message,
   Popconfirm,
   Tag,
   Tooltip,
@@ -14,19 +12,11 @@ import {
 } from "antd";
 import { CheckCircleTwoTone } from "@ant-design/icons";
 import {
-  CAPABILITY_IMAGE_IN,
-  CAPABILITY_THINKING,
-  CAPABILITY_TOOL_USE,
+  CAPABILITY_LABELS,
   PROVIDER_PROTOCOLS,
   deleteProvider,
-} from "../../api/provider";
-
-/** 能力枚举串与界面标签：分组（能力 / 输入模态）只是排版，落盘仍是枚举串。 */
-const CAPABILITY_LABELS = {
-  [CAPABILITY_TOOL_USE]: "工具调用",
-  [CAPABILITY_IMAGE_IN]: "视觉",
-  [CAPABILITY_THINKING]: "推理",
-};
+} from "@/api/provider";
+import useAsyncAction from "@/hooks/useAsyncAction";
 
 /** 只读展示一项 token 上限：未设置就显示「未设置」，不编造默认值。 */
 function formatLimit(value) {
@@ -35,7 +25,7 @@ function formatLimit(value) {
 
 /**
  * @param {Object} param0
- * @param {import("../../api/provider").Provider} param0.provider
+ * @param {import("@/api/provider").Provider} param0.provider
  * @param {() => void} param0.afterDelete
  * @param {() => void} param0.onEdit
  */
@@ -44,20 +34,15 @@ export default function ProviderReadonlyForm({
   afterDelete,
   onEdit,
 }) {
-  const [deleting, setDeleting] = useState(false);
+  const [busy, run] = useAsyncAction();
   const { useToken } = theme;
   const { token } = useToken();
 
   async function handleDelete() {
-    setDeleting(true);
-    try {
+    await run(async () => {
       await deleteProvider(provider.slug);
       afterDelete();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setDeleting(false);
-    }
+    });
   }
 
   return (
@@ -147,7 +132,7 @@ export default function ProviderReadonlyForm({
         </ul>
       )}
       <div className="card-actions">
-        <Button disabled={deleting} onClick={onEdit}>
+        <Button disabled={busy} onClick={onEdit}>
           编辑
         </Button>
         <Popconfirm
@@ -158,7 +143,7 @@ export default function ProviderReadonlyForm({
           okButtonProps={{ danger: true }}
           onConfirm={handleDelete}
         >
-          <Button danger disabled={deleting}>
+          <Button danger disabled={busy}>
             删除
           </Button>
         </Popconfirm>

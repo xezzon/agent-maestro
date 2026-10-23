@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
-import { Form, message } from "antd";
-import { createProvider, updateProvider } from "../../api/provider";
-import FormActions from "../../components/FormActions";
+import { useMemo } from "react";
+import { Form } from "antd";
+import { createProvider, updateProvider } from "@/api/provider";
+import FormActions from "@/components/FormActions";
+import useAsyncAction from "@/hooks/useAsyncAction";
 import HeaderRows from "./HeaderRows";
 import ModelRows from "./ModelRows";
 import ProviderFields from "./ProviderFields";
@@ -23,8 +24,8 @@ const SAVE_BY_MODE = {
  *
  * @param {Object} param0
  * @param {"create" | "update"} param0.mode 创建态 slug 可编辑并校验冲突；更新态 slug 只读
- * @param {import("../../api/provider").Provider} param0.provider 初始值（创建态为空白 Provider）
- * @param {import("../../api/provider").Provider[]=} param0.providers 创建态必传：slug 冲突校验
+ * @param {import("@/api/provider").Provider} param0.provider 初始值（创建态为空白 Provider）
+ * @param {import("@/api/provider").Provider[]=} param0.providers 创建态必传：slug 冲突校验
  * @param {() => void} param0.onSaved 已落盘（调用方关表单并刷新列表）
  * @param {() => void} param0.onCancel 取消（不落盘）
  * @param {boolean=} param0.disabled 外部（状态开关）进行中时整体禁用表单
@@ -45,22 +46,22 @@ export default function ProviderForm({
     () => providerFormRules({ form, mode, providers }),
     [form, mode, providers],
   );
-  const [saving, setSaving] = useState(false);
+  const [saving, runSave] = useAsyncAction();
 
   // 命令成功即已落盘，由调用方刷新列表。
   // `enabled` 不是 Form.Item（开关独立于表单），提交值里没有它；
   // 显式与 provider 合并回传，避免缺字段被后端默认值静默重置为启用。
   // 校验失败由各 Form.Item 内联展示，不会走到这里；这里的错误都是命令调用失败。
+  // 收尾放 `finally`：`useAsyncAction` 当下不会 reject，但「永不 reject」是
+  // 跨模块前提，不能靠它保证开关不复位。
   async function handleFinish(values) {
-    setSaving(true);
     onBusyChange?.(true);
     try {
-      await SAVE_BY_MODE[mode]({ ...provider, ...values });
-      onSaved();
-    } catch (err) {
-      message.error(String(err));
+      await runSave(async () => {
+        await SAVE_BY_MODE[mode]({ ...provider, ...values });
+        onSaved();
+      });
     } finally {
-      setSaving(false);
       onBusyChange?.(false);
     }
   }

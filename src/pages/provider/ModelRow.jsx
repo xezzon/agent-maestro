@@ -10,9 +10,10 @@ import {
 } from "antd";
 import {
   CAPABILITY_IMAGE_IN,
+  CAPABILITY_LABELS,
   CAPABILITY_THINKING,
   CAPABILITY_TOOL_USE,
-} from "../../api/provider";
+} from "@/api/provider";
 
 /** token 上限的预设快捷值：K/M 按十进制（128K = 128000），留空即「未设置」。 */
 const LIMIT_PRESETS = [
@@ -33,13 +34,24 @@ const CAPABILITY_GROUPS = [
   {
     label: "能力",
     options: [
-      { value: CAPABILITY_TOOL_USE, label: "工具调用" },
-      { value: CAPABILITY_THINKING, label: "推理" },
+      {
+        value: CAPABILITY_TOOL_USE,
+        label: CAPABILITY_LABELS[CAPABILITY_TOOL_USE],
+      },
+      {
+        value: CAPABILITY_THINKING,
+        label: CAPABILITY_LABELS[CAPABILITY_THINKING],
+      },
     ],
   },
   {
     label: "输入模态",
-    options: [{ value: CAPABILITY_IMAGE_IN, label: "视觉" }],
+    options: [
+      {
+        value: CAPABILITY_IMAGE_IN,
+        label: CAPABILITY_LABELS[CAPABILITY_IMAGE_IN],
+      },
+    ],
   },
 ];
 

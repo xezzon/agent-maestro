@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ANTHROPIC_MESSAGES,
+  OPENAI_COMPLETIONS,
+  configuredProtocols,
   listProviders,
   normalizeEndpoints,
   normalizeModel,
@@ -345,5 +348,41 @@ describe("listProviders", () => {
 
     expect(bySlug.withKey.api_key_set, "已配凭证").toBe(true);
     expect(bySlug.withoutKey.api_key_set, "未配凭证").toBe(false);
+  });
+});
+
+describe("已配置的协议", () => {
+  it("只把填了端点的协议算作已配置", () => {
+    expect(configuredProtocols({})).toStrictEqual([]);
+    expect(configuredProtocols(undefined)).toStrictEqual([]);
+    expect(
+      configuredProtocols({ [OPENAI_COMPLETIONS]: "  " }),
+      "只有空白视为未配置",
+    ).toStrictEqual([]);
+    expect(
+      configuredProtocols({ [OPENAI_COMPLETIONS]: "https://api.example.com" }),
+    ).toStrictEqual([OPENAI_COMPLETIONS]);
+    expect(
+      configuredProtocols({
+        [OPENAI_COMPLETIONS]: "https://api.example.com",
+        [ANTHROPIC_MESSAGES]: "https://anthropic.example.com",
+      }),
+      "按协议声明序返回",
+    ).toStrictEqual([OPENAI_COMPLETIONS, ANTHROPIC_MESSAGES]);
+  });
+
+  it("写入负载只携带已配置的槽位", () => {
+    const payload = toProviderPayload(
+      makeProvider({
+        base_url: {
+          [OPENAI_COMPLETIONS]: "https://api.example.com",
+          [ANTHROPIC_MESSAGES]: "  ",
+        },
+      }),
+    );
+
+    expect(payload.base_url).toStrictEqual({
+      [OPENAI_COMPLETIONS]: "https://api.example.com",
+    });
   });
 });

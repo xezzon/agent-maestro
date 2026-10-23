@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::provider::Provider;
-use crate::store::Variables;
+use crate::variables::Variables;
 
 /// 对单个字符串值插值；失败原因即库报错（只含变量名与位置，不含值与密钥）。
 pub(crate) fn interpolate_value(template: &str, variables: &Variables) -> Result<String, String> {
@@ -46,8 +46,12 @@ pub fn interpolate_providers(
             Ok(provider) => {
                 projected.insert(slug.clone(), provider);
             }
-            Err((field, reason)) => {
-                return Err(interpolation_failure_message(slug, &field, &reason));
+            Err(error) => {
+                return Err(interpolation_failure_message(
+                    slug,
+                    &error.field,
+                    &error.reason,
+                ));
             }
         }
     }
@@ -57,7 +61,7 @@ pub fn interpolate_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::Protocol;
+    use crate::provider::{ApiKey, Protocol};
 
     fn vars(entries: &[(&str, &str)]) -> Variables {
         entries
@@ -205,7 +209,7 @@ mod tests {
                     Protocol::OpenaiCompletions,
                     "https://${HOST}/v1".to_owned(),
                 )]),
-                api_key: "sk-canary-do-not-leak".to_owned(),
+                api_key: ApiKey::new("sk-canary-do-not-leak".to_owned()),
                 ..Default::default()
             },
         );

@@ -5,6 +5,8 @@ mod paths;
 mod plugin;
 mod provider;
 mod store;
+mod test_global;
+mod variables;
 
 use command::{
     add_plugin, apply_providers, create_provider, delete_provider, get_plugin_config, list_plugins,
@@ -103,18 +105,13 @@ pub fn run() {
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
             service.startup(&app_store)?;
-            match app_store.read() {
-                Ok(guard) => match guard.get() {
-                    Ok(config) => log::info!(
-                        "startup complete: {} providers, {} plugins",
-                        config.providers.len(),
-                        config.plugins.len()
-                    ),
-                    Err(err) => {
-                        log::error!("startup: config store unavailable: {}", String::from(err))
-                    }
-                },
-                Err(err) => log::error!("startup: {err}"),
+            match app_store.with_read(|guard| guard.config_snapshot()) {
+                Ok(config) => log::info!(
+                    "startup complete: {} providers, {} plugins",
+                    config.providers.len(),
+                    config.plugins.len()
+                ),
+                Err(err) => log::error!("startup: config store unavailable: {err}"),
             }
             Ok(())
         })

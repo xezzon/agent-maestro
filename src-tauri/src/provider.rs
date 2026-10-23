@@ -66,7 +66,10 @@ impl ModelEntry {
             .as_deref()
             .map(|name| interpolate_value(name, variables))
             .transpose()
-            .map_err(|reason| ("display_name".to_owned(), reason))?;
+            .map_err(|reason| FieldError {
+                field: "display_name".to_owned(),
+                reason,
+            })?;
         Ok(ModelEntry {
             id: self.id.clone(),
             display_name,
@@ -121,6 +124,76 @@ where
     Ok(capabilities)
 }
 
+/// Provider 的凭证：未设置，或一段非空明文。
+///
+/// 「未设置」与「空串」不再混淆：空串不是合法的凭证值，本类型造不出那种
+/// 状态——命令层的缺省载荷与显式空串都归一为「未设置」，规则只在这里一份
+/// （此前散在领域层的 `is_empty()`、命令层的 `unwrap_or_default()` 与前端
+/// 的 `!!api_key` 三处）。
+///
+/// 脱敏是类型级隔离：[`Debug`] 只渲染「配没配」，绝不渲染明文——调用点不必
+/// 记得别打印，派生 `Debug` 的容器（如 `Config`）自动安全。
+#[derive(Clone, PartialEq, Eq, Default)]
+pub(crate) struct ApiKey {
+    /// 明文凭证；`None` 即未设置。
+    value: Option<String>,
+}
+
+impl ApiKey {
+    /// 未设置。
+    pub(crate) fn unset() -> Self {
+        Self { value: None }
+    }
+
+    /// 由一段明文构造：空串归一为未设置（空串不是合法凭证值）。
+    pub(crate) fn new(value: String) -> Self {
+        match value.is_empty() {
+            true => Self::unset(),
+            false => Self { value: Some(value) },
+        }
+    }
+
+    /// 由命令层的可选载荷构造：缺省与空串都读作未设置。
+    pub(crate) fn from_optional(value: Option<String>) -> Self {
+        match value {
+            Some(value) => Self::new(value),
+            None => Self::unset(),
+        }
+    }
+
+    /// 明文凭证；`None` 即未设置。
+    pub(crate) fn as_deref(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
+    /// 是否已配置凭证。
+    pub(crate) fn is_set(&self) -> bool {
+        self.value.is_some()
+    }
+}
+
+impl Debug for ApiKey {
+    /// 只渲染「配没配」，绝不渲染明文（ADR 0008：凭证绝不落盘进日志）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_set() { "<set>" } else { "<unset>" })
+    }
+}
+
+impl Serialize for ApiKey {
+    /// 存储形态不变：明文字符串，未设置即空串（ADR 0002 推迟采纳密钥链）。
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.value.as_deref().unwrap_or(""))
+    }
+}
+
+impl<'de> Deserialize<'de> for ApiKey {
+    /// 读入：空串即未设置（旧配置文件里未设置的凭证恒为空串）。
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(ApiKey::new(raw))
+    }
+}
+
 /// 一条 LLM API 接入；以 slug 为 key 存于 providers 之下（见 docs/GLOSSARY.md）。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Provider {
@@ -135,10 +208,10 @@ pub(crate) struct Provider {
     /// 选择是否有效（该协议是否真的配了端点）由投影侧裁定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) selected_protocol: Option<Protocol>,
-    /// 凭证以明文随配置文件落盘：空串即未设置（第一期不做密钥链，
-    /// ADR 0002 已修订为推迟采纳）。
+    /// 凭证以明文随配置文件落盘：未设置即空串（第一期不做密钥链，
+    /// ADR 0002 已修订为推迟采纳）。「未设置」由 [`ApiKey`] 独家表达。
     #[serde(default)]
-    pub(crate) api_key: String,
+    pub(crate) api_key: ApiKey,
     /// 跨协议、跨模型共享的自定义 HTTP header：**恒落盘**（缺省即 `{}`）。
     /// 键是标识符（与 api_key、模型 ID 同级，不参与插值）；值是配置值
     /// （参与宿主插值），且**可能含凭证**——Debug 只渲染键名，见下方手工 `Debug`。
@@ -164,7 +237,7 @@ impl Default for Provider {
             enabled: true,
             base_url: Endpoints::default(),
             selected_protocol: None,
-            api_key: String::new(),
+            api_key: ApiKey::default(),
             custom_header: BTreeMap::new(),
             models: Vec::new(),
         }
@@ -190,22 +263,29 @@ impl Debug for Provider {
             .field("enabled", &self.enabled)
             .field("base_url", &self.base_url)
             .field("selected_protocol", &self.selected_protocol)
-            .field(
-                "api_key",
-                &if self.api_key.is_empty() {
-                    "<unset>"
-                } else {
-                    "<set>"
-                },
-            )
+            // api_key 的脱敏由 `ApiKey` 自己负责：类型级隔离，调用点不必
+            // 记得别打印明文。
+            .field("api_key", &self.api_key)
             .field("custom_header", &HeaderKeyNames(&self.custom_header))
             .field("models", &self.models)
             .finish()
     }
 }
 
-/// 插值失败：（字段名, 库报错）。库报错只含变量名与位置，不含值与密钥。
-pub(crate) type FieldError = (String, String);
+/// 插值失败：字段名 + 原因。
+///
+/// 字段名指明插的是哪个字段（`base_url.openai-completions`、`models[1].display_name`），
+/// 原因取自库（只含变量名与位置，不含值与密钥）。
+///
+/// 用具名字段而非匿名元组：元组的两个位置写反了编译器不报错，解构点读到的
+/// 字段名与原因会悄悄对调。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FieldError {
+    /// 出错的字段名。
+    pub(crate) field: String,
+    /// 原因（库报错）。
+    pub(crate) reason: String,
+}
 
 impl Provider {
     /// 插值（docs/GLOSSARY.md「插值」/ ADR 0015）：把自身全部字符串值里的占位符
@@ -227,7 +307,8 @@ impl Provider {
         let mut base_url = BTreeMap::new();
         for (protocol, url) in &self.base_url {
             let field = format!("base_url.{protocol}");
-            let value = interpolate_value(url, variables).map_err(|reason| (field, reason))?;
+            let value =
+                interpolate_value(url, variables).map_err(|reason| FieldError { field, reason })?;
             base_url.insert(*protocol, value);
         }
         // api_key 原样保留，不参与插值。
@@ -236,16 +317,16 @@ impl Provider {
         let mut custom_header = BTreeMap::new();
         for (name, value) in &self.custom_header {
             let field = format!("custom_header.{name}");
-            let value = interpolate_value(value, variables).map_err(|reason| (field, reason))?;
+            let value = interpolate_value(value, variables)
+                .map_err(|reason| FieldError { field, reason })?;
             custom_header.insert(name.clone(), value);
         }
         let mut models = Vec::with_capacity(self.models.len());
         for (index, model) in self.models.iter().enumerate() {
-            models.push(
-                model
-                    .interpolate(variables)
-                    .map_err(|(field, reason)| (format!("models[{index}].{field}"), reason))?,
-            );
+            models.push(model.interpolate(variables).map_err(|error| FieldError {
+                field: format!("models[{index}].{}", error.field),
+                reason: error.reason,
+            })?);
         }
         Ok(Provider {
             // enabled 是状态而非配置值：原样透传，不参与插值。
@@ -295,7 +376,7 @@ mod tests {
             !parsed.base_url.contains_key(&Protocol::OpenaiCompletions),
             "未配置的协议键缺省"
         );
-        assert_eq!(parsed.api_key, "");
+        assert!(!parsed.api_key.is_set(), "api_key 未设置");
         assert!(parsed.models.is_empty());
         assert!(
             parsed.enabled,
@@ -387,7 +468,7 @@ mod tests {
                     "https://anthropic.example.com/v1".to_owned(),
                 ),
             ]),
-            api_key: "sk-test".to_owned(),
+            api_key: ApiKey::new("sk-test".to_owned()),
             custom_header: BTreeMap::from([
                 ("X-Gateway-Key".to_owned(), "gw-plain".to_owned()),
                 ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
@@ -478,7 +559,7 @@ mod tests {
             "api_key 恒为明文字符串，空串即未设置（见 #24 数据模型）"
         );
         let parsed: Provider = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed.api_key, "");
+        assert!(!parsed.api_key.is_set(), "api_key 未设置");
     }
 
     /// L1 红线（ADR 0008）：Debug 渲染绝不携带 api_key 明文，只保留
@@ -486,7 +567,7 @@ mod tests {
     #[test]
     fn debug_output_never_contains_the_api_key() {
         let set = Provider {
-            api_key: "sk-secret-canary-9f3a".to_owned(),
+            api_key: ApiKey::new("sk-secret-canary-9f3a".to_owned()),
             ..Provider::default()
         };
         let rendered = format!("{set:?}");
@@ -500,6 +581,48 @@ mod tests {
             format!("{:?}", Provider::default()).contains("<unset>"),
             "未配置渲染为 <unset>"
         );
+    }
+
+    /// 凭证的两种状态在类型上分清：未设置与已设置。空串不是合法凭证值——
+    /// 造不出那种状态（命令层的缺省载荷与显式空串都归一为未设置）。
+    #[test]
+    fn api_key_distinguishes_unset_from_set_and_never_holds_an_empty_string() {
+        assert!(!ApiKey::unset().is_set());
+        assert!(!ApiKey::default().is_set());
+        assert!(!ApiKey::new(String::new()).is_set());
+        assert!(!ApiKey::from_optional(None).is_set());
+        assert!(!ApiKey::from_optional(Some(String::new())).is_set());
+
+        let set = ApiKey::new("sk-test".to_owned());
+        assert!(set.is_set());
+        assert_eq!(set.as_deref(), Some("sk-test"));
+    }
+
+    /// 存储形态逐字未变：未设置恒为空串，已设置即明文；旧配置文件里的空串
+    /// 读作未设置（向后兼容，见 ADR 0002）。
+    #[test]
+    fn api_key_serializes_as_a_plain_string() {
+        assert_eq!(
+            serde_json::to_value(ApiKey::unset()).unwrap(),
+            serde_json::json!("")
+        );
+        assert_eq!(
+            serde_json::to_value(ApiKey::new("sk-test".to_owned())).unwrap(),
+            serde_json::json!("sk-test")
+        );
+
+        let legacy: ApiKey = serde_json::from_str(r#""""#).unwrap();
+        assert!(!legacy.is_set(), "旧配置文件里的空串读作未设置");
+    }
+
+    /// 脱敏是类型级隔离：凭证自己知道怎么渲染，`Debug` 绝不携带明文。
+    #[test]
+    fn api_key_debug_output_never_contains_the_plaintext() {
+        let set = ApiKey::new("sk-canary-4b7e".to_owned());
+        let rendered = format!("{set:?}");
+        assert!(!rendered.contains("sk-canary-4b7e"), "{rendered}");
+        assert!(rendered.contains("<set>"), "{rendered}");
+        assert!(format!("{:?}", ApiKey::unset()).contains("<unset>"));
     }
 
     fn vars(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -520,7 +643,7 @@ mod tests {
                 "https://${HOST}/v1".to_owned(),
             )]),
             selected_protocol: Some(Protocol::OpenaiCompletions),
-            api_key: "${KEY}".to_owned(),
+            api_key: ApiKey::new("${KEY}".to_owned()),
             // header 的值参与插值；键里的占位符是标识符，原样保留。
             custom_header: BTreeMap::from([
                 ("X-Gateway-Key".to_owned(), "${KEY}".to_owned()),
@@ -564,7 +687,11 @@ mod tests {
             Some(Protocol::OpenaiCompletions),
             "选择是枚举，原样投影、不参与插值"
         );
-        assert_eq!(projected.api_key, "${KEY}", "api_key 原样投影、不参与插值");
+        assert_eq!(
+            projected.api_key.as_deref(),
+            Some("${KEY}"),
+            "api_key 原样投影、不参与插值"
+        );
         assert_eq!(
             projected.custom_header["X-Gateway-Key"], "sk-x",
             "header 值是配置值，参与插值"
@@ -597,7 +724,7 @@ mod tests {
         assert_eq!(projected.models[1].id, "plain-id");
         assert_eq!(projected.models[1].display_name, None);
         // 原 Provider 不被修改。
-        assert_eq!(provider.api_key, "${KEY}");
+        assert_eq!(provider.api_key.as_deref(), Some("${KEY}"),);
     }
 
     /// 任一字段失败即整体失败：返回（字段名, 库报错），不含值与密钥。
@@ -611,10 +738,10 @@ mod tests {
             ..Provider::default()
         };
 
-        let (field, reason) = provider.interpolate(&vars(&[])).unwrap_err();
+        let error = provider.interpolate(&vars(&[])).unwrap_err();
 
-        assert_eq!(field, "base_url.openai-completions");
-        assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
+        assert_eq!(error.field, "base_url.openai-completions");
+        assert!(error.reason.contains("UNDEFINED_VAR"), "{}", error.reason);
     }
 
     /// custom_header 是记录的一部分且**恒落盘**：未设置时写出空映射，
@@ -629,7 +756,7 @@ mod tests {
 
         let legacy: Provider = serde_json::from_str(r#"{"api_key":"sk-legacy"}"#).unwrap();
         assert_eq!(legacy.custom_header, BTreeMap::new(), "旧配置读作空映射");
-        assert_eq!(legacy.api_key, "sk-legacy");
+        assert_eq!(legacy.api_key.as_deref(), Some("sk-legacy"),);
     }
 
     /// header 名按 BTreeMap 键序落盘（映射本无序，排序保证产物确定）。
@@ -686,10 +813,10 @@ mod tests {
             ..Provider::default()
         };
 
-        let (field, reason) = provider.interpolate(&vars(&[])).unwrap_err();
+        let error = provider.interpolate(&vars(&[])).unwrap_err();
 
-        assert_eq!(field, "custom_header.X-Gateway-Key");
-        assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
+        assert_eq!(error.field, "custom_header.X-Gateway-Key");
+        assert!(error.reason.contains("UNDEFINED_VAR"), "{}", error.reason);
     }
 
     /// 模型 display_name 插值失败：字段名带数组下标（条目的字段名以自身为根，
@@ -711,10 +838,10 @@ mod tests {
             ..Provider::default()
         };
 
-        let (field, reason) = provider.interpolate(&vars(&[])).unwrap_err();
+        let error = provider.interpolate(&vars(&[])).unwrap_err();
 
-        assert_eq!(field, "models[1].display_name");
-        assert!(reason.contains("UNDEFINED_VAR"), "{reason}");
+        assert_eq!(error.field, "models[1].display_name");
+        assert!(error.reason.contains("UNDEFINED_VAR"), "{}", error.reason);
     }
 
     /// limit 恒落盘（缺省即 `{}`），未设置的子项不落盘。

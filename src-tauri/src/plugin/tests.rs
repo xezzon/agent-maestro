@@ -8,8 +8,8 @@ use std::{
 };
 
 use super::{
-    PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport, PluginConfig,
-    PluginEntry, PluginState, PluginView, builtin,
+    ApplyStatus, PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport,
+    PluginConfig, PluginState, PluginView, apply_summary, builtin,
     manifest::is_https_url,
     projection::project_files,
     testutil::{
@@ -17,7 +17,11 @@ use super::{
         stub_service, temp_home, test_service,
     },
 };
-use crate::{paths::MaestroPaths, provider::Provider};
+use crate::{
+    paths::MaestroPaths,
+    provider::{ApiKey, Provider},
+    store::PluginEntry,
+};
 
 const MANIFEST_URL: &str = "https://example.com/releases/download/v1/manifest.json";
 const WASM_URL: &str = "https://example.com/releases/download/v1/plugin.wasm";
@@ -192,7 +196,7 @@ fn add_plugin_rejects_id_conflict_without_placing() {
         maestro_paths.config_path(),
         format!(
             r#"{{"version":1,"providers":{{}},"plugins":[{{"source":"{}","enabled":true,"id":"pi"}}]}}"#,
-            builtin::BUILTIN_PI_SOURCE
+            builtin::source_of(builtin::BUILTIN_PI_ID)
         ),
     )
     .unwrap();
@@ -374,8 +378,7 @@ fn set_enabled_waits_for_the_install_lock() {
         thread::spawn(move || {
             // 子线程 thread_local 为空，需重新设置全局目录。
             crate::plugin::testutil::setup_test_dirs(&home);
-            tx.send(service.set_enabled(&store, MANIFEST_URL, false))
-                .unwrap();
+            tx.send(service.disable(&store, MANIFEST_URL)).unwrap();
         })
     };
 
@@ -400,7 +403,7 @@ fn set_enabled_disables_and_re_enables_the_plugin() {
     let service = stub_service(home.path(), https_stub("pi2"));
     service.add_plugin(&store, MANIFEST_URL).unwrap();
 
-    service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+    service.disable(&store, MANIFEST_URL).unwrap();
     assert!(!snapshot(&store).plugins[0].enabled);
     let view = &service.list(&store).unwrap()[0];
     assert!(!view.enabled);
@@ -412,7 +415,7 @@ fn set_enabled_disables_and_re_enables_the_plugin() {
         view.config_dir
     );
 
-    service.set_enabled(&store, MANIFEST_URL, true).unwrap();
+    service.enable(&store, MANIFEST_URL).unwrap();
     assert!(snapshot(&store).plugins[0].enabled);
     let view = &service.list(&store).unwrap()[0];
     assert!(view.enabled);
@@ -427,10 +430,10 @@ fn set_enabled_enable_fails_without_touching_config_when_placed_files_are_missin
     let maestro_paths = MaestroPaths::get();
     let service = stub_service(home.path(), https_stub("pi2"));
     service.add_plugin(&store, MANIFEST_URL).unwrap();
-    service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+    service.disable(&store, MANIFEST_URL).unwrap();
     fs::remove_dir_all(maestro_paths.plugin_dir("pi2")).unwrap();
 
-    let err = service.set_enabled(&store, MANIFEST_URL, true).unwrap_err();
+    let err = service.enable(&store, MANIFEST_URL).unwrap_err();
 
     assert!(err.contains("读取"), "{err}");
     assert!(
@@ -446,9 +449,7 @@ fn set_enabled_unknown_source_is_rejected() {
     let store = store_at(home.path());
     let service = test_service(home.path());
 
-    let err = service
-        .set_enabled(&store, "builtin:ghost", true)
-        .unwrap_err();
+    let err = service.enable(&store, "builtin:ghost").unwrap_err();
 
     assert!(err.contains("插件条目不存在"), "{err}");
 }
@@ -462,12 +463,12 @@ fn remove_plugin_unloads_memory_deletes_entry_then_dir() {
     service.add_plugin(&store, MANIFEST_URL).unwrap();
     // 插件配置随插件存在（ADR 0018）：移除连落位目录带 config.json 一并删除。
     store
-        .write()
-        .unwrap()
-        .set_variables(BTreeMap::from([(
-            "HOST".to_owned(),
-            "api.example.com".to_owned(),
-        )]))
+        .with_write(|s| {
+            s.set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+        })
         .unwrap();
     service
         .set_config(
@@ -520,7 +521,7 @@ fn remove_plugin_rejects_builtin_source() {
     let service = test_service(home.path());
 
     let err = service
-        .remove_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+        .remove_plugin(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap_err();
 
     assert!(err.contains("内置插件不可移除"), "{err}");
@@ -687,7 +688,7 @@ fn reload_plugin_keeps_the_disabled_state_with_a_fresh_manifest() {
     let fetcher = Arc::new(https_stub("pi2"));
     let service = fetcher_service(home.path(), fetcher.clone());
     service.add_plugin(&store, MANIFEST_URL).unwrap();
-    service.set_enabled(&store, MANIFEST_URL, false).unwrap();
+    service.disable(&store, MANIFEST_URL).unwrap();
 
     fetcher.serve(MANIFEST_URL, manifest_json("pi2", "$HOME/.pi3", WASM_URL));
     service.reload_plugin(&store, MANIFEST_URL).unwrap();
@@ -743,7 +744,7 @@ fn reload_builtin_plugin_restores_a_corrupted_placed_copy() {
     fs::write(&placed_wasm, b"corrupted").unwrap();
 
     service
-        .reload_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+        .reload_plugin(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap();
 
     assert_eq!(
@@ -777,7 +778,7 @@ fn startup_installs_missing_builtin_plugin_like_any_other_source() {
         "启动时补装缺失的内置插件"
     );
     let pi = plugin_entry(&plugins, builtin::BUILTIN_PI_ID);
-    assert_eq!(pi.source, builtin::BUILTIN_PI_SOURCE);
+    assert_eq!(pi.source, builtin::source_of(builtin::BUILTIN_PI_ID));
     assert!(pi.enabled);
     assert!(
         maestro_paths
@@ -870,7 +871,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         .add_plugin(&store, "https://example.com/pi3/manifest.json")
         .unwrap();
     service
-        .set_enabled(&store, "https://example.com/pi3/manifest.json", false)
+        .disable(&store, "https://example.com/pi3/manifest.json")
         .unwrap();
 
     // 直接注入注册表的两种异常态：坏 wasm 的 Loaded 与显式 Error。
@@ -911,7 +912,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         .collect();
     assert_eq!(reports.len(), 4, "每个注册表条目一份报告");
     let applied = by_id.get("pi2").unwrap();
-    assert_eq!(applied.status, "applied");
+    assert_eq!(applied.status, ApplyStatus::Applied);
     assert_eq!(applied.files.len(), 1);
     let reported = Path::new(&applied.files[0]);
     assert!(
@@ -920,7 +921,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         applied.files
     );
     let failed = by_id.get("pibad").unwrap();
-    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.status, ApplyStatus::Failed);
     assert!(
         failed
             .reason
@@ -930,12 +931,20 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         "{:?}",
         failed.reason
     );
-    assert_eq!(by_id.get("pi3").unwrap().status, "skipped", "禁用态跳过");
+    assert_eq!(
+        by_id.get("pi3").unwrap().status,
+        ApplyStatus::Skipped,
+        "禁用态跳过"
+    );
     assert_eq!(
         by_id.get("pi3").unwrap().reason.as_deref(),
         Some("插件已禁用")
     );
-    assert_eq!(by_id.get("pierr").unwrap().status, "skipped", "错误态跳过");
+    assert_eq!(
+        by_id.get("pierr").unwrap().status,
+        ApplyStatus::Skipped,
+        "错误态跳过"
+    );
     assert_eq!(
         by_id.get("pierr").unwrap().reason.as_deref(),
         Some("配置已损坏")
@@ -959,7 +968,7 @@ fn projection_path_never_logs_the_api_key() {
     let providers = BTreeMap::from([(
         "gateway".to_owned(),
         Provider {
-            api_key: canary.to_owned(),
+            api_key: ApiKey::new(canary.to_owned()),
             base_url: BTreeMap::from([(
                 Protocol::OpenaiCompletions,
                 "https://api.example.com/v1".to_owned(),
@@ -972,7 +981,12 @@ fn projection_path_never_logs_the_api_key() {
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+    assert_eq!(
+        reports[0].status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports[0].reason
+    );
     let logs = window.lines();
     // 先证捕获窗口确实覆盖了这条真实投影路径，canary 断言才有意义。
     assert!(
@@ -1016,7 +1030,12 @@ fn projection_path_never_logs_custom_header_values() {
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+    assert_eq!(
+        reports[0].status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports[0].reason
+    );
     let logs = window.lines();
     // 先证捕获窗口确实覆盖了这条真实投影路径，canary 断言才有意义。
     assert!(
@@ -1048,7 +1067,7 @@ fn write_providers_interpolates_placeholders_before_projection() {
                 Protocol::OpenaiCompletions,
                 "https://${HOST}/v1".to_owned(),
             )]),
-            api_key: "sk-literal".to_owned(),
+            api_key: ApiKey::new("sk-literal".to_owned()),
             ..Provider::default()
         },
     )]);
@@ -1056,7 +1075,12 @@ fn write_providers_interpolates_placeholders_before_projection() {
 
     let reports = service.write_providers(&providers, &variables).unwrap();
 
-    assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+    assert_eq!(
+        reports[0].status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports[0].reason
+    );
     let written: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap(),
     )
@@ -1086,9 +1110,7 @@ fn write_providers_merges_plugin_variable_overrides_per_plugin() {
     service.add_plugin(&store, MANIFEST_URL).unwrap();
     let variables = BTreeMap::from([("HOST".to_owned(), "api.example.com".to_owned())]);
     store
-        .write()
-        .unwrap()
-        .set_variables(variables.clone())
+        .with_write(|s| s.set_variables(variables.clone()))
         .unwrap();
 
     let providers = BTreeMap::from([(
@@ -1120,8 +1142,18 @@ fn write_providers_merges_plugin_variable_overrides_per_plugin() {
         .iter()
         .map(|report| (report.id.as_str(), report))
         .collect();
-    assert_eq!(by_id.get("pi").unwrap().status, "applied", "{:?}", reports);
-    assert_eq!(by_id.get("pi2").unwrap().status, "applied", "{:?}", reports);
+    assert_eq!(
+        by_id.get("pi").unwrap().status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports
+    );
+    assert_eq!(
+        by_id.get("pi2").unwrap().status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports
+    );
     let written: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap(),
     )
@@ -1158,7 +1190,7 @@ fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_er
                 Protocol::OpenaiCompletions,
                 "https://${UNDEFINED_VAR}/v1".to_owned(),
             )]),
-            api_key: "sk-canary-must-not-leak".to_owned(),
+            api_key: ApiKey::new("sk-canary-must-not-leak".to_owned()),
             ..Provider::default()
         },
     )]);
@@ -1167,7 +1199,7 @@ fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_er
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    assert_eq!(reports[0].status, "failed");
+    assert_eq!(reports[0].status, ApplyStatus::Failed);
     let reason = reports[0].reason.as_deref().unwrap();
     assert!(reason.contains("gateway"), "{reason}");
     assert!(reason.contains("base_url.openai-completions"), "{reason}");
@@ -1215,7 +1247,7 @@ fn write_providers_fails_the_whole_plugin_when_its_plugin_config_is_corrupt() {
         .unwrap();
 
     let report = plugin_report(&reports, "pi");
-    assert_eq!(report.status, "failed");
+    assert_eq!(report.status, ApplyStatus::Failed);
     let reason = report.reason.as_deref().unwrap();
     assert!(reason.contains("插件配置已损坏"), "{reason}");
     assert!(
@@ -1256,7 +1288,12 @@ fn endpoint_that_interpolates_to_empty_counts_as_unconfigured() {
 
     let reports = service.write_providers(&providers, &variables).unwrap();
 
-    assert_eq!(reports[0].status, "applied", "{:?}", reports[0].reason);
+    assert_eq!(
+        reports[0].status,
+        ApplyStatus::Applied,
+        "{:?}",
+        reports[0].reason
+    );
     assert_eq!(reports[0].skipped.len(), 1);
     assert_eq!(reports[0].skipped[0].slug, "gateway");
     assert_eq!(reports[0].skipped[0].reason, "未配置任何协议端点");
@@ -1272,7 +1309,7 @@ fn get_plugin_config_returns_no_overrides_and_no_form_for_a_freshly_installed_pl
     service.startup(&store).unwrap();
 
     let config = service
-        .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+        .get_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap();
 
     assert!(config.variables.is_empty(), "{:?}", config.variables);
@@ -1289,12 +1326,12 @@ fn set_plugin_config_persists_variables_and_form_and_reads_back() {
     let service = test_service(home.path());
     service.startup(&store).unwrap();
     store
-        .write()
-        .unwrap()
-        .set_variables(BTreeMap::from([(
-            "HOST".to_owned(),
-            "api.example.com".to_owned(),
-        )]))
+        .with_write(|s| {
+            s.set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+        })
         .unwrap();
 
     let config = PluginConfig {
@@ -1302,7 +1339,7 @@ fn set_plugin_config_persists_variables_and_form_and_reads_back() {
         form: Some(serde_json::json!({"model": "kimi"})),
     };
     service
-        .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+        .set_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID), &config)
         .unwrap();
 
     let config_path = maestro_paths.plugin_dir("pi").join(PLACED_CONFIG);
@@ -1312,7 +1349,7 @@ fn set_plugin_config_persists_variables_and_form_and_reads_back() {
     assert_eq!(raw["form"]["model"], "kimi");
     assert_eq!(
         service
-            .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+            .get_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
             .unwrap(),
         config
     );
@@ -1333,7 +1370,7 @@ fn set_plugin_config_rejects_variables_not_declared_in_the_global_table() {
         form: None,
     };
     let err = service
-        .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+        .set_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID), &config)
         .unwrap_err();
 
     assert!(err.contains("未在全局变量表中声明"), "{err}");
@@ -1360,7 +1397,7 @@ fn get_plugin_config_reports_corruption_instead_of_degrading() {
     .unwrap();
 
     let err = service
-        .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+        .get_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap_err();
 
     assert!(err.contains("插件配置已损坏"), "{err}");
@@ -1386,12 +1423,12 @@ fn set_plugin_config_survives_a_plugin_reload() {
     let service = test_service(home.path());
     service.startup(&store).unwrap();
     store
-        .write()
-        .unwrap()
-        .set_variables(BTreeMap::from([(
-            "HOST".to_owned(),
-            "api.example.com".to_owned(),
-        )]))
+        .with_write(|s| {
+            s.set_variables(BTreeMap::from([(
+                "HOST".to_owned(),
+                "api.example.com".to_owned(),
+            )]))
+        })
         .unwrap();
 
     let config = PluginConfig {
@@ -1399,18 +1436,145 @@ fn set_plugin_config_survives_a_plugin_reload() {
         form: Some(serde_json::json!({"model": "kimi"})),
     };
     service
-        .set_config(&store, builtin::BUILTIN_PI_SOURCE, &config)
+        .set_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID), &config)
         .unwrap();
     service
-        .reload_plugin(&store, builtin::BUILTIN_PI_SOURCE)
+        .reload_plugin(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
         .unwrap();
 
     assert_eq!(
         service
-            .get_config(&store, builtin::BUILTIN_PI_SOURCE)
+            .get_config(&store, &builtin::source_of(builtin::BUILTIN_PI_ID))
             .unwrap(),
         config,
         "重载不冲掉经命令写入的插件配置"
+    );
+}
+
+/// `apply_providers`（服务层入口）：逐插件的失败不是命令的失败——命令整体成功，
+/// 但失败的那个插件要留下 id 与原因。服务层按插件各记一条，命令层只报整体成败。
+#[test]
+fn apply_providers_logs_each_failed_plugin_with_its_reason() {
+    let window = crate::logging::capture::capture_window();
+    let home = temp_home();
+    let store = store_at(home.path());
+    let service = test_service(home.path());
+    service.startup(&store).unwrap();
+    let maestro_paths = MaestroPaths::get();
+    fs::write(
+        maestro_paths.plugin_dir("pi").join(PLACED_CONFIG),
+        "{ not json",
+    )
+    .unwrap();
+
+    let reports = service.apply_providers(&store).unwrap();
+
+    let pi = reports
+        .iter()
+        .find(|report| report.id == "pi")
+        .expect("内置 pi 插件的报告");
+    assert_eq!(pi.status, ApplyStatus::Failed);
+    let logs = window.lines();
+    assert!(
+        logs.iter()
+            .any(|line| { line.contains("plugin projection failed") && line.contains("id=pi") }),
+        "逐插件的失败要按插件留下 id 与原因：{logs:?}"
+    );
+}
+
+/// 禁用 Provider 不参与投影（#94）：经服务层入口 `apply_providers` 走真实链路
+/// （`Store::enabled_providers` → 插值 → `write_providers`）。先投影一次留下
+/// 条目，再禁用并重新投影，该条目连同其 api_key 一并从 models.json 消失。
+///
+/// 这条用例此前住在命令层，自己调 `select_enabled_providers` 再把结果喂给
+/// `write_providers`——测的是那个自由函数，不是生产组合（复核的变异测试：
+/// 把 `enabled_providers` 改成放行禁用项，201 个测试仍全绿）。现在 provider
+/// 真存进 store，筛选规则被真正执行。
+#[test]
+fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
+    use crate::provider::Protocol;
+
+    let home = temp_home();
+    let store = store_at(home.path());
+    let service = test_service(home.path());
+    service.startup(&store).unwrap();
+
+    let provider = |url: &str, api_key: &str| Provider {
+        base_url: BTreeMap::from([(Protocol::OpenaiCompletions, url.to_owned())]),
+        api_key: ApiKey::new(api_key.to_owned()),
+        ..Provider::default()
+    };
+    store
+        .with_write(|s| {
+            s.create_provider(
+                "gateway",
+                provider("https://api.example.com/v1", "sk-gateway"),
+            )
+        })
+        .unwrap();
+    store
+        .with_write(|s| {
+            s.create_provider(
+                "offline",
+                provider(
+                    "https://offline.example.com/v1",
+                    "sk-disabled-must-not-leak",
+                ),
+            )
+        })
+        .unwrap();
+
+    let models_path = home.path().join(".pi").join("agent").join("models.json");
+    let first = service.apply_providers(&store).unwrap();
+    let pi = plugin_report(&first, "pi");
+    assert_eq!(pi.status, ApplyStatus::Applied, "{:?}", pi.reason);
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
+    assert_eq!(
+        written["providers"]["offline"]["baseUrl"], "https://offline.example.com/v1",
+        "禁用前该条目应已投影"
+    );
+
+    store
+        .with_write(|s| s.set_provider_enabled("offline", false))
+        .unwrap();
+    let second = service.apply_providers(&store).unwrap();
+    let pi = plugin_report(&second, "pi");
+    assert_eq!(pi.status, ApplyStatus::Applied, "{:?}", pi.reason);
+    let raw = fs::read_to_string(&models_path).unwrap();
+    let written: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        written["providers"]["gateway"]["baseUrl"], "https://api.example.com/v1",
+        "启用项照常投影"
+    );
+    assert!(
+        written["providers"].get("offline").is_none(),
+        "禁用后该条目应从投影中移除：{written}"
+    );
+    assert!(!raw.contains("sk-disabled-must-not-leak"));
+}
+
+/// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有
+/// 插件时不带上下文——成功行因此不留尾随的冒号与空格。
+#[test]
+fn apply_summary_lists_each_plugin_status() {
+    assert_eq!(apply_summary(&[]), None, "没有插件即没有上下文");
+
+    let report = |id: &str, status: ApplyStatus| PluginApplyReport {
+        id: id.to_owned(),
+        status,
+        files: Vec::new(),
+        skipped: Vec::new(),
+        reason: None,
+    };
+    let reports = vec![
+        report("pi", ApplyStatus::Applied),
+        report("claude-code", ApplyStatus::Failed),
+    ];
+
+    assert_eq!(
+        apply_summary(&reports).as_deref(),
+        Some("pi:applied claude-code:failed")
     );
 }
 
@@ -1433,5 +1597,25 @@ fn project_files_rejects_paths_outside_the_config_dir() {
     ] {
         let err = project_files(&config_dir, vec![file.to_owned()]).unwrap_err();
         assert!(err.contains(file), "{file} 应被拒绝：{err}");
+    }
+}
+
+/// 投影状态的线格式钉死：序列化与 `Display` 同为 `applied` / `failed` /
+/// `skipped` 三个小写词。前端按同一组词渲染标签（见
+/// `src/pages/provider/applyStatus.js`），改词即前端标签静默失效——
+/// 故这三条断言是跨端契约的护栏。
+#[test]
+fn apply_status_wire_values_are_pinned() {
+    for (status, wire) in [
+        (ApplyStatus::Applied, "applied"),
+        (ApplyStatus::Failed, "failed"),
+        (ApplyStatus::Skipped, "skipped"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!(wire),
+            "序列化形态与线格式词一致"
+        );
+        assert_eq!(status.to_string(), wire, "Display 与线格式词一致");
     }
 }

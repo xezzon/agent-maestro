@@ -1,4 +1,3 @@
-import { useState } from "react";
 import {
   Alert,
   Button,
@@ -17,29 +16,25 @@ import {
   reloadPlugin,
   removePlugin,
   setPluginEnabled,
-} from "../../api/plugins";
+} from "@/api/plugins";
+import useAsyncAction from "@/hooks/useAsyncAction";
 
 /**
  * @param {Object} param0
- * @param {import("../../api/plugins").PluginView} param0.plugin
+ * @param {import("@/api/plugins").PluginView} param0.plugin
  * @param {() => void} param0.onReload
  */
 export default function PluginCard({ plugin, onReload }) {
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = useAsyncAction();
 
-  async function run(action, successText) {
-    setBusy(true);
-    try {
+  async function handleAction(action, successText) {
+    await run(async () => {
       await action();
       if (successText) {
         message.success(successText);
       }
       onReload();
-    } catch (err) {
-      message.error(String(err));
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   /** 打开插件的写入目录：交给系统文件管理器，失败只提示不改页面状态。 */
@@ -62,7 +57,7 @@ export default function PluginCard({ plugin, onReload }) {
         unCheckedChildren="禁用"
         disabled={busy}
         onChange={(enabled) =>
-          run(() => setPluginEnabled(plugin.source, enabled))
+          handleAction(() => setPluginEnabled(plugin.source, enabled))
         }
       />
     </Flex>
@@ -109,7 +104,7 @@ export default function PluginCard({ plugin, onReload }) {
         <Button
           disabled={busy}
           onClick={() =>
-            run(() => reloadPlugin(plugin.source), "已重新加载插件")
+            handleAction(() => reloadPlugin(plugin.source), "已重新加载插件")
           }
         >
           重新加载
@@ -122,7 +117,7 @@ export default function PluginCard({ plugin, onReload }) {
             cancelText="取消"
             okButtonProps={{ danger: true }}
             onConfirm={() =>
-              run(() => removePlugin(plugin.source), "已移除插件")
+              handleAction(() => removePlugin(plugin.source), "已移除插件")
             }
           >
             <Button danger disabled={busy}>

@@ -5,36 +5,54 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-/// 插件来源种类：决定 `entry` 的校验规则（见 ADR 0006）。
+use crate::test_global::Global;
+
+#[cfg(test)]
+use crate::test_global::TestGuard;
+
+/// 插件来源：解析一次，随值传递。
 ///
-/// 三种来源共用同一份 manifest 校验，`entry` 语义按来源分列，
-/// 不做跨协议的统一解析。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceKind {
-    /// 内置于应用：wasm 内嵌，`entry` 不参与解析。
-    Builtin,
-    /// https 来源：指向正式发布的 manifest，`entry` 必须是 https URL。
-    Https,
+/// 来源字符串此前在四处各判一次（`SourceKind::from_source`），每次都重新解析
+/// 同一串文本；判出来的又只有「是哪种」而没有「是哪一条」。本类型把「是什么
+/// 来源、是哪一条」变成值的一部分：解析一次，之后只 match，不再重新判。
+///
+/// 三种来源共用同一份 manifest 校验，`entry` 语义按来源分列，不做跨协议的
+/// 统一解析（见 ADR 0006）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PluginSource {
+    /// 内置于应用：载荷是插件 id（`builtin:<id>`），wasm 内嵌，`entry` 不参与解析。
+    Builtin(String),
+    /// https 来源：载荷是 manifest.json 的 URL，`entry` 必须是 https URL。
+    Https(String),
     /// 本机指向 manifest.json 的绝对路径（本地调试回路）：`entry` 是 manifest
     /// 所在目录内的相对路径或 https URL。
-    File,
+    File(PathBuf),
 }
 
-impl SourceKind {
-    /// 来源字符串的种类：装载与生命周期操作按此分派。
+impl PluginSource {
+    /// 解析来源字符串；无法识别的形态返回 `None`。
     ///
-    /// `builtin:<id>` 内置于应用；https URL 为正式发布来源；本机绝对路径为 file 来源。
-    /// 其余形态（如旧配置残留的 Git 地址、相对路径）无法识别，返回 `None` 由调用方
-    /// 报「暂不支持的插件来源」。
-    pub(crate) fn from_source(source: &str) -> Option<Self> {
-        if source.starts_with(builtin::SOURCE_PREFIX) {
-            Some(SourceKind::Builtin)
+    /// `builtin:<id>` 内置于应用；https URL 为正式发布来源；本机绝对路径为
+    /// file 来源。其余形态（如旧配置残留的 Git 地址、相对路径）无法识别，
+    /// 返回 `None` 由调用方报「暂不支持的插件来源」。
+    pub(crate) fn parse(source: &str) -> Option<Self> {
+        if let Some(id) = source.strip_prefix(builtin::SOURCE_PREFIX) {
+            Some(Self::Builtin(id.to_owned()))
         } else if is_https_url(source) {
-            Some(SourceKind::Https)
+            Some(Self::Https(source.to_owned()))
         } else if Path::new(source).is_absolute() {
-            Some(SourceKind::File)
+            Some(Self::File(PathBuf::from(source)))
         } else {
             None
+        }
+    }
+
+    /// 来源字符串（条目的身份）：逐字还原成解析前的那一串。
+    pub(crate) fn source(&self) -> String {
+        match self {
+            Self::Builtin(id) => builtin::source_of(id),
+            Self::Https(url) => url.clone(),
+            Self::File(path) => path.to_string_lossy().into_owned(),
         }
     }
 }
@@ -61,14 +79,8 @@ pub(crate) struct Manifest {
     pub(crate) settings_schema: Option<serde_json::Value>,
 }
 
-#[cfg(not(test))]
-static PLATFORM_DIRS: std::sync::OnceLock<PlatformDirs> = std::sync::OnceLock::new();
-
-#[cfg(test)]
-thread_local! {
-    static PLATFORM_DIRS_TEST: std::cell::RefCell<Option<PlatformDirs>> =
-        const { std::cell::RefCell::new(None) };
-}
+/// 全局平台目录：生产期进程内一份，测试期每线程一份（见 [`crate::test_global`]）。
+static PLATFORM_DIRS: Global<PlatformDirs> = Global::new();
 
 /// 平台基准目录：`config_dir` 声明里的变量前缀在此解析为宿主绝对路径。
 #[derive(Clone, Debug)]
@@ -98,7 +110,7 @@ impl PlatformDirs {
                 dirs::data_dir().ok_or_else(|| missing("数据目录"))?,
                 dirs::data_local_dir().ok_or_else(|| missing("本地数据目录"))?,
             );
-            let _ = PLATFORM_DIRS.set(dirs);
+            PLATFORM_DIRS.set(dirs);
         }
         Ok(())
     }
@@ -120,39 +132,75 @@ impl PlatformDirs {
         }
     }
 
+    /// 全部基准目录都落在同一个根之下（测试用）。
+    ///
+    /// 五个基准目录此前由调用方各拼一遍——参数一多就容易拼错位（`new` 的
+    /// 五个参数全是 `PathBuf`，编译器分不清谁是谁）。派生规则收在这里一处。
+    #[cfg(test)]
+    pub(crate) fn from_root(root: &Path) -> Self {
+        Self {
+            home: root.to_path_buf(),
+            config: root.to_path_buf(),
+            config_local: root.to_path_buf(),
+            data: root.to_path_buf(),
+            data_local: root.to_path_buf(),
+        }
+    }
+
+    /// 主目录 + 平台约定的子目录（测试用）。
+    #[cfg(test)]
+    pub(crate) fn from_home(home: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            config: home.join(".config"),
+            config_local: home.join(".config"),
+            data: home.join(".local/share"),
+            data_local: home.join(".local/share"),
+        }
+    }
+
+    /// 五个基准目录互不相同（各自是根下的一个具名子目录）。
+    ///
+    /// 只有「验证每个平台变量映射到自己的基准目录」时需要这种布局——五个
+    /// 基准目录若指向同一处，就分不清哪个变量解析到了哪里。
+    #[cfg(test)]
+    pub(crate) fn distinct_under(root: &Path) -> Self {
+        Self::new(
+            root.join("home"),
+            root.join("config"),
+            root.join("config-local"),
+            root.join("data"),
+            root.join("data-local"),
+        )
+    }
+
     /// 获取全局实例（值语义，clone 成本极低）。
-    fn get() -> Self {
-        #[cfg(not(test))]
-        {
-            PLATFORM_DIRS
-                .get()
-                .expect("PlatformDirs 尚未初始化：调用 PlatformDirs::init_from_system 后再使用")
-                .clone()
-        }
-        #[cfg(test)]
-        {
-            PLATFORM_DIRS_TEST.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .expect("测试线程未设置 PlatformDirs：使用 PlatformDirs::test_guard 或 PlatformDirs::init_test")
-                    .clone()
-            })
-        }
+    ///
+    /// 尚未初始化即报错，不 panic：本方法在 manifest 的反序列化路径上（经
+    /// [`resolve_config_dir`]），而 manifest 可能来自网络——解析一份不可信的
+    /// manifest 绝不能让进程崩掉。
+    fn get() -> Result<Self, String> {
+        PLATFORM_DIRS.get().ok_or_else(|| {
+            #[cfg(not(test))]
+            let message = "PlatformDirs 尚未初始化：调用 PlatformDirs::init_from_system 后再使用";
+            #[cfg(test)]
+            let message =
+                "测试线程未设置 PlatformDirs：使用 PlatformDirs::test_guard 或 PlatformDirs::init_test";
+            message.to_owned()
+        })
     }
 
     /// 测试辅助：设置当前线程的全局实例，返回 RAII guard（drop 时自动清理）。
     #[cfg(test)]
-    pub(crate) fn test_guard(dirs: Self) -> PlatformDirsTestGuard {
+    pub(crate) fn test_guard(dirs: Self) -> TestGuard<PlatformDirs> {
         Self::init_test(dirs);
-        PlatformDirsTestGuard
+        TestGuard::new(&PLATFORM_DIRS)
     }
 
     /// 测试辅助：直接设置当前线程的全局实例（不返回 guard，自行管理生命周期）。
     #[cfg(test)]
     pub(crate) fn init_test(dirs: Self) {
-        PLATFORM_DIRS_TEST.with(|cell| {
-            *cell.borrow_mut() = Some(dirs);
-        });
+        PLATFORM_DIRS.set(dirs);
     }
 
     /// 变量前缀 → 基准目录；不支持的变量返回 `None`。
@@ -168,20 +216,6 @@ impl PlatformDirs {
     }
 }
 
-/// 测试 RAII guard：drop 时清理当前线程的 [`PlatformDirs`] 全局实例。
-#[cfg(test)]
-#[must_use = "guard 被立即 drop 将立即清理全局实例"]
-pub(crate) struct PlatformDirsTestGuard;
-
-#[cfg(test)]
-impl Drop for PlatformDirsTestGuard {
-    fn drop(&mut self) {
-        PLATFORM_DIRS_TEST.with(|cell| {
-            *cell.borrow_mut() = None;
-        });
-    }
-}
-
 /// 声明里支持的平台变量前缀（错误信息里列给用户）。
 const SUPPORTED_VARIABLES: &str =
     "$HOME、$XDG_CONFIG_HOME、$LOCAL_APP_CONFIG、$XDG_DATA_HOME、$LOCAL_APP_DATA";
@@ -192,13 +226,13 @@ const SUPPORTED_VARIABLES: &str =
 /// `~/.pi` 与 `$HOME/.pi` 同义。目录不存在时先创建（沿用既有行为），
 /// 随后按规范化的真实路径确认没有逃出该变量对应的基准目录。
 ///
-/// 使用全局 [`PlatformDirs`] 解析，调用前需先初始化。返回的原因不带层级前缀，
-/// 由 [`parse_placed`] 统一补上「manifest.json 不合法：」。
+/// 使用全局 [`PlatformDirs`] 解析，调用前需先初始化（未初始化即报错，不 panic）。
+/// 返回的原因不带层级前缀，由 [`parse_placed`] 统一补上「manifest.json 不合法：」。
 fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
     if declared.is_empty() {
         return Err("config_dir 未配置".to_owned());
     }
-    let dirs = PlatformDirs::get();
+    let dirs = PlatformDirs::get()?;
     // 绝对路径以 `/` 开头，切出的变量前缀为空：与「没有 `/`」一样报前缀错误，
     // 不要误报成「不支持的变量」。
     let (variable, relative) = declared
@@ -335,13 +369,13 @@ pub(crate) fn parse_placed(value: &str) -> Result<Manifest, String> {
     Ok(manifest)
 }
 
-/// 解析并校验 manifest 文本；`entry` 的约束按来源种类分列。
-pub(crate) fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, String> {
+/// 解析并校验 manifest 文本；`entry` 的约束按来源分列。
+pub(crate) fn parse_manifest(source: &PluginSource, text: &str) -> Result<Manifest, String> {
     let manifest = parse_placed(text)?;
-    match kind {
+    match source {
         // wasm 内嵌于二进制，entry 不参与解析。
-        SourceKind::Builtin => {}
-        SourceKind::Https => {
+        PluginSource::Builtin(_) => {}
+        PluginSource::Https(_) => {
             if !is_https_url(&manifest.entry) {
                 return Err(format!(
                     "manifest.json 不合法：https 来源的 entry「{}」必须是 https URL",
@@ -352,7 +386,7 @@ pub(crate) fn parse_manifest(kind: SourceKind, text: &str) -> Result<Manifest, S
         // file 来源的 entry 是插件目录内的相对路径或 https URL（回源到网络）：绝对路径、
         // `..` 上跳与其他 scheme（http://、file://…）一律拒绝，防止外置 manifest 借 entry
         // 读取插件根目录之外的文件。
-        SourceKind::File => {
+        PluginSource::File(_) => {
             if !is_https_url(&manifest.entry) {
                 let entry_path = Path::new(&manifest.entry);
                 if entry_path.is_absolute()
@@ -409,16 +443,25 @@ mod tests {
         crate::plugin::testutil::manifest_json(id, "$HOME/.x", entry)
     }
 
+    /// file 来源（测试里最常用的一种）。
+    fn file_source() -> PluginSource {
+        PluginSource::File(PathBuf::from("/tmp/plugin/manifest.json"))
+    }
+
+    /// https 来源。
+    fn https_source() -> PluginSource {
+        PluginSource::Https("https://example.com/manifest.json".to_owned())
+    }
+
+    /// 内置来源。
+    fn builtin_source() -> PluginSource {
+        PluginSource::Builtin("pi".to_owned())
+    }
+
     /// 注入的基准目录：全部落在临时目录下，不读真实环境。
-    fn platform_dirs_setup() -> (tempfile::TempDir, PlatformDirsTestGuard) {
+    fn platform_dirs_setup() -> (tempfile::TempDir, TestGuard<PlatformDirs>) {
         let root = tempfile::tempdir().unwrap();
-        let dirs = PlatformDirs::new(
-            root.path().join("home"),
-            root.path().join("config"),
-            root.path().join("config-local"),
-            root.path().join("data"),
-            root.path().join("data-local"),
-        );
+        let dirs = PlatformDirs::distinct_under(root.path());
         let guard = PlatformDirs::test_guard(dirs);
         (root, guard)
     }
@@ -427,7 +470,7 @@ mod tests {
     fn manifest_parses_required_fields_and_tolerates_unknown_fields() {
         let (root, _g) = platform_dirs_setup();
         let manifest = parse_manifest(
-            SourceKind::File,
+            &file_source(),
             r#"{
                 "id": "pi",
                 "name": "Pi",
@@ -467,12 +510,12 @@ mod tests {
                 }}"#
         );
 
-        let manifest = parse_manifest(SourceKind::File, &text).unwrap();
+        let manifest = parse_manifest(&file_source(), &text).unwrap();
         assert_eq!(manifest.settings_schema, Some(schema));
 
         let without_schema = manifest_text("zed", "p.wasm");
         assert_eq!(
-            parse_manifest(SourceKind::File, &without_schema)
+            parse_manifest(&file_source(), &without_schema)
                 .unwrap()
                 .settings_schema,
             None
@@ -497,7 +540,7 @@ mod tests {
                 }
             }"#;
 
-        let manifest = parse_manifest(SourceKind::File, text).unwrap();
+        let manifest = parse_manifest(&file_source(), text).unwrap();
 
         let serialized = serde_json::to_string(&manifest.settings_schema).unwrap();
         assert!(
@@ -509,7 +552,7 @@ mod tests {
     #[test]
     fn manifest_missing_required_field_is_rejected() {
         // 只留 id：其余必填缺失即加载失败。
-        let err = parse_manifest(SourceKind::File, r#"{"id": "pi"}"#).unwrap_err();
+        let err = parse_manifest(&file_source(), r#"{"id": "pi"}"#).unwrap_err();
         assert!(err.contains("manifest.json 不合法"), "{err}");
     }
 
@@ -518,7 +561,7 @@ mod tests {
         let (_root, _g) = platform_dirs_setup();
         for id in ["Pi", "1pi", "-pi", "pi.", "pi 中文", ""] {
             let text = manifest_text(id, "p.wasm");
-            let err = parse_manifest(SourceKind::File, &text).unwrap_err();
+            let err = parse_manifest(&file_source(), &text).unwrap_err();
             assert!(err.contains("id"), "id {id:?} 应被拒绝：{err}");
         }
     }
@@ -590,7 +633,7 @@ mod tests {
             "entry": "plugin.wasm"
         }"#;
 
-        let manifest = parse_manifest(SourceKind::File, text).unwrap();
+        let manifest = parse_manifest(&file_source(), text).unwrap();
 
         let canonical_root = root.path().canonicalize().unwrap();
         let expected = match std::env::consts::OS {
@@ -647,7 +690,7 @@ mod tests {
         ] {
             let text =
                 format!(r#"{{ "id": "zed", "config_dir": {config_dir}, "entry": "p.wasm" }}"#);
-            let err = parse_manifest(SourceKind::File, &text).unwrap_err();
+            let err = parse_manifest(&file_source(), &text).unwrap_err();
             assert!(
                 err.contains(expected),
                 "config_dir {config_dir} 应被拒绝：{err}"
@@ -732,10 +775,10 @@ mod tests {
     fn file_entry_must_be_a_relative_path_without_parent_dir() {
         let (_root, _g) = platform_dirs_setup();
         for entry in ["/etc/passwd", "../outside.wasm", "sub/../../outside.wasm"] {
-            let err = parse_manifest(SourceKind::File, &manifest_text("pi", entry)).unwrap_err();
+            let err = parse_manifest(&file_source(), &manifest_text("pi", entry)).unwrap_err();
             assert!(err.contains("entry"), "entry {entry:?} 应被拒绝：{err}");
         }
-        assert!(parse_manifest(SourceKind::File, &manifest_text("pi", "sub/p.wasm")).is_ok());
+        assert!(parse_manifest(&file_source(), &manifest_text("pi", "sub/p.wasm")).is_ok());
     }
 
     #[test]
@@ -748,7 +791,7 @@ mod tests {
             "file:///tmp/plugin.wasm",
             "ftp://example.com/plugin.wasm",
         ] {
-            let err = parse_manifest(SourceKind::File, &manifest_text("pi", entry)).unwrap_err();
+            let err = parse_manifest(&file_source(), &manifest_text("pi", entry)).unwrap_err();
             assert!(
                 err.contains("entry") && err.contains("https URL"),
                 "entry {entry:?} 应被拒绝：{err}"
@@ -756,7 +799,7 @@ mod tests {
         }
         assert!(
             parse_manifest(
-                SourceKind::File,
+                &file_source(),
                 &manifest_text("pi", "https://example.com/plugin.wasm")
             )
             .is_ok(),
@@ -769,7 +812,7 @@ mod tests {
         let (_root, _g) = platform_dirs_setup();
         let ok = manifest_text("pi", "https://example.com/releases/download/v1/plugin.wasm");
         assert_eq!(
-            parse_manifest(SourceKind::Https, &ok).unwrap().entry,
+            parse_manifest(&https_source(), &ok).unwrap().entry,
             "https://example.com/releases/download/v1/plugin.wasm"
         );
 
@@ -781,7 +824,7 @@ mod tests {
             "http://example.com/plugin.wasm",
             "https://",
         ] {
-            let err = parse_manifest(SourceKind::Https, &manifest_text("pi", entry)).unwrap_err();
+            let err = parse_manifest(&https_source(), &manifest_text("pi", entry)).unwrap_err();
             assert!(
                 err.contains("https URL"),
                 "https 来源的 entry {entry:?} 应被拒绝：{err}"
@@ -794,7 +837,7 @@ mod tests {
         let (_root, _g) = platform_dirs_setup();
         // 内置插件的 wasm 内嵌于二进制，entry 不参与解析。
         let text = manifest_text("pi", "target/wasm32-wasip2/release/maestro_plugin_pi.wasm");
-        assert!(parse_manifest(SourceKind::Builtin, &text).is_ok());
+        assert!(parse_manifest(&builtin_source(), &text).is_ok());
     }
 
     #[test]
@@ -808,26 +851,44 @@ mod tests {
         assert!(!is_https_url(""));
     }
 
+    /// 来源解析一次即成为值：解析出来的载荷与来源字符串逐字对应。
     #[test]
-    fn source_kind_is_derived_from_the_source_string() {
+    fn plugin_source_is_parsed_from_the_source_string() {
         assert_eq!(
-            SourceKind::from_source("builtin:pi"),
-            Some(SourceKind::Builtin)
+            PluginSource::parse("builtin:pi"),
+            Some(PluginSource::Builtin("pi".to_owned()))
         );
         assert_eq!(
-            SourceKind::from_source("https://example.com/manifest.json"),
-            Some(SourceKind::Https)
+            PluginSource::parse("https://example.com/manifest.json"),
+            Some(PluginSource::Https(
+                "https://example.com/manifest.json".to_owned()
+            ))
         );
         assert_eq!(
-            SourceKind::from_source("/tmp/plugin/manifest.json"),
-            Some(SourceKind::File)
+            PluginSource::parse("/tmp/plugin/manifest.json"),
+            Some(PluginSource::File(PathBuf::from(
+                "/tmp/plugin/manifest.json"
+            )))
         );
         assert_eq!(
-            SourceKind::from_source("plugins/pi/manifest.json"),
+            PluginSource::parse("plugins/pi/manifest.json"),
             None,
             "相对路径不是合法的来源身份（file 来源要求本机绝对路径）"
         );
-        assert_eq!(SourceKind::from_source("file:///tmp/manifest.json"), None);
-        assert_eq!(SourceKind::from_source("git://example.com/x.git"), None);
+        assert_eq!(PluginSource::parse("file:///tmp/manifest.json"), None);
+        assert_eq!(PluginSource::parse("git://example.com/x.git"), None);
+    }
+
+    /// 来源字符串逐字还原：它是条目的身份，不能因为解析而变形。
+    #[test]
+    fn plugin_source_round_trips_to_the_original_string() {
+        for source in [
+            "builtin:pi",
+            "https://example.com/manifest.json",
+            "/tmp/plugin/manifest.json",
+        ] {
+            let parsed = PluginSource::parse(source).unwrap();
+            assert_eq!(parsed.source(), source);
+        }
     }
 }

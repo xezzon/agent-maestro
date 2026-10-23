@@ -35,7 +35,7 @@ impl Guest for MyPlugin {
 export!(MyPlugin);
 ```
 
-`Provider` 携带其全部已配置端点（`endpoints`，宿主按固定顺序收集，openai-completions 在前）与投影选择（`selected-protocol`，可能缺失或指向未配置的协议），由插件裁定投影用哪个端点（选择有效→用它，否则唯一端点，多端点且无有效选择→优先 openai-completions，见 ADR 0016）；零端点的 Provider 不进入 `providers` 列表（宿主在投影结果中报告跳过）。写入应落在 manifest 声明的 `config_dir`——宿主把它预开放为 "/"，是插件唯一可写面；建议 tmp + rename 原子写。
+`Provider` 携带其全部已配置端点（`endpoints`，宿主按固定顺序收集，openai-completions 在前）与投影选择（`selected-protocol`，可能缺失或指向未配置的协议），由插件裁定投影用哪个端点（选择有效→用它，否则唯一端点，多端点且无有效选择→优先 openai-completions，见 ADR 0016）；零端点的 Provider 不进入 `providers` 列表（宿主在投影结果中报告跳过）。写入应落在 manifest 声明的 `config_dir`——宿主把它预开放为 "/"，是插件唯一可写面；用 SDK 的 `write_atomic` 做 tmp + rename 原子写。
 
 投影期间的非致命事件可经 `logger` import（v1.1.0 起）上报应用日志，语义要点见[过程性日志（logger import）](#过程性日志logger-import)。
 
@@ -182,9 +182,19 @@ manifest 是插件 metadata 的唯一来源：宿主直接读插件根目录的 
 
 宿主为每次插件调用设置 fuel 预算（`1 << 30` 量级的指令数）。死循环或超量计算会耗尽 fuel 被中断，该插件本次投影走失败路径并在报告中给出原因，不会卡死应用。正常投影任务的量级远小于该预算；但不要在插件里做重计算——等待 I/O 不消耗 fuel。预算不可配置。
 
-### 原子写建议
+### 原子写
 
-落盘建议 **tmp + rename**：先写临时文件、成功后改名替换目标文件，这样 I/O 失败不会留下半截配置文件。参考实现 [`plugins/pi/src/lib.rs`](../../plugins/pi/src/lib.rs) 就是整文件重写：先写 `agent/models.json.tmp`，再 rename 为 `agent/models.json`，保证已删除的 Provider 不残留。
+落盘用 **tmp + rename**：先写临时文件、成功后改名替换目标文件，这样 I/O 失败不会留下半截配置文件。SDK 自带一份实现（2.2.1 起），不必自己拼：
+
+```rust
+use maestro_plugin_sdk::write_atomic;
+
+write_atomic("agent", "models.json", json.as_bytes())?;
+```
+
+`dir` 是 `config_dir` 下的子目录（`""` 即根），`name` 是文件名；临时文件与目标文件同目录，故 rename 必为原子替换。**`dir` 需已存在**——`write_atomic` 不建目录，写子目录前插件自己 `create_dir_all`（pi 投影前就建 `agent/`）。临时文件名逐次唯一，因此并发写同一目标也不会互相覆盖半截内容。失败原因带相对路径，可直接作为投影错误返回。
+
+参考实现 [`plugins/pi/src/lib.rs`](../../plugins/pi/src/lib.rs) 就是整文件重写：先 `create_dir_all("agent")`，再用 `write_atomic("agent", "models.json", …)` 整份替换，保证已删除的 Provider 不残留。
 
 ## 过程性日志（logger import）
 
@@ -250,7 +260,7 @@ if let Some(form) = get_config() {
 内置 pi 插件 [`plugins/pi`](../../plugins/pi) 是参考实现，兼作本 crate 的常驻契约回归，建议对照它实现：
 
 - **整文件重写**目标配置，而非增量修改，避免已删除条目残留。
-- 写入用 **tmp + rename**。
+- 写入用 **tmp + rename**（SDK 的 `write_atomic`）。
 - `write-providers` 返回**相对 `config_dir`** 的已写入文件路径列表。
 - 错误以人类可读字符串返回，会显示在投影报告中。
 

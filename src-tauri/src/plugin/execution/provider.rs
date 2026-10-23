@@ -51,8 +51,8 @@ fn to_wit_provider(
             endpoints,
             // 选择原样透传，可能缺失或指向未配置的协议：由插件裁定（ADR 0016）。
             selected_protocol: provider.selected_protocol.map(to_wit_protocol),
-            // 空 api_key 由宿主归一化为 none（见 WIT 合同）。
-            api_key: (!provider.api_key.is_empty()).then(|| provider.api_key.clone()),
+            // 未设置凭证即 none（见 WIT 合同）：归一规则由 `ApiKey` 持有。
+            api_key: provider.api_key.as_deref().map(str::to_owned),
             custom_header: collect_custom_headers(provider),
             models: provider.models.iter().map(to_wit_model).collect(),
         });
@@ -129,7 +129,7 @@ mod tests {
     use super::*;
     use crate::plugin::execution::testutil::loaded_plugin;
     use crate::plugin::{build_engine, builtin};
-    use crate::provider::{Endpoints, ModelLimit};
+    use crate::provider::{ApiKey, Endpoints, ModelLimit};
 
     fn provider(openai: Option<&str>, anthropic: Option<&str>) -> Provider {
         let mut base_url = Endpoints::default();
@@ -208,7 +208,7 @@ mod tests {
                     Protocol::AnthropicMessages,
                     "https://anthropic.example.com".to_owned(),
                 )]),
-                api_key: "sk-plain".to_owned(),
+                api_key: ApiKey::new("sk-plain".to_owned()),
                 models: vec![
                     ModelEntry {
                         id: "claude-sonnet".to_owned(),
@@ -352,7 +352,7 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                api_key: "sk-plain".to_owned(),
+                api_key: ApiKey::new("sk-plain".to_owned()),
                 ..provider(Some("https://api.example.com/v1"), None)
             },
         )]);
@@ -442,7 +442,7 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                api_key: "sk-plain".to_owned(),
+                api_key: ApiKey::new("sk-plain".to_owned()),
                 custom_header: BTreeMap::from([(
                     "X-Gateway-Key".to_owned(),
                     "gw-plain".to_owned(),
@@ -494,7 +494,7 @@ mod tests {
 
         // 宿主插值：`\$` 还原为字面 `$`，值里仍是一个普通 `$`。
         let interpolated =
-            crate::interpolate::interpolate_providers(&raw, &crate::store::Variables::new())
+            crate::interpolate::interpolate_providers(&raw, &crate::variables::Variables::new())
                 .unwrap();
         assert_eq!(
             interpolated["gateway"].custom_header["X-Gateway-Key"],
@@ -534,7 +534,7 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                api_key: "a$b".to_owned(),
+                api_key: ApiKey::new("a$b".to_owned()),
                 custom_header: BTreeMap::from([
                     ("X-Mid".to_owned(), "a$b".to_owned()),
                     ("X-Bang".to_owned(), "!secret".to_owned()),

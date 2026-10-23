@@ -7,9 +7,9 @@ import PluginVariablesForm from "./PluginVariablesForm";
  * 数据由所在页面持有（config + 全局变量表 variables + onReload）。
  * 只读态展示覆盖项；编辑态按名增删改，保存整包写回插件配置（form 段原样带回）。
  * @param {Object} param0
- * @param {import("../../api/plugins").PluginView} param0.plugin
- * @param {import("../../api/plugins").PluginConfig} param0.config
- * @param {import("../../api/variables").Variables} param0.variables
+ * @param {import("@/api/plugins").PluginView} param0.plugin
+ * @param {import("@/api/plugins").PluginConfig} param0.config
+ * @param {import("@/api/variables").Variables} param0.variables
  * @param {() => void} param0.onReload
  */
 export default function PluginVariablesCard({

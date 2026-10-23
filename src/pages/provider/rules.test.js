@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OPENAI_COMPLETIONS } from "../../api/provider";
+import { OPENAI_COMPLETIONS } from "@/api/provider";
 import { MODE_CREATE, MODE_UPDATE } from "./formMode.js";
 import {
   BASE_URL_RULES,

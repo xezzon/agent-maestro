@@ -6,7 +6,7 @@ use tauri::State;
 use super::log_outcome;
 use crate::{
     AppStore,
-    provider::{Endpoints, ModelEntry, Protocol, Provider},
+    provider::{ApiKey, Endpoints, ModelEntry, Protocol, Provider},
 };
 
 /// 创建/更新 Provider 命令的 `provider` 负载；slug 亦随负载传入。
@@ -38,14 +38,14 @@ pub(crate) struct ProviderRequest {
 }
 
 /// 映射为配置记录：slug 由调用方另行取出作存储 key，不进记录本体；
-/// `api_key` 缺省即落空串（未设置）。
+/// `api_key` 缺省或空串即未设置（归一规则由 [`ApiKey`] 独家持有）。
 impl From<ProviderRequest> for Provider {
     fn from(val: ProviderRequest) -> Self {
         Provider {
             enabled: val.enabled,
             base_url: val.base_url,
             selected_protocol: val.selected_protocol,
-            api_key: val.api_key.unwrap_or_default(),
+            api_key: ApiKey::from_optional(val.api_key),
             custom_header: val.custom_header,
             models: val.models,
         }
@@ -56,12 +56,8 @@ impl From<ProviderRequest> for Provider {
 pub(crate) fn list_providers(
     store: State<'_, AppStore>,
 ) -> Result<BTreeMap<String, Provider>, String> {
-    let outcome = (|| -> Result<BTreeMap<String, Provider>, String> {
-        let guard = store.read()?;
-        let config = guard.get()?;
-        Ok(config.providers.clone())
-    })();
-    log_outcome("list_providers", "", &outcome);
+    let outcome = store.with_read(|s| s.providers_snapshot());
+    log_outcome("list_providers", None, &outcome);
     outcome
 }
 
@@ -72,11 +68,8 @@ pub(crate) fn create_provider(
 ) -> Result<(), String> {
     let slug = provider.slug.clone();
     let context = format!("slug={slug}");
-    let outcome = (move || {
-        let mut guard = store.write()?;
-        Ok(guard.create_provider(&slug, provider.into())?)
-    })();
-    log_outcome("create_provider", &context, &outcome);
+    let outcome = store.with_write(move |s| s.create_provider(&slug, provider.into()));
+    log_outcome("create_provider", Some(&context), &outcome);
     outcome
 }
 
@@ -87,23 +80,15 @@ pub(crate) fn update_provider(
 ) -> Result<(), String> {
     let slug = provider.slug.clone();
     let context = format!("slug={slug}");
-    let outcome = (move || {
-        let mut guard = store.write()?;
-        guard.update_provider(&slug, provider.into())?;
-        Ok(())
-    })();
-    log_outcome("update_provider", &context, &outcome);
+    let outcome = store.with_write(move |s| s.update_provider(&slug, provider.into()).map(|_| ()));
+    log_outcome("update_provider", Some(&context), &outcome);
     outcome
 }
 
 #[tauri::command]
 pub(crate) fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
-    let outcome = (|| {
-        let mut guard = store.write()?;
-        guard.delete_provider(&slug)?;
-        Ok(())
-    })();
-    log_outcome("delete_provider", &format!("slug={slug}"), &outcome);
+    let outcome = store.with_write(|s| s.delete_provider(&slug).map(|_| ()));
+    log_outcome("delete_provider", Some(&format!("slug={slug}")), &outcome);
     outcome
 }
 
@@ -115,12 +100,8 @@ pub(crate) fn set_provider_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let context = format!("slug={slug} enabled={enabled}");
-    let outcome = (|| {
-        let mut guard = store.write()?;
-        guard.set_provider_enabled(&slug, enabled)?;
-        Ok(())
-    })();
-    log_outcome("set_provider_enabled", &context, &outcome);
+    let outcome = store.with_write(|s| s.set_provider_enabled(&slug, enabled));
+    log_outcome("set_provider_enabled", Some(&context), &outcome);
     outcome
 }
 
@@ -302,13 +283,14 @@ mod tests {
         let with_value: Provider = parse(r#"{"api_key":"sk-test"}"#).unwrap().into();
 
         assert_eq!(
-            with_value.api_key, "sk-test",
+            with_value.api_key.as_deref(),
+            Some("sk-test"),
             "凭证以明文直接进入配置记录（第一期不做密钥链）"
         );
 
         let without_api_key: Provider = parse(r#"{}"#).unwrap().into();
 
-        assert_eq!(without_api_key.api_key, "", "api_key 缺省即未设置（空串）");
+        assert!(!without_api_key.api_key.is_set(), "api_key 缺省即未设置");
     }
 
     #[test]
@@ -316,13 +298,14 @@ mod tests {
         let with_value: Provider = parse(r#"{"api_key":"sk-new"}"#).unwrap().into();
 
         assert_eq!(
-            with_value.api_key, "sk-new",
+            with_value.api_key.as_deref(),
+            Some("sk-new"),
             "更新整包替换，api_key 携带现值或新值（明文）"
         );
 
         let without_api_key: Provider = parse(r#"{}"#).unwrap().into();
 
-        assert_eq!(without_api_key.api_key, "", "api_key 缺省即未设置（空串）");
+        assert!(!without_api_key.api_key.is_set(), "api_key 缺省即未设置");
     }
 
     /// `enabled` 缺省即启用：旧 payload 或漏字段不会被静默禁用。

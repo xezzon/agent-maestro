@@ -4,9 +4,12 @@
 
 use std::{fs, io::ErrorKind, path::Path};
 
-use crate::{paths::MaestroPaths, store::AppStore};
+use crate::{
+    paths::MaestroPaths,
+    store::{AppStore, PluginEntry},
+};
 
-use super::{PLACED_CONFIG, PluginConfig, PluginService, write_placed_file};
+use super::{INSTALL_LOCK_POISONED, PLACED_CONFIG, PluginConfig, PluginService, write_placed_file};
 
 impl PluginService {
     /// 读取插件配置（ADR 0018）：返回该插件对全局变量的覆盖与私有表单数据。
@@ -17,7 +20,7 @@ impl PluginService {
         store: &AppStore,
         source: &str,
     ) -> Result<PluginConfig, String> {
-        let entry = store.read()?.plugin_by_source(source)?;
+        let entry = store.with_read(|s| s.plugin_by_source(source))?;
         read_plugin_config(&MaestroPaths::get().plugin_dir(&entry.id))
     }
 
@@ -33,21 +36,23 @@ impl PluginService {
         source: &str,
         plugin_config: &PluginConfig,
     ) -> Result<(), String> {
-        let _install_guard = self.install_lock.lock().map_err(|_| "插件安装锁不可用")?;
+        let _install_guard = self
+            .install_lock
+            .lock()
+            .map_err(|_| INSTALL_LOCK_POISONED)?;
 
         // 短锁内完成条目读取与校验：声明的真相源就是当前全局变量表。
-        let entry = {
-            let guard = store.read()?;
-            let config = guard.get()?;
+        let entry = store.with_read(|guard| -> Result<PluginEntry, String> {
+            let variables = guard.variables_snapshot().map_err(String::from)?;
             for name in plugin_config.variables.keys() {
-                if !config.variables.contains_key(name) {
+                if !variables.contains_key(name) {
                     return Err(format!(
                         "变量「{name}」未在全局变量表中声明，不能写入插件配置的覆盖项；请先在全局变量中声明。"
                     ));
                 }
             }
-            guard.plugin_by_source(source)?
-        };
+            guard.plugin_by_source(source).map_err(String::from)
+        })?;
 
         let plugin_dir = MaestroPaths::get().plugin_dir(&entry.id);
         fs::create_dir_all(&plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;

@@ -2,8 +2,8 @@ import { Form, Input, Radio } from "antd";
 import {
   ANTHROPIC_MESSAGES,
   OPENAI_COMPLETIONS,
-  PROVIDER_PROTOCOLS,
-} from "../../api/provider";
+  configuredProtocols,
+} from "@/api/provider";
 import { MODE_UPDATE } from "./formMode";
 
 /** 投影协议的可选项：标签带协议名，界面上一眼对得上落盘值。 */
@@ -30,9 +30,7 @@ const PROTOCOL_OPTIONS = [
  */
 export default function ProviderFields({ mode, rules }) {
   const endpoints = Form.useWatch("base_url") ?? {};
-  const filledProtocols = PROVIDER_PROTOCOLS.filter(
-    (protocol) => (endpoints[protocol] ?? "").trim() !== "",
-  );
+  const filledProtocols = configuredProtocols(endpoints);
 
   return (
     <>
