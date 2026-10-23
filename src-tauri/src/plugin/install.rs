@@ -171,10 +171,31 @@ impl PluginService {
         ))
     }
 
-    /// 启用插件条目。
+    /// 启用插件条目：与禁用同一条流程（见 [`Self::set_enabled`]），只是方向不同。
     ///
     /// 先从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步注册表
     /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
+    pub(crate) fn enable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        self.set_enabled(store, source, true)
+    }
+
+    /// 禁用插件条目：与启用同一条流程（见 [`Self::set_enabled`]），只是方向不同。
+    ///
+    /// 先改配置条目，再把内存注册表换成 Disabled 态（保留描述供列表展示）。
+    pub(crate) fn disable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        self.set_enabled(store, source, false)
+    }
+
+    /// 启用/禁用插件条目：两条流程的共同实现。
+    ///
+    /// 两条流程此前是两个逐段同构的方法（取锁 → 读条目 → 已处于目标态即返回
+    /// → `with_write` 复检并写条目 → 更新注册表），差异只有「装载 vs 降级」与
+    /// 方向。锁语义改一次要改两遍，且两处必须保持对称——现合成一处，差异
+    /// 只在两处分叉：启用要先装载，禁用只降级注册表。
+    ///
+    /// 启用：从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步
+    /// 注册表——装载失败即报错且不改配置，修复落位文件后重新启用即可。
+    /// 禁用：先改配置条目，再把内存注册表换成 Disabled 态（保留描述供列表展示）。
     ///
     /// 整个流程在 `install_lock` 内独占：与添加、移除、重新加载互斥。
     /// 否则移除可能插进「写配置条目」与「同步注册表」之间，留下条目与落位文件
@@ -182,80 +203,57 @@ impl PluginService {
     /// `enabled` 并按它覆盖注册表，与刚落盘的配置对不上。
     /// 锁序 `install_lock` → store → entries，与其余安装类流程一致；
     /// 本流程只读本机文件、不联网，临界区比含下载的流程短。
-    pub(crate) fn enable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
         let _install_guard = self
             .install_lock
             .lock()
             .map_err(|_| INSTALL_LOCK_POISONED)?;
 
         let entry = store.with_read(|s| s.plugin_by_source(source))?;
-        if entry.enabled {
+        if entry.enabled == enabled {
             return Ok(());
         }
 
         // 启用先装载再写配置：装载失败不写条目、不动注册表，旧状态保持可用。
-        let placed = PlacedPlugin::from_plugin_dir(&Paths::get().plugin_dir(&entry.id))?;
-        let loaded = placed.load()?;
+        // 禁用不装载：注册表里已有一份描述，降级即可。
+        let loaded = match enabled {
+            true => {
+                Some(PlacedPlugin::from_plugin_dir(&Paths::get().plugin_dir(&entry.id))?.load()?)
+            }
+            false => None,
+        };
 
         // 复检：条目可能已被移除，不得按过期条目继续写。install_lock 已让
         // 移除与本流程互斥，此处是纵深防御。并发方已完成同样的切换时返回
         // `None`（配置与注册表均已同步，直接成功）。
         let entry = store.with_write(|guard| -> Result<Option<PluginEntry>, StoreError> {
             let entry = guard.plugin_by_source(source)?;
-            if entry.enabled {
+            if entry.enabled == enabled {
                 return Ok(None);
             }
-            guard.set_plugin_enabled(source, true)?;
+            guard.set_plugin_enabled(source, enabled)?;
             Ok(Some(entry))
         })?;
         let Some(entry) = entry else {
             return Ok(());
         };
 
-        self.entries
-            .write()
-            .map_err(|_| REGISTRY_LOCK_POISONED)?
-            .insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
-        Ok(())
-    }
-
-    /// 禁用插件条目。
-    ///
-    /// 先改配置条目，再把内存注册表换成 Disabled 态（保留 manifest 供列表展示）。
-    ///
-    /// 整个流程在 `install_lock` 内独占：与添加、启用、移除、重新加载互斥
-    /// （理由见 [`Self::enable`]）；本流程只读本机文件、不联网。
-    pub(crate) fn disable(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        let _install_guard = self
-            .install_lock
-            .lock()
-            .map_err(|_| INSTALL_LOCK_POISONED)?;
-
-        let entry = store.with_read(|s| s.plugin_by_source(source))?;
-        if !entry.enabled {
-            return Ok(());
-        }
-
-        // 复检：条目可能已被移除，不得按过期条目继续写。并发方已完成同样的
-        // 切换时返回 `None`（配置与注册表均已同步，直接成功）。
-        let entry = store.with_write(|guard| -> Result<Option<PluginEntry>, StoreError> {
-            let entry = guard.plugin_by_source(source)?;
-            if !entry.enabled {
-                return Ok(None);
+        match loaded {
+            Some(loaded) => {
+                self.entries
+                    .write()
+                    .map_err(|_| REGISTRY_LOCK_POISONED)?
+                    .insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
             }
-            guard.set_plugin_enabled(source, false)?;
-            Ok(Some(entry))
-        })?;
-        let Some(entry) = entry else {
-            return Ok(());
-        };
-
-        let mut entries = self.entries.write().map_err(|_| REGISTRY_LOCK_POISONED)?;
-        if let Some(state) = entries.get_mut(&entry.id)
-            && let PluginState::Loaded(loaded) = state
-        {
-            let meta = loaded.meta.clone();
-            *state = PluginState::Disabled(meta);
+            None => {
+                let mut entries = self.entries.write().map_err(|_| REGISTRY_LOCK_POISONED)?;
+                if let Some(state) = entries.get_mut(&entry.id)
+                    && let PluginState::Loaded(loaded) = state
+                {
+                    let meta = loaded.meta.clone();
+                    *state = PluginState::Disabled(meta);
+                }
+            }
         }
         Ok(())
     }
