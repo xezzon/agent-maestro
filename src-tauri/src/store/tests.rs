@@ -943,6 +943,27 @@ fn corrupt_store_refuses_plugin_writes() {
     assert!(store.set_variables(BTreeMap::new()).is_err());
 }
 
+/// 变量名校验先于存储状态：配置损坏与非法名同时出现时报非法名（不被保护态
+/// 抢先复述成 `Corrupt`），且损坏的原文件不被改写。
+#[test]
+fn invalid_variable_names_win_over_a_corrupt_config() {
+    let _home = temp_home();
+    let config_path = MaestroPaths::get().config_path();
+    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+    fs::write(&config_path, "不是 JSON {{{").unwrap();
+    let mut store = Store::new();
+
+    let err = store
+        .set_variables(BTreeMap::from([("a-b".to_owned(), "x".to_owned())]))
+        .unwrap_err();
+
+    assert!(
+        matches!(err, StoreError::InvalidVariableName { .. }),
+        "非法名先于保护态：{err:?}"
+    );
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), "不是 JSON {{{");
+}
+
 #[test]
 fn create_provider_rejects_references_to_undefined_variables() {
     let _home = temp_home();

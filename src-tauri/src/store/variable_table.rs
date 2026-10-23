@@ -15,6 +15,21 @@ pub(super) fn is_valid_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// 校验整张变量表的键名（ADR 0014）。
+///
+/// 独立成入口而不是只藏在 [`replace`] 里，是为了「名合法性先于存储状态」：
+/// 非法名与配置文件损坏同时发生时，报的必须是非法名。`Store::set_variables`
+/// 因此在进入 [`super::Store::mutate`]（第一步就是读配置）之前先调本函数。
+/// [`replace`] 自己也调一次，仓储不依赖调用方先校验。
+pub(super) fn validate_names(variables: &Variables) -> Result<(), StoreError> {
+    for name in variables.keys() {
+        if !is_valid_name(name) {
+            return Err(StoreError::invalid_variable_name(name));
+        }
+    }
+    Ok(())
+}
+
 /// 整包替换全局变量表（ADR 0015）：新增、修改与删除都走同一条全量保存路径。
 ///
 /// 变量名须合法（`[A-Za-z0-9_]+`，ADR 0014），否则占位符无法引用；落盘前
@@ -22,12 +37,7 @@ pub(super) fn is_valid_name(name: &str) -> bool {
 /// 引用无法解析时整表拒绝（provider↔variables 一致性）。空默认值合法
 /// （`${EMPTY}`）。
 pub(super) fn replace(config: &mut Config, variables: Variables) -> Result<Change<()>, StoreError> {
-    // 变量名合法性先于存储状态：非法名整表拒绝，与当前配置是否可读无关。
-    for name in variables.keys() {
-        if !is_valid_name(name) {
-            return Err(StoreError::invalid_variable_name(name));
-        }
-    }
+    validate_names(&variables)?;
     for (slug, provider) in &config.providers {
         validate_provider(slug, provider, &variables)?;
     }

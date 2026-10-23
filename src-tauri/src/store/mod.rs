@@ -197,6 +197,10 @@ impl Store {
     /// 引用无法解析时整表拒绝（provider↔variables 一致性）。空默认值合法
     /// （`${EMPTY}`）。
     pub(crate) fn set_variables(&mut self, variables: Variables) -> Result<(), StoreError> {
+        // 名校验必须先于存储状态：`mutate` 第一句是 `get()?`，保护态会抢先报
+        // `Corrupt`。非法名整表拒绝，与当前配置是否可读无关（见
+        // `variable_table::validate_names`）。
+        variable_table::validate_names(&variables)?;
         self.mutate(|config| variable_table::replace(config, variables))
     }
 
