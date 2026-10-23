@@ -14,8 +14,9 @@ use crate::{
 use super::{
     INSTALL_LOCK_POISONED, PlacedPlugin, PluginService, PluginState, REGISTRY_LOCK_POISONED,
     builtin,
-    manifest::{PluginSource, is_https_url, parse_manifest},
+    manifest::parse_manifest,
     remove_placed_dir,
+    source::{PluginSource, is_https_url},
 };
 
 impl PluginService {

@@ -22,6 +22,7 @@ mod fetch;
 mod install;
 mod manifest;
 mod projection;
+mod source;
 
 #[cfg(test)]
 mod tests;
@@ -48,7 +49,8 @@ use crate::{
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
-use manifest::{Manifest, PluginSource, parse_placed};
+use manifest::{Manifest, parse_placed};
+use source::PluginSource;
 
 /// 落位目录中的 manifest 文件名。
 const PLACED_MANIFEST: &str = "manifest.json";

@@ -65,7 +65,7 @@ pub(crate) fn find_by_id(id: &str) -> Option<&'static BuiltinPlugin> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::manifest::{PluginSource, parse_manifest};
+    use crate::plugin::{manifest::parse_manifest, source::PluginSource};
 
     #[test]
     fn embedded_pi_manifest_is_valid_and_matches_builtin_identity() {

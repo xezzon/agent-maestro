@@ -10,8 +10,8 @@ use std::{
 use super::{
     ApplyStatus, PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport,
     PluginConfig, PluginState, PluginView, apply_summary, builtin,
-    manifest::is_https_url,
     projection::project_files,
+    source::is_https_url,
     testutil::{
         LockProbeFetcher, StubFetcher, fetcher_service, manifest_json, snapshot, store_at,
         stub_service, temp_home, test_service,
