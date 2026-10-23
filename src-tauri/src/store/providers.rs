@@ -15,9 +15,10 @@ use super::schema::{Change, Config, StoreError};
 /// 挑出参与投影的 Provider（#94）：`enabled == false` 者整体不参与——既不写入
 /// 插件，也不做占位符插值，因此其字段里的占位符错误不会牵连整个插件失败。
 ///
-/// 这是存储层的领域规则（不是传输层的）：命令层与插件服务都经由
-/// [`super::Store::enabled_providers`] 走同一份实现，不再各自复述一遍筛选口径。
-pub(crate) fn select_enabled_providers(
+/// 这是存储层的领域规则（不是传输层的）：[`super::Store::enabled_providers`]
+/// 是它唯一的调用方，`apply_providers` 经由那次查询取数，不再各自复述一遍
+/// 筛选口径。模块外不再可见——规则只从 `Store` 的语义化查询走。
+pub(super) fn select_enabled_providers(
     providers: &BTreeMap<String, Provider>,
 ) -> BTreeMap<String, Provider> {
     providers

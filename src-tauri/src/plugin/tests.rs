@@ -1482,6 +1482,78 @@ fn apply_providers_logs_each_failed_plugin_with_its_reason() {
     );
 }
 
+/// 禁用 Provider 不参与投影（#94）：经服务层入口 `apply_providers` 走真实链路
+/// （`Store::enabled_providers` → 插值 → `write_providers`）。先投影一次留下
+/// 条目，再禁用并重新投影，该条目连同其 api_key 一并从 models.json 消失。
+///
+/// 这条用例此前住在命令层，自己调 `select_enabled_providers` 再把结果喂给
+/// `write_providers`——测的是那个自由函数，不是生产组合（复核的变异测试：
+/// 把 `enabled_providers` 改成放行禁用项，201 个测试仍全绿）。现在 provider
+/// 真存进 store，筛选规则被真正执行。
+#[test]
+fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
+    use crate::provider::Protocol;
+
+    let home = temp_home();
+    let store = store_at(home.path());
+    let service = test_service(home.path());
+    service.startup(&store).unwrap();
+
+    let provider = |url: &str, api_key: &str| Provider {
+        base_url: BTreeMap::from([(Protocol::OpenaiCompletions, url.to_owned())]),
+        api_key: ApiKey::new(api_key.to_owned()),
+        ..Provider::default()
+    };
+    store
+        .with_write(|s| {
+            s.create_provider(
+                "gateway",
+                provider("https://api.example.com/v1", "sk-gateway"),
+            )
+        })
+        .unwrap();
+    store
+        .with_write(|s| {
+            s.create_provider(
+                "offline",
+                provider(
+                    "https://offline.example.com/v1",
+                    "sk-disabled-must-not-leak",
+                ),
+            )
+        })
+        .unwrap();
+
+    let models_path = home.path().join(".pi").join("agent").join("models.json");
+    let first = service.apply_providers(&store).unwrap();
+    let pi = plugin_report(&first, "pi");
+    assert_eq!(pi.status, ApplyStatus::Applied, "{:?}", pi.reason);
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
+    assert_eq!(
+        written["providers"]["offline"]["baseUrl"], "https://offline.example.com/v1",
+        "禁用前该条目应已投影"
+    );
+
+    store
+        .with_write(|s| s.set_provider_enabled("offline", false))
+        .unwrap();
+    let second = service.apply_providers(&store).unwrap();
+    let pi = plugin_report(&second, "pi");
+    assert_eq!(pi.status, ApplyStatus::Applied, "{:?}", pi.reason);
+    let raw = fs::read_to_string(&models_path).unwrap();
+    let written: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        written["providers"]["gateway"]["baseUrl"], "https://api.example.com/v1",
+        "启用项照常投影"
+    );
+    assert!(
+        written["providers"].get("offline").is_none(),
+        "禁用后该条目应从投影中移除：{written}"
+    );
+    assert!(!raw.contains("sk-disabled-must-not-leak"));
+}
+
 /// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有
 /// 插件时不带上下文——成功行因此不留尾随的冒号与空格。
 #[test]

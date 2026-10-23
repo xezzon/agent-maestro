@@ -33,7 +33,6 @@ use std::{
 
 use crate::{paths::MaestroPaths, provider::Provider, variables::Variables};
 
-pub(crate) use providers::select_enabled_providers;
 pub(crate) use schema::{Config, PluginEntry, StoreError};
 
 use protected::ProtectedState;
@@ -115,7 +114,7 @@ impl Store {
     /// 既不写入插件，也不做占位符插值，因此其字段里的占位符错误不会牵连整个
     /// 插件失败。筛选与快照合并为一次克隆，且只克隆启用项。
     pub(crate) fn enabled_providers(&self) -> Result<BTreeMap<String, Provider>, StoreError> {
-        Ok(select_enabled_providers(&self.get()?.providers))
+        Ok(providers::select_enabled_providers(&self.get()?.providers))
     }
 
     /// 全局变量表快照（ADR 0015）。
