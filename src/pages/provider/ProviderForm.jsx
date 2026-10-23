@@ -61,7 +61,9 @@ export default function ProviderForm({
     <Form
       form={form}
       layout="vertical"
-      disabled={disabled}
+      // 保存期间表单自禁用：保存进行中时字段仍可编辑，用户会以为改的是新值，
+      // 实际提交的是旧值。外部（状态开关）进行中时同样整体禁用。
+      disabled={disabled || saving}
       initialValues={provider}
       onFinish={handleFinish}
     >
