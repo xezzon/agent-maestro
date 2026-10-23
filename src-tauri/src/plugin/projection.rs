@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     interpolate,
-    paths::MaestroPaths,
+    paths::Paths,
     provider::Provider,
     store::{AppStore, StoreError},
     variables::Variables,
@@ -109,7 +109,7 @@ impl PluginService {
         variables: &Variables,
     ) -> Result<(Vec<String>, Vec<SkippedProvider>), String> {
         // 按插件读取插件配置（ADR 0018）：读取或解析失败即整插件失败，不静默降级。
-        let plugin_config = read_plugin_config(&MaestroPaths::get().plugin_dir(id))?;
+        let plugin_config = read_plugin_config(&Paths::get().plugin_dir(id))?;
         // 全局变量表 ⊕ 该插件的变量覆盖：覆盖键优先，只影响本插件的插值。
         // config.json 容许残留全局表中已不存在的键，但不参与插值。
         let mut merged = variables.clone();

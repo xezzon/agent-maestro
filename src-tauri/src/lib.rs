@@ -8,6 +8,9 @@ mod store;
 mod test_global;
 mod variables;
 
+#[cfg(test)]
+mod testutil;
+
 use command::{
     add_plugin, apply_providers, create_provider, delete_provider, get_plugin_config, list_plugins,
     list_providers, list_variables, reload_plugin, remove_plugin, set_plugin_config,
@@ -79,12 +82,12 @@ pub fn run() {
         // 添加插件对话框用它选择本机 manifest.json（file 来源）。
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            // 主目录是 MaestroPaths 与 PlatformDirs 的共同基底。setup 之前 logger
-            // 已经能优雅地降级到 Stdout（`logging::attach` 看 `try_get`），所以这里
-            // 把 home 解析放到第一次真正消费它的时机：缺失就同 `service.startup`
-            // 一样用 `?` 抛出，让启动以失败退出，而不是悄悄跳过 init 后让下游 panic。
-            let home = dirs::home_dir().ok_or_else(|| "无法解析主目录".to_owned())?;
-            paths::MaestroPaths::init(&home);
+            // 全局路径（主目录 + 平台基准目录）在这里一次性初始化：其余地方只读。
+            // setup 之前 logger 已经能优雅地降级到 Stdout（`logging::attach` 看
+            // `try_get`），所以这里把解析放到第一次真正消费它的时机：缺失就同
+            // `service.startup` 一样用 `?` 抛出，让启动以失败退出，而不是悄悄
+            // 跳过 init 后让下游 panic。
+            paths::Paths::init_from_system()?;
             let store = Store::new();
             app.manage(AppStore {
                 store: RwLock::new(store),

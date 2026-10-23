@@ -12,7 +12,7 @@ use tauri_plugin_log::{
     Builder as LogBuilder, FileOpenStrategy, RotationStrategy, Target, TargetKind,
 };
 
-use crate::paths::MaestroPaths;
+use crate::paths::Paths;
 
 #[cfg(test)]
 pub(crate) mod capture;
@@ -56,7 +56,7 @@ fn parse_level(raw: &str) -> Option<LevelFilter> {
 }
 
 /// 写探测：目录可创建、日志文件可打开才算文件目标可用。
-fn probe_log_dir(paths: &MaestroPaths) -> Result<(), String> {
+fn probe_log_dir(paths: &Paths) -> Result<(), String> {
     let dir = paths.logs_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let file = dir.join(LOG_FILE_NAME);
@@ -87,7 +87,7 @@ pub(crate) fn attach(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<taur
     }
 
     let mut targets = vec![Target::new(TargetKind::Stdout)];
-    match MaestroPaths::try_get() {
+    match Paths::try_get() {
         Some(paths) => match probe_log_dir(&paths) {
             Ok(()) => targets.push(Target::new(TargetKind::Folder {
                 path: paths.logs_dir(),

@@ -31,7 +31,7 @@ use std::{
     sync::RwLock,
 };
 
-use crate::{paths::MaestroPaths, provider::Provider, variables::Variables};
+use crate::{paths::Paths, provider::Provider, variables::Variables};
 
 pub(crate) use schema::{Config, PluginEntry, StoreError};
 
@@ -52,10 +52,10 @@ pub(crate) struct Store {
 }
 
 impl Store {
-    /// 从全局 [`MaestroPaths`] 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
+    /// 从全局 [`Paths`] 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
     /// 损坏则进入保护状态。
     pub(crate) fn new() -> Self {
-        let config_path = MaestroPaths::get().config_path();
+        let config_path = Paths::get().config_path();
         let state = match fs::read_to_string(&config_path) {
             Ok(text) => Self::parse(&config_path, &text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),

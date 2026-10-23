@@ -41,14 +41,14 @@ use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
 use crate::{
-    paths::MaestroPaths,
+    paths::Paths,
     plugin::builtin::BUILTINS,
     store::{AppStore, PluginEntry},
     variables::Variables,
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
-use manifest::{Manifest, PlatformDirs, PluginSource, parse_placed};
+use manifest::{Manifest, PluginSource, parse_placed};
 
 /// 落位目录中的 manifest 文件名。
 const PLACED_MANIFEST: &str = "manifest.json";
@@ -132,7 +132,7 @@ impl PlacedPlugin {
     /// 解析是装载的必经步骤，在此完成而非留给调用点——装载是 `LoadedPlugin`
     /// 的唯一构造点，因此 `config_dir` 已解析为宿主绝对路径由装载路径保证。
     ///
-    /// 使用全局 [`PlatformDirs`] 解析，调用前需先初始化。
+    /// 使用全局 [`Paths`] 解析，调用前需先初始化。
     fn load(self) -> Result<LoadedPlugin, String> {
         let manifest = parse_placed(self.raw_manifest.as_str())?;
         let wasm = Arc::from(self.wasm.clone());
@@ -285,8 +285,8 @@ fn build_engine() -> Engine {
 }
 
 impl PluginService {
-    /// 构造：使用全局的 [`MaestroPaths`] 与 [`PlatformDirs`]，两者均在应用启动阶段
-    /// 完成初始化（[`MaestroPaths::init`] / [`PluginService::startup`]）。
+    /// 构造：使用全局的 [`Paths`]，它在应用启动阶段完成初始化
+    /// （[`Paths::init_from_system`]，见 `lib.rs` 的 setup）。
     pub(crate) fn new() -> Self {
         Self::with_fetcher(Arc::new(HttpFetcher::new()))
     }
@@ -301,14 +301,12 @@ impl PluginService {
         }
     }
 
-    /// 应用启动：初始化平台目录、从配置条目装载插件注册表（装载失败进错误态，
-    /// 离线可用），并补装配置中缺失的内置插件——与其余来源同一安装管线（落位 + 写条目）。
+    /// 应用启动：从配置条目装载插件注册表（装载失败进错误态，离线可用），
+    /// 并补装配置中缺失的内置插件——与其余来源同一安装管线（落位 + 写条目）。
     ///
-    /// 平台目录是 `config_dir` 解析的前提，不可用时启动失败（与主目录缺失的处理一致）；
+    /// 全局路径由应用 setup 阶段初始化（见 `lib.rs`），本方法只读不初始化。
     /// 配置存储不可用则降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
     pub(crate) fn startup(&self, store: &AppStore) -> Result<(), String> {
-        PlatformDirs::init_from_system()?;
-
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
         let plugin_entries = match store.with_read(|s| s.list_plugins()) {
             Ok(plugin_entries) => plugin_entries,
@@ -323,7 +321,7 @@ impl PluginService {
         let mut plugins = HashMap::with_capacity(plugin_entries.len());
         for entry in &plugin_entries {
             let plugin_id = entry.id.clone();
-            let plugin_dir = MaestroPaths::get().plugin_dir(&plugin_id);
+            let plugin_dir = Paths::get().plugin_dir(&plugin_id);
             let placed_plugin = match PlacedPlugin::from_plugin_dir(&plugin_dir) {
                 Ok(placed_plugin) => placed_plugin,
                 Err(err) => {

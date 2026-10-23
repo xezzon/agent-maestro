@@ -5,7 +5,7 @@
 use std::{fs, io::ErrorKind, path::Path};
 
 use crate::{
-    paths::MaestroPaths,
+    paths::Paths,
     store::{AppStore, PluginEntry},
 };
 
@@ -21,7 +21,7 @@ impl PluginService {
         source: &str,
     ) -> Result<PluginConfig, String> {
         let entry = store.with_read(|s| s.plugin_by_source(source))?;
-        read_plugin_config(&MaestroPaths::get().plugin_dir(&entry.id))
+        read_plugin_config(&Paths::get().plugin_dir(&entry.id))
     }
 
     /// 写入插件配置（整包替换，ADR 0018）：`variables` 覆盖与 `form` 表单整体
@@ -54,7 +54,7 @@ impl PluginService {
             guard.plugin_by_source(source).map_err(String::from)
         })?;
 
-        let plugin_dir = MaestroPaths::get().plugin_dir(&entry.id);
+        let plugin_dir = Paths::get().plugin_dir(&entry.id);
         fs::create_dir_all(&plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
         let raw = serde_json::to_string_pretty(plugin_config)
             .map_err(|e| format!("序列化插件配置失败：{e}"))?;

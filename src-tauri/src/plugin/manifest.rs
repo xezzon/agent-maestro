@@ -5,10 +5,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use crate::test_global::Global;
-
-#[cfg(test)]
-use crate::test_global::TestGuard;
+use crate::paths::Paths;
 
 /// 插件来源：解析一次，随值传递。
 ///
@@ -79,143 +76,6 @@ pub(crate) struct Manifest {
     pub(crate) settings_schema: Option<serde_json::Value>,
 }
 
-/// 全局平台目录：生产期进程内一份，测试期每线程一份（见 [`crate::test_global`]）。
-static PLATFORM_DIRS: Global<PlatformDirs> = Global::new();
-
-/// 平台基准目录：`config_dir` 声明里的变量前缀在此解析为宿主绝对路径。
-#[derive(Clone, Debug)]
-pub(crate) struct PlatformDirs {
-    home: PathBuf,
-    config: PathBuf,
-    config_local: PathBuf,
-    data: PathBuf,
-    data_local: PathBuf,
-}
-
-impl PlatformDirs {
-    /// 读取宿主真实的平台目录并初始化全局实例；任一项不可用即报错。
-    /// 重复调用无效（以首次为准）。
-    ///
-    /// 测试构建下不读取真实环境——全局实例由 `PlatformDirs::init_test` 或
-    /// `PlatformDirs::test_guard` 注入（见 `plugin::testutil`），故这里是空操作：
-    /// 测试若漏了注入，由 [`PlatformDirs::get`] 报错，而不是静默落到真实目录。
-    pub(crate) fn init_from_system() -> Result<(), String> {
-        #[cfg(not(test))]
-        {
-            let missing = |what: &str| format!("无法解析平台目录：{what}不可用");
-            let dirs = Self::new(
-                dirs::home_dir().ok_or_else(|| missing("主目录"))?,
-                dirs::config_dir().ok_or_else(|| missing("配置目录"))?,
-                dirs::config_local_dir().ok_or_else(|| missing("本地配置目录"))?,
-                dirs::data_dir().ok_or_else(|| missing("数据目录"))?,
-                dirs::data_local_dir().ok_or_else(|| missing("本地数据目录"))?,
-            );
-            PLATFORM_DIRS.set(dirs);
-        }
-        Ok(())
-    }
-
-    /// 注入基准目录：测试用临时目录，不读真实环境。
-    pub(crate) fn new(
-        home: PathBuf,
-        config: PathBuf,
-        config_local: PathBuf,
-        data: PathBuf,
-        data_local: PathBuf,
-    ) -> Self {
-        Self {
-            home,
-            config,
-            config_local,
-            data,
-            data_local,
-        }
-    }
-
-    /// 全部基准目录都落在同一个根之下（测试用）。
-    ///
-    /// 五个基准目录此前由调用方各拼一遍——参数一多就容易拼错位（`new` 的
-    /// 五个参数全是 `PathBuf`，编译器分不清谁是谁）。派生规则收在这里一处。
-    #[cfg(test)]
-    pub(crate) fn from_root(root: &Path) -> Self {
-        Self {
-            home: root.to_path_buf(),
-            config: root.to_path_buf(),
-            config_local: root.to_path_buf(),
-            data: root.to_path_buf(),
-            data_local: root.to_path_buf(),
-        }
-    }
-
-    /// 主目录 + 平台约定的子目录（测试用）。
-    #[cfg(test)]
-    pub(crate) fn from_home(home: &Path) -> Self {
-        Self {
-            home: home.to_path_buf(),
-            config: home.join(".config"),
-            config_local: home.join(".config"),
-            data: home.join(".local/share"),
-            data_local: home.join(".local/share"),
-        }
-    }
-
-    /// 五个基准目录互不相同（各自是根下的一个具名子目录）。
-    ///
-    /// 只有「验证每个平台变量映射到自己的基准目录」时需要这种布局——五个
-    /// 基准目录若指向同一处，就分不清哪个变量解析到了哪里。
-    #[cfg(test)]
-    pub(crate) fn distinct_under(root: &Path) -> Self {
-        Self::new(
-            root.join("home"),
-            root.join("config"),
-            root.join("config-local"),
-            root.join("data"),
-            root.join("data-local"),
-        )
-    }
-
-    /// 获取全局实例（值语义，clone 成本极低）。
-    ///
-    /// 尚未初始化即报错，不 panic：本方法在 manifest 的反序列化路径上（经
-    /// [`resolve_config_dir`]），而 manifest 可能来自网络——解析一份不可信的
-    /// manifest 绝不能让进程崩掉。
-    fn get() -> Result<Self, String> {
-        PLATFORM_DIRS.get().ok_or_else(|| {
-            #[cfg(not(test))]
-            let message = "PlatformDirs 尚未初始化：调用 PlatformDirs::init_from_system 后再使用";
-            #[cfg(test)]
-            let message =
-                "测试线程未设置 PlatformDirs：使用 PlatformDirs::test_guard 或 PlatformDirs::init_test";
-            message.to_owned()
-        })
-    }
-
-    /// 测试辅助：设置当前线程的全局实例，返回 RAII guard（drop 时自动清理）。
-    #[cfg(test)]
-    pub(crate) fn test_guard(dirs: Self) -> TestGuard<PlatformDirs> {
-        Self::init_test(dirs);
-        TestGuard::new(&PLATFORM_DIRS)
-    }
-
-    /// 测试辅助：直接设置当前线程的全局实例（不返回 guard，自行管理生命周期）。
-    #[cfg(test)]
-    pub(crate) fn init_test(dirs: Self) {
-        PLATFORM_DIRS.set(dirs);
-    }
-
-    /// 变量前缀 → 基准目录；不支持的变量返回 `None`。
-    fn base_dir(&self, variable: &str) -> Option<&Path> {
-        match variable {
-            "$HOME" => Some(&self.home),
-            "$XDG_CONFIG_HOME" => Some(&self.config),
-            "$LOCAL_APP_CONFIG" => Some(&self.config_local),
-            "$XDG_DATA_HOME" => Some(&self.data),
-            "$LOCAL_APP_DATA" => Some(&self.data_local),
-            _ => None,
-        }
-    }
-}
-
 /// 声明里支持的平台变量前缀（错误信息里列给用户）。
 const SUPPORTED_VARIABLES: &str =
     "$HOME、$XDG_CONFIG_HOME、$LOCAL_APP_CONFIG、$XDG_DATA_HOME、$LOCAL_APP_DATA";
@@ -226,13 +86,14 @@ const SUPPORTED_VARIABLES: &str =
 /// `~/.pi` 与 `$HOME/.pi` 同义。目录不存在时先创建（沿用既有行为），
 /// 随后按规范化的真实路径确认没有逃出该变量对应的基准目录。
 ///
-/// 使用全局 [`PlatformDirs`] 解析，调用前需先初始化（未初始化即报错，不 panic）。
+/// 平台基准目录来自全局 [`Paths`]（`base_dir` 回答「变量对应哪个目录」），
+/// 调用前需先初始化（未初始化即 panic：这是程序错误，不是运行时状态）。
 /// 返回的原因不带层级前缀，由 [`parse_placed`] 统一补上「manifest.json 不合法：」。
 fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
     if declared.is_empty() {
         return Err("config_dir 未配置".to_owned());
     }
-    let dirs = PlatformDirs::get()?;
+    let paths = Paths::get();
     // 绝对路径以 `/` 开头，切出的变量前缀为空：与「没有 `/`」一样报前缀错误，
     // 不要误报成「不支持的变量」。
     let (variable, relative) = declared
@@ -242,15 +103,14 @@ fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
             format!("config_dir「{declared}」必须以平台变量开头（支持：{SUPPORTED_VARIABLES}）")
         })?;
     // `~` 与 `$HOME` 同义：两者解析到同一基准目录。
-    let base = if variable == "~" {
-        dirs.home.clone()
-    } else {
-        dirs.base_dir(variable).ok_or_else(|| {
+    let base = paths
+        .base_dir(variable)
+        .ok_or_else(|| {
             format!(
                 "config_dir「{declared}」使用了不支持的平台变量「{variable}」（支持：{SUPPORTED_VARIABLES}）"
             )
-        })?.to_path_buf()
-    };
+        })?
+        .to_path_buf();
 
     let relative = Path::new(relative);
     if relative.as_os_str().is_empty() {
@@ -292,7 +152,7 @@ fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
 /// `windows`，宿主取当前平台的键解析，见 [`platform_declaration`]）。
 ///
 /// 解析收在反序列化里，`Manifest` 一经构造 `config_dir` 就是可用的绝对路径，不存在
-/// 「已解析 / 未解析」两种状态。使用全局 [`PlatformDirs`]，反序列化前需先初始化。
+/// 「已解析 / 未解析」两种状态。使用全局 [`Paths`]，反序列化前需先初始化。
 fn deserialize_config_dir<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -353,7 +213,7 @@ fn platform_declaration(
 /// 解析并校验落位 manifest；插件 id 与 `entry` 由这里把关，`config_dir` 已在
 /// 反序列化时由 [`resolve_config_dir`] 解析为宿主绝对路径。
 ///
-/// 使用全局 [`PlatformDirs`]，调用前需先初始化。
+/// 使用全局 [`Paths`]，调用前需先初始化。
 pub(crate) fn parse_placed(value: &str) -> Result<Manifest, String> {
     let manifest: Manifest =
         serde_json::from_str(value).map_err(|e| format!("manifest.json 不合法：{e}"))?;
@@ -438,6 +298,7 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_global::TestGuard;
 
     fn manifest_text(id: &str, entry: &str) -> String {
         crate::plugin::testutil::manifest_json(id, "$HOME/.x", entry)
@@ -459,10 +320,10 @@ mod tests {
     }
 
     /// 注入的基准目录：全部落在临时目录下，不读真实环境。
-    fn platform_dirs_setup() -> (tempfile::TempDir, TestGuard<PlatformDirs>) {
+    fn platform_dirs_setup() -> (tempfile::TempDir, TestGuard<Paths>) {
         let root = tempfile::tempdir().unwrap();
-        let dirs = PlatformDirs::distinct_under(root.path());
-        let guard = PlatformDirs::test_guard(dirs);
+        let dirs = Paths::distinct_under(root.path());
+        let guard = Paths::test_guard(dirs);
         (root, guard)
     }
 

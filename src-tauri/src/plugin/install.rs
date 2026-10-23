@@ -7,7 +7,7 @@
 use std::{fs, path::Path, sync::Arc};
 
 use crate::{
-    paths::MaestroPaths,
+    paths::Paths,
     store::{AppStore, PluginEntry, StoreError},
 };
 
@@ -157,7 +157,7 @@ impl PluginService {
         };
 
         Ok(PlacedPlugin::new(
-            &MaestroPaths::get().plugin_dir(&manifest.id),
+            &Paths::get().plugin_dir(&manifest.id),
             raw_manifest,
             &wasm,
         ))
@@ -186,7 +186,7 @@ impl PluginService {
         }
 
         // 启用先装载再写配置：装载失败不写条目、不动注册表，旧状态保持可用。
-        let placed = PlacedPlugin::from_plugin_dir(&MaestroPaths::get().plugin_dir(&entry.id))?;
+        let placed = PlacedPlugin::from_plugin_dir(&Paths::get().plugin_dir(&entry.id))?;
         let loaded = placed.load()?;
 
         // 复检：条目可能已被移除，不得按过期条目继续写。install_lock 已让
@@ -295,7 +295,7 @@ impl PluginService {
         };
 
         // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
-        remove_placed_dir(&MaestroPaths::get().plugin_dir(&entry.id))
+        remove_placed_dir(&Paths::get().plugin_dir(&entry.id))
     }
 
     /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，按「先
