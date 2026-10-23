@@ -100,7 +100,7 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      # SDK crate 是独立 package（无 workspace 覆盖），单独跑 fmt 与 clippy；
+      # SDK crate 是独立 package（无 workspace 覆盖），单独跑 fmt / clippy / test；
       # 作为库 crate 不提交 Cargo.lock，故不用 --locked。
       - name: Format (maestro-plugin-sdk)
         run: cargo fmt --check
@@ -108,6 +108,12 @@ jobs:
 
       - name: Clippy (maestro-plugin-sdk)
         run: cargo clippy --all-targets -- -D warnings
+        working-directory: crates/maestro-plugin-sdk
+
+      # `write_atomic` 的失败分支只能在宿主上测（wasm 里造不出这些 IO 错误），
+      # 若只跑 fmt / clippy，这些测试永远不会执行。
+      - name: Test (maestro-plugin-sdk)
+        run: cargo test
         working-directory: crates/maestro-plugin-sdk
 
       # 构建全部结束后再保存：写入门控、命中跳过与旧条目驱逐都在 rust-cache-save 里，

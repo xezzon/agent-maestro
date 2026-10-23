@@ -13,3 +13,8 @@ publish = false
 
 [dependencies]
 wit-bindgen = "0.61.1"
+
+# 只有本 crate 的单元测试用（`write_atomic` 在宿主上跑）：插件以依赖方式引入
+# 本 crate 时不会构建 dev-dependencies。
+[dev-dependencies]
+tempfile = "3"

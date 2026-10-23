@@ -192,9 +192,9 @@ use maestro_plugin_sdk::write_atomic;
 write_atomic("agent", "models.json", json.as_bytes())?;
 ```
 
-`dir` 是 `config_dir` 下的子目录（`""` 即根），`name` 是文件名；临时文件与目标文件同目录，故 rename 必为原子替换。失败原因带相对路径，可直接作为投影错误返回。
+`dir` 是 `config_dir` 下的子目录（`""` 即根），`name` 是文件名；临时文件与目标文件同目录，故 rename 必为原子替换。**`dir` 需已存在**——`write_atomic` 不建目录，写子目录前插件自己 `create_dir_all`（pi 投影前就建 `agent/`）。临时文件名逐次唯一，因此并发写同一目标也不会互相覆盖半截内容。失败原因带相对路径，可直接作为投影错误返回。
 
-参考实现 [`plugins/pi/src/lib.rs`](../../plugins/pi/src/lib.rs) 就是整文件重写：写 `agent/models.json.tmp`，再 rename 为 `agent/models.json`，保证已删除的 Provider 不残留。
+参考实现 [`plugins/pi/src/lib.rs`](../../plugins/pi/src/lib.rs) 就是整文件重写：先 `create_dir_all("agent")`，再用 `write_atomic("agent", "models.json", …)` 整份替换，保证已删除的 Provider 不残留。
 
 ## 过程性日志（logger import）
 

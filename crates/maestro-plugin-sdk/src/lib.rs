@@ -95,7 +95,12 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// `maestro:plugin` v2 合同的全部 WIT 类型与 `Guest` trait。
 ///
@@ -122,18 +127,144 @@ pub use maestro::plugin::config::get_config;
 /// `name` 是文件名。临时文件与目标文件同目录，故 rename 不跨文件系统、
 /// 必为原子替换。
 ///
+/// **`dir` 必须已存在**（本函数不建目录）：要写子目录时插件自己先
+/// `create_dir_all`，例如 pi 在投影前建好 `agent/`。
+///
 /// ```ignore
 /// use maestro_plugin_sdk::write_atomic;
 ///
 /// write_atomic("agent", "models.json", json.as_bytes())?;
 /// ```
 ///
+/// 临时文件名逐次唯一（见下方 `create_temp_file`）：并发写同一目标时，各自
+/// 写各自的临时文件，任一方都不会把另一方写到一半的内容 rename 成目标。
+///
 /// 失败原因带相对路径：插件作者不必自己拼错误文案。
 pub fn write_atomic(dir: &str, name: &str, contents: &[u8]) -> Result<(), String> {
     let relative = Path::new(dir).join(name);
-    let tmp = Path::new(dir).join(format!("{name}.tmp"));
     let label = relative.to_string_lossy();
-    fs::write(&tmp, contents).map_err(|e| format!("写入 {label} 临时文件失败\n原因：{e}"))?;
-    fs::rename(&tmp, &relative).map_err(|e| format!("替换 {label} 失败\n原因：{e}"))?;
+    let (tmp, mut file) =
+        create_temp_file(dir, name).map_err(|e| format!("写入 {label} 临时文件失败\n原因：{e}"))?;
+    // 写入与改名任一失败都清掉临时文件：不留孤儿，也不留半截的目标。
+    if let Err(e) = file.write_all(contents) {
+        drop(file);
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("写入 {label} 临时文件失败\n原因：{e}"));
+    }
+    drop(file);
+    if let Err(e) = fs::rename(&tmp, &relative) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("替换 {label} 失败\n原因：{e}"));
+    }
     Ok(())
+}
+
+/// 独占创建一个临时文件（与目标同目录、名字逐次唯一）。
+///
+/// 名字里带纳秒时间戳与尝试序号：并发写同一目标的两次调用（同一插件被两次
+/// 投影各实例化一份）不会共用同一个临时文件。`create_new` 兼作唯一性兜底——
+/// 极少数撞名（同一纳秒、同一次尝试）就换序号重试。
+fn create_temp_file(dir: &str, name: &str) -> io::Result<(PathBuf, fs::File)> {
+    for attempt in 0..8u8 {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let tmp = Path::new(dir).join(format!("{name}.{stamp}.{attempt}.tmp"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("临时文件名重复过多"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use super::write_atomic;
+
+    /// 用例目录的字符串形式（宿主上就是绝对路径；`write_atomic` 只做 `join`）。
+    fn dir_arg(home: &tempfile::TempDir) -> String {
+        home.path().to_string_lossy().into_owned()
+    }
+
+    /// 目录里的条目名（排序后比较，断言「只剩目标文件、无临时文件残留」）。
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn writes_the_requested_file() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("agent")).unwrap();
+        let dir = home.path().join("agent").to_string_lossy().into_owned();
+
+        write_atomic(&dir, "models.json", b"{\"providers\":{}}").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(home.path().join("agent").join("models.json")).unwrap(),
+            "{\"providers\":{}}"
+        );
+        assert_eq!(entries(&home.path().join("agent")), ["models.json"]);
+    }
+
+    /// 目标已存在时整体替换：旧内容更长也不会留下尾巴（不是覆盖写）。
+    #[test]
+    fn replaces_an_existing_target_whole() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = dir_arg(&home);
+
+        write_atomic(&dir, "models.json", b"{\"providers\":{\"a\":1}}").unwrap();
+        write_atomic(&dir, "models.json", b"{}").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(home.path().join("models.json")).unwrap(),
+            "{}"
+        );
+        assert_eq!(entries(home.path()), ["models.json"]);
+    }
+
+    /// `dir` 不存在时报「写临时文件失败」，文案带相对路径（插件作者直接回传）。
+    #[test]
+    fn reports_a_missing_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("missing").to_string_lossy().into_owned();
+
+        let err = write_atomic(&dir, "models.json", b"{}").unwrap_err();
+
+        assert!(
+            err.contains("missing/models.json 临时文件失败\n原因："),
+            "{err}"
+        );
+    }
+
+    /// 目标被同名目录占住时 rename 必然失败：报「替换失败」，且临时文件已清掉。
+    #[test]
+    fn reports_a_failed_replace_and_cleans_the_temporary_file_up() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = dir_arg(&home);
+        fs::create_dir(home.path().join("models.json")).unwrap();
+
+        let err = write_atomic(&dir, "models.json", b"{}").unwrap_err();
+
+        assert!(err.starts_with("替换 "), "{err}");
+        assert!(err.contains("models.json 失败\n原因："), "{err}");
+        assert_eq!(
+            entries(home.path()),
+            ["models.json"],
+            "失败路径不留临时文件"
+        );
+    }
 }
