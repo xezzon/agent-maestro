@@ -71,7 +71,8 @@ const INSTALL_LOCK_POISONED: &str = "插件安装锁不可用";
 struct PlacedPlugin {
     plugin_dir: PathBuf,
     raw_manifest: String,
-    wasm: Vec<u8>,
+    /// wasm 字节：与装载后的插件共用同一份（Arc 克隆），不复制整份字节。
+    wasm: Arc<[u8]>,
 }
 
 /// 插件描述：manifest 声明 + 解析后的配置目录。
@@ -96,7 +97,7 @@ impl PlacedPlugin {
         Self {
             plugin_dir: plugin_dir.to_path_buf(),
             raw_manifest,
-            wasm: wasm.into(),
+            wasm: Arc::from(wasm),
         }
     }
 
@@ -112,7 +113,7 @@ impl PlacedPlugin {
         Ok(Self {
             plugin_dir: plugin_dir.to_path_buf(),
             raw_manifest,
-            wasm,
+            wasm: Arc::from(wasm.as_slice()),
         })
     }
 
@@ -132,7 +133,7 @@ impl PlacedPlugin {
             PLACED_MANIFEST,
             self.raw_manifest.as_bytes(),
         )?;
-        write_placed_file(&self.plugin_dir, PLACED_WASM, &self.wasm)?;
+        write_placed_file(&self.plugin_dir, PLACED_WASM, self.wasm.as_ref())?;
         log::debug!("placed plugin: {}", self.plugin_dir.display());
         Ok(())
     }
@@ -158,7 +159,8 @@ impl LoadedPlugin {
     /// 安装路径上，manifest 只解析一次：来源侧解析出的 manifest 直接交给本
     /// 构造器，不再由落位产物重新解析一遍。
     fn from_parts(manifest: Manifest, config_dir: PathBuf, plugin: PlacedPlugin) -> Self {
-        let wasm = Arc::from(plugin.wasm.clone());
+        // wasm 字节与落位产物共用同一份：装载不再复制整份字节。
+        let wasm = Arc::clone(&plugin.wasm);
         Self {
             meta: PluginMeta {
                 manifest,

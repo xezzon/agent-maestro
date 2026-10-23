@@ -727,6 +727,81 @@ mod tests {
         assert_eq!(provider.api_key.as_deref(), Some("${KEY}"),);
     }
 
+    /// 插值作用域的**哨兵**：每一个参与插值的字符串字段都填占位符，逐字段
+    /// 断言被替换。
+    ///
+    /// 本用例刻意用**穷举字面量**构造 Provider 与 ModelEntry（不用
+    /// `..Default::default()`）：新增字符串字段时它不再编译——漏掉插值会立刻
+    /// 变成编译错误，而不是静默地把占位符原样投影出去。作用域的定义见
+    /// ADR 0015：除 `api_key`、模型 `id` 与 header **键**外的一切字符串值；
+    /// 这三处在本用例里填的是普通字面量（不是占位符），免得「不在作用域内」
+    /// 与「漏掉了」两件事在断言里混作一处。
+    #[test]
+    fn interpolate_scope_sentinel_covers_every_string_field() {
+        let provider = Provider {
+            enabled: true,
+            base_url: BTreeMap::from([
+                (Protocol::OpenaiCompletions, "${HOST}/v1".to_owned()),
+                (Protocol::AnthropicMessages, "${HOST}/messages".to_owned()),
+            ]),
+            selected_protocol: Some(Protocol::OpenaiCompletions),
+            api_key: ApiKey::new("sk-literal".to_owned()),
+            custom_header: BTreeMap::from([("X-Gateway-Key".to_owned(), "${KEY}".to_owned())]),
+            models: vec![ModelEntry {
+                id: "model-literal".to_owned(),
+                display_name: Some("Model ${MODEL}".to_owned()),
+                limit: ModelLimit {
+                    context_window: Some(200_000),
+                    max_input: None,
+                    max_output: None,
+                },
+                capabilities: vec![ModelCapability::Thinking],
+            }],
+        };
+
+        let projected = provider
+            .interpolate(&vars(&[
+                ("HOST", "api.example.com"),
+                ("KEY", "sk-x"),
+                ("MODEL", "gpt-4o"),
+            ]))
+            .unwrap();
+
+        assert_eq!(
+            projected,
+            Provider {
+                enabled: true,
+                base_url: BTreeMap::from([
+                    (Protocol::OpenaiCompletions, "api.example.com/v1".to_owned()),
+                    (
+                        Protocol::AnthropicMessages,
+                        "api.example.com/messages".to_owned()
+                    ),
+                ]),
+                selected_protocol: Some(Protocol::OpenaiCompletions),
+                api_key: ApiKey::new("sk-literal".to_owned()),
+                custom_header: BTreeMap::from([("X-Gateway-Key".to_owned(), "sk-x".to_owned())]),
+                models: vec![ModelEntry {
+                    id: "model-literal".to_owned(),
+                    display_name: Some("Model gpt-4o".to_owned()),
+                    limit: ModelLimit {
+                        context_window: Some(200_000),
+                        max_input: None,
+                        max_output: None,
+                    },
+                    capabilities: vec![ModelCapability::Thinking],
+                }],
+            },
+            "参与插值的字符串字段应逐个被替换，不在作用域内的原样保留"
+        );
+
+        // 兜底：插值结果里不应残留任何占位符。新增字段若被填了占位符却被漏掉
+        // 插值，上面的期望值会与实际不符——这一句则把「漏掉了」直接点出来，
+        // 不必逐字段比对才知道漏的是谁。
+        let rendered = format!("{projected:?}");
+        assert!(!rendered.contains("${"), "插值后不应残留占位符：{rendered}");
+    }
+
     /// 任一字段失败即整体失败：返回（字段名, 库报错），不含值与密钥。
     #[test]
     fn interpolate_failure_reports_field_and_variable_without_values() {

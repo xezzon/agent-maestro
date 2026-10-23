@@ -29,7 +29,6 @@ const SAVE_BY_MODE = {
  * @param {() => void} param0.onSaved 已落盘（调用方关表单并刷新列表）
  * @param {() => void} param0.onCancel 取消（不落盘）
  * @param {boolean=} param0.disabled 外部（状态开关）进行中时整体禁用表单
- * @param {(busy: boolean) => void=} param0.onBusyChange 上报本表单的保存态
  */
 export default function ProviderForm({
   mode,
@@ -38,7 +37,6 @@ export default function ProviderForm({
   onSaved,
   onCancel,
   disabled = false,
-  onBusyChange,
 }) {
   const [form] = Form.useForm();
   // 先声明 form 再建规则：端点、header 名与模型 ID 的校验要读表单实时值。
@@ -52,18 +50,11 @@ export default function ProviderForm({
   // `enabled` 不是 Form.Item（开关独立于表单），提交值里没有它；
   // 显式与 provider 合并回传，避免缺字段被后端默认值静默重置为启用。
   // 校验失败由各 Form.Item 内联展示，不会走到这里；这里的错误都是命令调用失败。
-  // 收尾放 `finally`：`useAsyncAction` 当下不会 reject，但「永不 reject」是
-  // 跨模块前提，不能靠它保证开关不复位。
   async function handleFinish(values) {
-    onBusyChange?.(true);
-    try {
-      await runSave(async () => {
-        await SAVE_BY_MODE[mode]({ ...provider, ...values });
-        onSaved();
-      });
-    } finally {
-      onBusyChange?.(false);
-    }
+    await runSave(async () => {
+      await SAVE_BY_MODE[mode]({ ...provider, ...values });
+      onSaved();
+    });
   }
 
   return (

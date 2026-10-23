@@ -46,6 +46,18 @@ impl PluginSource {
         }
     }
 
+    /// 解析来源字符串；无法识别的形态给出用户可见的原因。
+    ///
+    /// 文案只此一份：安装与重新加载此前各写一遍同样的句子，改一边就会与另一边
+    /// 漂移。
+    pub(crate) fn parse_or_err(source: &str) -> Result<Self, String> {
+        Self::parse(source).ok_or_else(|| {
+            format!(
+                "无法识别的插件来源：{source}（支持内置 builtin:<id>、指向 manifest.json 的 https 地址或本机绝对路径）"
+            )
+        })
+    }
+
     /// 来源字符串（条目的身份）：逐字还原成解析前的那一串。
     pub(crate) fn source(&self) -> String {
         match self {

@@ -41,11 +41,7 @@ impl PluginService {
 
         // 来源形态在发起获取之前判定：无法识别的来源直接拒绝。判定一次即成
         // 为值（`PluginSource`），后续流程只 match，不再重新解析同一串文本。
-        let parsed = PluginSource::parse(source).ok_or_else(|| {
-            format!(
-                "无法识别的插件来源：{source}（支持内置 builtin:<id>、指向 manifest.json 的 https 地址或本机绝对路径）"
-            )
-        })?;
+        let parsed = PluginSource::parse_or_err(source)?;
         let source_text = parsed.source();
 
         // 1. 来源即条目唯一身份：重复添加在发起下载之前拒绝。
@@ -325,11 +321,7 @@ impl PluginService {
 
         // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。
         //    manifest 只解析这一次，解析结果直接交给后面的校验与装配。
-        let parsed = PluginSource::parse(source).ok_or_else(|| {
-            format!(
-                "无法识别的插件来源：{source}（支持内置 builtin:<id>、指向 manifest.json 的 https 地址或本机绝对路径）"
-            )
-        })?;
+        let parsed = PluginSource::parse_or_err(source)?;
         let (placed, manifest) = self.fetch_placed(&parsed)?;
         // 上游 id 变更报错并保持旧状态：落位目录由条目 id 定位，id 漂移会架空映射。
         if manifest.id != entry.id {

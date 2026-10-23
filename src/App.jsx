@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Layout, Menu } from "antd";
 import PluginsPage from "@/pages/plugins";
 import PluginConfigPage from "@/pages/plugin-config";
@@ -15,18 +15,36 @@ const NAV_BOTTOM_ITEMS = [{ key: "plugins", label: "Plugins" }];
 
 function App() {
   const [current, setCurrent] = useState("providers");
+  // 插件列表是全应用的一份数据：导航项、Provider 页的投影按钮与 Plugins 页
+  // 的卡片读的都是它。此前 App 与 Provider 页各调一次 listPlugins，各持一份
+  // 快照——判定（isUsablePlugin）共享了，数据没有。
   const [plugins, setPlugins] = useState([]);
+  const [pluginsLoading, setPluginsLoading] = useState(true);
+  const [pluginsError, setPluginsError] = useState(null);
+
+  /** 刷新插件列表：成功返回列表；失败置 pluginsError 并返回 `null`（区别于空列表）。 */
+  const reloadPlugins = useCallback(async () => {
+    setPluginsLoading(true);
+    try {
+      const list = await listPlugins();
+      setPlugins(list);
+      setPluginsError(null);
+      return list;
+    } catch (err) {
+      setPluginsError(String(err));
+      console.warn("failed to refresh plugins", err);
+      return null;
+    } finally {
+      setPluginsLoading(false);
+    }
+  }, []);
 
   // 导航项随切页刷新：插件在 Plugins 页增删启停之后，重新进入任何页面时
   // 都取最新列表（list_plugins 是本地命令，代价可忽略）；取不到时保留旧列表，
   // 避免正在展示的插件配置页被清空。
   useEffect(() => {
-    listPlugins()
-      .then(setPlugins)
-      .catch((err) => {
-        console.warn("failed to refresh plugins for navigation", err);
-      });
-  }, [current]);
+    reloadPlugins();
+  }, [current, reloadPlugins]);
 
   // 分隔线之后每个已启用且加载成功的插件各占一个菜单项，直达其插件配置页；
   // 已禁用或加载失败的插件不出现（ticket #91）。
@@ -59,8 +77,15 @@ function App() {
       </Sider>
       <Layout>
         <Content className="app-content">
-          {current === "providers" && <ProvidersPage />}
-          {current === "plugins" && <PluginsPage />}
+          {current === "providers" && <ProvidersPage plugins={plugins} />}
+          {current === "plugins" && (
+            <PluginsPage
+              plugins={plugins}
+              loading={pluginsLoading}
+              loadError={pluginsError}
+              onReload={reloadPlugins}
+            />
+          )}
           {currentPlugin && (
             <PluginConfigPage
               key={currentPlugin.source}
