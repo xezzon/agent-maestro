@@ -25,6 +25,18 @@ use crate::test_global::TestGuard;
 /// 全局路径：生产期进程内一份，测试期每线程一份（见 [`crate::test_global`]）。
 static PATHS: Global<Paths> = Global::new();
 
+/// 声明里支持的平台变量前缀（ADR 0011）：五个，跨平台固定。
+///
+/// 语法检查（纯判断，不读目录）据此判断声明的变量前缀是否受支持；
+/// [`Paths::base_dir`] 负责把受支持的变量映射到各自的基准目录。
+pub(crate) const SUPPORTED_VARIABLES: [&str; 5] = [
+    "$HOME",
+    "$XDG_CONFIG_HOME",
+    "$LOCAL_APP_CONFIG",
+    "$XDG_DATA_HOME",
+    "$LOCAL_APP_DATA",
+];
+
 /// 宿主路径：主目录 + 五个平台基准目录。
 ///
 /// 五个基准目录此前由调用方各拼一遍——参数一多就容易拼错位（构造函数的五个
@@ -218,5 +230,26 @@ mod tests {
             Some(root.path().join("data-local").as_path())
         );
         assert_eq!(paths.base_dir("$FOO"), None);
+    }
+
+    /// 受支持的变量前缀与基准目录的映射一一对应：语法检查（纯判断）认这份
+    /// 清单，解析（读目录）认 [`Paths::base_dir`]，两者漂移会让同一份声明在
+    /// 解析期通过、在落位期才失败。
+    #[test]
+    fn every_supported_variable_maps_to_a_base_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::distinct_under(root.path());
+
+        for variable in SUPPORTED_VARIABLES {
+            assert!(
+                paths.base_dir(variable).is_some(),
+                "{variable} 是受支持的变量前缀，应当有基准目录"
+            );
+        }
+        assert_eq!(
+            SUPPORTED_VARIABLES.len(),
+            5,
+            "受支持的变量前缀是固定五个（ADR 0011）"
+        );
     }
 }

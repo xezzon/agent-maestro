@@ -103,21 +103,6 @@ pub(crate) struct InstantiatedPlugin {
 }
 
 impl LoadedPlugin {
-    /// 链接期校验：组件字节反序列化、导入/导出类型匹配，不触发组件 init、
-    /// 不预开放真实配置目录。这是安装期使用的入口（见 ADR 0006：fail-fast）。
-    pub(crate) fn validate(&self, engine: &Engine) -> Result<(), String> {
-        let component =
-            Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
-        let linker = build_linker(engine)?;
-        // 组件模型的 instantiate_pre 不接收 Store：返回 Pre<()> 表示类型检查通过，
-        // 不触发组件 init、不调用 host 函数。这正是安装期校验所需的最小集合。
-        linker
-            .instantiate_pre(&component)
-            .map_err(|e| format!("插件接口不兼容：{e}"))?;
-        log::debug!("plugin validated: id={}", self.manifest.id);
-        Ok(())
-    }
-
     /// 完整实例化：用于实投影（write_providers）。会预开放真实配置目录、
     /// 注册资源限制（防止恶意 memory.grow / table.grow 风暴，CWE-770）。
     pub(crate) fn instantiate_component(
@@ -127,11 +112,11 @@ impl LoadedPlugin {
     ) -> Result<InstantiatedPlugin, String> {
         let component =
             Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
-        // 预开放的写入面是装载时解析出的宿主绝对路径（见 `resolve_config_dir`）。
-        let tool_path = self.manifest.config_dir.clone();
+        // 预开放的写入面是装载时解析出的宿主绝对路径（见 `DeclaredConfigDir::resolve`）。
+        let tool_path = self.meta.config_dir.clone();
         let mut store = wasmtime::Store::new(
             engine,
-            HostState::new(&tool_path, self.manifest.id.clone(), form)?,
+            HostState::new(&tool_path, self.id().to_owned(), form)?,
         );
         store.limiter(|s| &mut s.limits);
         store
@@ -142,6 +127,25 @@ impl LoadedPlugin {
             .map_err(|e| format!("插件接口不兼容：{e}"))?;
         Ok(InstantiatedPlugin { store, world })
     }
+}
+
+/// 链接期校验：组件字节反序列化、导入/导出类型匹配，不触发组件 init、
+/// 不预开放真实配置目录。这是安装期使用的入口（见 ADR 0006：fail-fast）。
+///
+/// 校验的对象是 **wasm 字节**，与「插件是否已装载」无关——故它不挂在已装载的
+/// 插件上，而是个独立入口：装配方要在解析配置目录（会建目录）之前问一句
+/// 「这份 wasm 是不是合法组件」，不必先建出目录来（见 ADR 0022）。
+pub(super) fn validate_component(engine: &Engine, wasm: &[u8], id: &str) -> Result<(), String> {
+    let component =
+        Component::new(engine, wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
+    let linker = build_linker(engine)?;
+    // 组件模型的 instantiate_pre 不接收 Store：返回 Pre<()> 表示类型检查通过，
+    // 不触发组件 init、不调用 host 函数。这正是安装期校验所需的最小集合。
+    linker
+        .instantiate_pre(&component)
+        .map_err(|e| format!("插件接口不兼容：{e}"))?;
+    log::debug!("plugin validated: id={id}");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -161,7 +165,7 @@ mod testutil {
         let loaded = PlacedPlugin::new(&root.join("placed"), manifest, wasm)
             .load()
             .unwrap();
-        let config_dir = loaded.manifest.config_dir.clone();
+        let config_dir = loaded.meta.config_dir.clone();
         (loaded, config_dir)
     }
 }
@@ -170,7 +174,7 @@ mod testutil {
 mod tests {
     use std::fs;
 
-    use super::testutil::loaded_plugin;
+    use super::{testutil::loaded_plugin, validate_component};
     use crate::plugin::{build_engine, builtin};
 
     #[test]
@@ -190,7 +194,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
 
         let (plugin, _) = loaded_plugin(root.path(), b"not a wasm component");
-        let Err(err) = plugin.validate(&build_engine()) else {
+        let Err(err) = validate_component(&build_engine(), &plugin.wasm, "pi") else {
             panic!("非组件字节不应通过 validate");
         };
 
@@ -202,9 +206,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
 
         let (plugin, _) = loaded_plugin(root.path(), builtin::PI_WASM);
-        plugin
-            .validate(&build_engine())
-            .expect("内置 pi 应通过 validate");
+        validate_component(&build_engine(), &plugin.wasm, "pi").expect("内置 pi 应通过 validate");
     }
 
     /// 关键安全约束：链接期校验不触发组件 init、不预开放真实配置目录。
@@ -218,7 +220,7 @@ mod tests {
         let original = "original-content";
         fs::write(&marker, original).unwrap();
 
-        plugin.validate(&build_engine()).expect("validate 应通过");
+        validate_component(&build_engine(), &plugin.wasm, "pi").expect("validate 应通过");
 
         assert_eq!(
             fs::read_to_string(&marker).unwrap(),

@@ -10,6 +10,7 @@ use std::{
 use super::{
     ApplyStatus, PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport,
     PluginConfig, PluginState, PluginView, apply_summary, builtin,
+    manifest::parse_count,
     projection::project_files,
     source::is_https_url,
     testutil::{
@@ -246,6 +247,69 @@ fn add_plugin_rejects_wasm_that_is_not_a_component() {
         !maestro_paths.plugin_dir("pi2").exists(),
         "校验失败不得落位"
     );
+}
+
+/// 安装失败不得在用户主目录下留下配置目录：解析 manifest 不建目录，建目录是
+/// 显式的一步且发生在链接期校验之后（ADR 0022）。
+#[test]
+fn add_plugin_creates_no_config_dir_when_the_wasm_is_invalid() {
+    let home = temp_home();
+    let store = store_at(home.path());
+    let fetcher = StubFetcher::new();
+    fetcher.serve(MANIFEST_URL, manifest_json("pi2", "$HOME/.pi2", WASM_URL));
+    fetcher.serve(WASM_URL, b"not a wasm component".to_vec());
+    let service = stub_service(home.path(), fetcher);
+
+    let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+    assert!(err.contains("不是有效的 WASM 组件"), "{err}");
+    assert!(
+        !home.path().join(".pi2").exists(),
+        "校验失败不得留下配置目录：{}",
+        home.path().join(".pi2").display()
+    );
+}
+
+/// 同上，但失败发生在 id 冲突预检：冲突在解析配置目录之前就被拒，目录压根没被
+/// 建出来（ADR 0022）。
+#[test]
+fn add_plugin_creates_no_config_dir_when_the_id_conflicts() {
+    let home = temp_home();
+    let maestro_paths = Paths::get();
+    fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+    fs::write(
+        maestro_paths.config_path(),
+        format!(
+            r#"{{"version":1,"providers":{{}},"plugins":[{{"source":"{}","enabled":true,"id":"pi"}}]}}"#,
+            builtin::source_of(builtin::BUILTIN_PI_ID)
+        ),
+    )
+    .unwrap();
+    let store = store_at(home.path());
+    let service = stub_service(home.path(), https_stub("pi"));
+
+    let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+    assert!(err.contains("已被来源 builtin:pi 占用"), "{err}");
+    assert!(
+        !home.path().join(".pi").exists(),
+        "id 冲突不得留下配置目录：{}",
+        home.path().join(".pi").display()
+    );
+}
+
+/// 一次安装只解析一次 manifest：来源侧解析出的 manifest 直接交给后面的校验
+/// 与装配，落位产物不再被重新解析一遍（ADR 0022）。
+#[test]
+fn add_plugin_parses_the_manifest_only_once() {
+    let home = temp_home();
+    let store = store_at(home.path());
+    let service = stub_service(home.path(), https_stub("pi2"));
+
+    let before = parse_count();
+    service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+    assert_eq!(parse_count() - before, 1, "一次安装只解析一次 manifest");
 }
 
 #[test]

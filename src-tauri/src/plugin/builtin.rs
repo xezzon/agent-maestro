@@ -70,7 +70,8 @@ mod tests {
     #[test]
     fn embedded_pi_manifest_is_valid_and_matches_builtin_identity() {
         let root = tempfile::tempdir().unwrap();
-        let _g = crate::paths::Paths::test_guard(crate::paths::Paths::from_home(root.path()));
+        let paths = crate::paths::Paths::from_home(root.path());
+        let _g = crate::paths::Paths::test_guard(paths.clone());
         let manifest = parse_manifest(
             &PluginSource::Builtin(BUILTIN_PI_ID.to_owned()),
             PI_MANIFEST_JSON,
@@ -79,7 +80,7 @@ mod tests {
 
         assert_eq!(manifest.id, BUILTIN_PI_ID);
         assert_eq!(
-            manifest.config_dir,
+            manifest.config_dir.resolve(&paths).unwrap(),
             root.path().canonicalize().unwrap().join(".pi")
         );
         assert_eq!(

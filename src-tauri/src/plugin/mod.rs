@@ -73,8 +73,19 @@ struct PlacedPlugin {
     wasm: Vec<u8>,
 }
 
-struct LoadedPlugin {
+/// 插件描述：manifest 声明 + 解析后的配置目录。
+///
+/// 两者分开持有：manifest 是反序列化的产物（`config_dir` 只是**声明**），
+/// 配置目录是显式解析一步的产物（宿主绝对路径，见 ADR 0022）。禁用态也保留
+/// 这份描述——列表要展示配置目录。
+#[derive(Clone)]
+struct PluginMeta {
     manifest: Manifest,
+    config_dir: PathBuf,
+}
+
+struct LoadedPlugin {
+    meta: PluginMeta,
     wasm: Arc<[u8]>,
     plugin: PlacedPlugin,
 }
@@ -129,20 +140,37 @@ impl PlacedPlugin {
         remove_placed_dir(&self.plugin_dir)
     }
 
-    /// 装载：解析 manifest 并按当前平台解析 `config_dir`（见 ADR 0011）。
+    /// 装载：解析 manifest 并解析 `config_dir`（见 ADR 0011）。
     ///
-    /// 解析是装载的必经步骤，在此完成而非留给调用点——装载是 `LoadedPlugin`
-    /// 的唯一构造点，因此 `config_dir` 已解析为宿主绝对路径由装载路径保证。
-    ///
-    /// 使用全局 [`Paths`] 解析，调用前需先初始化。
+    /// 装载是**显式**的一步：解析（反序列化）只产出声明、不碰文件系统，落位
+    /// 目录重建时由此把声明解析成宿主绝对路径并建出目录（见 ADR 0022）。
     fn load(self) -> Result<LoadedPlugin, String> {
         let manifest = parse_placed(self.raw_manifest.as_str())?;
-        let wasm = Arc::from(self.wasm.clone());
-        Ok(LoadedPlugin {
-            manifest,
+        let config_dir = manifest.config_dir.resolve(&Paths::get())?;
+        Ok(LoadedPlugin::from_parts(manifest, config_dir, self))
+    }
+}
+
+impl LoadedPlugin {
+    /// 由已解析的 manifest 与落位产物装配：配置目录必须已解析（显式一步的产物）。
+    ///
+    /// 安装路径上，manifest 只解析一次：来源侧解析出的 manifest 直接交给本
+    /// 构造器，不再由落位产物重新解析一遍。
+    fn from_parts(manifest: Manifest, config_dir: PathBuf, plugin: PlacedPlugin) -> Self {
+        let wasm = Arc::from(plugin.wasm.clone());
+        Self {
+            meta: PluginMeta {
+                manifest,
+                config_dir,
+            },
             wasm,
-            plugin: self,
-        })
+            plugin,
+        }
+    }
+
+    /// 插件 id（落位目录名、id 冲突检查与投影报告的键）。
+    fn id(&self) -> &str {
+        &self.meta.manifest.id
     }
 }
 
@@ -256,8 +284,8 @@ pub(crate) struct PluginConfig {
 enum PluginState {
     /// 损坏的插件
     Error(String),
-    /// 禁用的插件，不加载到内存
-    Disabled(Manifest),
+    /// 禁用的插件，不加载到内存（保留描述供列表展示）。
+    Disabled(PluginMeta),
     /// 已落位且文件没有损坏的插件，可以正常加载。
     /// Arc 便于投影前克隆快照、锁外执行 wasm（见 `write_providers`）。
     Loaded(Arc<LoadedPlugin>),
@@ -336,7 +364,7 @@ impl PluginService {
                     if entry.enabled {
                         PluginState::Loaded(Arc::new(loaded_plugin))
                     } else {
-                        PluginState::Disabled(loaded_plugin.manifest)
+                        PluginState::Disabled(loaded_plugin.meta)
                     }
                 }
                 Err(err) => PluginState::Error(err),
@@ -371,7 +399,7 @@ impl PluginService {
         let plugin_entries = store.with_read(|s| s.list_plugins())?;
         let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
         let plugin_view =
-            |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| PluginView {
+            |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginView {
                 source: entry.source.clone(),
                 builtin: matches!(
                     PluginSource::parse(&entry.source),
@@ -379,8 +407,8 @@ impl PluginService {
                 ),
                 enabled: entry.enabled,
                 id: entry.id.clone(),
-                config_dir: manifest.map(|m| m.config_dir.display().to_string()),
-                settings_schema: manifest.and_then(|m| m.settings_schema.clone()),
+                config_dir: meta.map(|m| m.config_dir.display().to_string()),
+                settings_schema: meta.and_then(|m| m.manifest.settings_schema.clone()),
                 error,
             };
         Ok(plugin_entries
@@ -390,9 +418,9 @@ impl PluginService {
                 match plugin {
                     Some(plugin) => match plugin {
                         PluginState::Loaded(loaded_plugin) => {
-                            plugin_view(entry, Some(&loaded_plugin.manifest), None)
+                            plugin_view(entry, Some(&loaded_plugin.meta), None)
                         }
-                        PluginState::Disabled(manifest) => plugin_view(entry, Some(manifest), None),
+                        PluginState::Disabled(meta) => plugin_view(entry, Some(meta), None),
                         PluginState::Error(err) => plugin_view(entry, None, Some(err.to_owned())),
                     },
                     None => plugin_view(entry, None, Some(format!("插件 {} 未加载", entry.id))),

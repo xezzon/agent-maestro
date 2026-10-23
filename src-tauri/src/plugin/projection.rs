@@ -131,7 +131,7 @@ impl PluginService {
             .instantiate_component(&self.engine, form)?
             .write_provider(&projected)?;
         // 插件返回的是相对 config_dir 的路径：拼成宿主绝对路径回报给界面。
-        let files = project_files(&loaded_plugin.manifest.config_dir, files)?;
+        let files = project_files(&loaded_plugin.meta.config_dir, files)?;
         Ok((files, skipped))
     }
 }
