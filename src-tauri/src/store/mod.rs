@@ -89,8 +89,8 @@ impl Store {
 
     /// 当前配置；存储处于保护状态时返回错误。
     ///
-    /// 错误按值返回：调用方不必持有 `&StoreError` 的借用，命令层因此不必
-    /// 为「把错误交出去」而反复 `map_err(Clone::clone)`。本方法**模块私有**——
+    /// 错误按值返回：调用方拿到的是一份自有值，交给命令层即可，不必为
+    /// 「把借用交出去」而四处 `map_err(Clone::clone)`。本方法**模块私有**——
     /// 外部只经由语义化查询（`providers_snapshot` / `enabled_providers` /
     /// `variables_snapshot` / `list_plugins` / `config_snapshot`）读取配置，
     /// 不直接触碰 `Config` 的字段布局。

@@ -142,8 +142,8 @@ impl StoreError {
     }
 }
 
-impl From<&StoreError> for String {
-    fn from(value: &StoreError) -> Self {
+impl From<StoreError> for String {
+    fn from(value: StoreError) -> Self {
         match value {
             StoreError::Corrupt { path, detail } => format!(
                 "配置文件已损坏：{}\n原因：{detail}\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
@@ -172,17 +172,11 @@ impl From<&StoreError> for String {
                 slug,
                 field,
                 reason,
-            } => interpolation_failure_message(slug, field, reason),
+            } => interpolation_failure_message(&slug, &field, &reason),
             StoreError::InvalidVariableName { name } => format!(
                 "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
             ),
         }
-    }
-}
-
-impl From<StoreError> for String {
-    fn from(value: StoreError) -> Self {
-        (&value).into()
     }
 }
 
