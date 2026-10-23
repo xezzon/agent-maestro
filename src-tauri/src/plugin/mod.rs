@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
 use crate::{
+    fs_util::{Durability, write_atomic},
     paths::Paths,
     plugin::builtin::BUILTINS,
     store::{AppStore, PluginEntry},
@@ -176,13 +177,12 @@ impl LoadedPlugin {
 
 /// 落位目录内逐文件覆盖一个文件：同目录临时文件 + 原子改名（tmp + rename）。
 /// 落位产物（manifest/wasm）与插件配置共用这一条原子写路径。
+///
+/// 原子写的实现收在 crate 级 [`crate::fs_util`]：宿主侧另有一处同样的
+/// 「tmp + rename」（配置存储），两份实现曾各自漂移过一次。耐久性策略在这里
+/// 显式声明——插件侧产物不 fsync（可从来源重新获取，见 [`Durability`]）。
 fn write_placed_file(dir: &Path, name: &str, contents: &[u8]) -> Result<(), String> {
-    let tmp = tempfile::Builder::new()
-        .prefix(&format!(".{name}.tmp-"))
-        .tempfile_in(dir)
-        .map_err(|e| format!("创建落位临时文件失败：{e}"))?;
-    fs::write(tmp.path(), contents).map_err(|e| format!("写入 {name} 失败：{e}"))?;
-    fs::rename(tmp.path(), dir.join(name)).map_err(|e| format!("覆盖 {name} 失败：{e}"))
+    write_atomic(&dir.join(name), contents, Durability::Unsynced).map_err(|e| e.to_string())
 }
 
 /// 删除落位目录；目录已不存在同样成功（幂等）。

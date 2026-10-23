@@ -1,4 +1,5 @@
 mod command;
+mod fs_util;
 mod interpolate;
 mod logging;
 mod paths;
