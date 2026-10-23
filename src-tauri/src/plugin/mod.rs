@@ -5,15 +5,17 @@
 //! 预开放给组件（guest 路径 `/`），插件在沙箱内经 WASI 直接落盘。
 //! 第三方来源（https 与 file）的获取、落位与生命周期见 ADR 0006。
 //!
-//! 本模块持有插件服务的共享词汇：三层类型（`PlacedPlugin` → `LoadedPlugin` →
-//! `PluginState`）、落位目录约定，以及与配置存储、命令层共用的条目 / 视图 /
-//! 配置类型。前两者是模块私有项——定义在模块根，子模块可直接使用（Rust 的
-//! 私有项对后代模块可见），不向 crate 外暴露。
+//! 本模块持有插件服务的共享词汇：四层类型（`PlacedPlugin` → `PluginMeta` →
+//! `LoadedPlugin` → `PluginState`）、落位目录约定，以及与配置存储、命令层共用的
+//! 条目 / 视图 / 配置类型。前几者是模块私有项——定义在模块根，子模块可直接使用
+//! （Rust 的私有项对后代模块可见），不向 crate 外暴露。
 //!
 //! 行为按职责拆在同级子模块：
 //! - [`install`]：获取、落位、启停、移除与重新加载；
 //! - [`projection`]：Provider 投影与文件路径拼接；
-//! - [`config`]：插件配置（`config.json`）读写。
+//! - [`config`]：插件配置（`config.json`）读写；
+//! - [`source`]：插件来源与 https 地址的判定；
+//! - [`manifest`]：manifest 的解析、校验与 `config_dir` 声明语法。
 
 mod builtin;
 mod config;

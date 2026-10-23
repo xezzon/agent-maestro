@@ -204,7 +204,7 @@ fn current_platform_key() -> &'static str {
 /// 从 config_dir 对象声明里取 `platform` 平台的声明。
 ///
 /// 键固定为 [`SUPPORTED_PLATFORM_KEYS`] 列出的三个平台名，未知键与非字符串值一律拒绝；
-/// 取出的值交给 [`resolve_config_dir`] 走与字符串形式同一套变量语法。`platform` 由
+/// 取出的值交给 [`DeclaredConfigDir::parse`] 走与字符串形式同一套变量语法。`platform` 由
 /// 反序列化传入 [`current_platform_key`]，独立成参数以便测试覆盖三个平台的选取。
 fn platform_declaration(
     map: &serde_json::Map<String, serde_json::Value>,
