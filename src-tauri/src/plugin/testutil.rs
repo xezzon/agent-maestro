@@ -8,9 +8,10 @@ use std::{
 pub(super) use super::fetch::testutil::{LockProbeFetcher, StubFetcher};
 pub(super) use super::manifest::testutil::manifest_json;
 use super::{PluginService, fetch::Fetcher};
-use crate::store::{AppStore, Config, Store};
-
-pub(crate) use crate::testutil::{setup_paths, temp_home};
+use crate::{
+    store::{AppStore, Config, Store},
+    testutil::setup_paths,
+};
 
 /// 不联网的插件服务：任何未预置的拉取都会失败。
 pub(crate) fn test_service(home: &Path) -> PluginService {

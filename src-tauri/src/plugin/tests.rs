@@ -15,13 +15,14 @@ use super::{
     source::is_https_url,
     testutil::{
         LockProbeFetcher, StubFetcher, fetcher_service, manifest_json, snapshot, store_at,
-        stub_service, temp_home, test_service,
+        stub_service, test_service,
     },
 };
 use crate::{
     paths::Paths,
     provider::{ApiKey, Provider},
     store::PluginEntry,
+    testutil::temp_home,
 };
 
 const MANIFEST_URL: &str = "https://example.com/releases/download/v1/manifest.json";
@@ -379,7 +380,7 @@ fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
             let home = home_path.clone();
             thread::spawn(move || {
                 // 子线程 thread_local 为空，需重新设置全局目录。
-                crate::plugin::testutil::setup_paths(&home);
+                crate::testutil::setup_paths(&home);
                 service.add_plugin(&store, source_a)
             })
         },
@@ -388,7 +389,7 @@ fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
             let service = Arc::clone(&service);
             let home = home_path.clone();
             thread::spawn(move || {
-                crate::plugin::testutil::setup_paths(&home);
+                crate::testutil::setup_paths(&home);
                 service.add_plugin(&store, source_b)
             })
         },
@@ -440,7 +441,7 @@ fn set_enabled_waits_for_the_install_lock() {
         let home = home_path.clone();
         thread::spawn(move || {
             // 子线程 thread_local 为空，需重新设置全局目录。
-            crate::plugin::testutil::setup_paths(&home);
+            crate::testutil::setup_paths(&home);
             tx.send(service.disable(&store, MANIFEST_URL)).unwrap();
         })
     };

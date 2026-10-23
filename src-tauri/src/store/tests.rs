@@ -1,8 +1,8 @@
 //! 配置存储的单元测试：读写、落盘往返、校验与保护态。
 
-use super::testutil::temp_home;
 use super::*;
 use crate::provider::{ApiKey, ModelEntry, Protocol};
+use crate::testutil::temp_home;
 
 #[test]
 fn empty_config_serializes_to_version_1_schema() {
