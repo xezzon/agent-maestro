@@ -945,7 +945,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         manifest_json("pibad", "$HOME/.pibad", "plugin.wasm"),
         b"not a wasm component",
     )
-    .load()
+    .load(&Paths::get())
     .unwrap();
     let mut entries = service.entries.write().unwrap();
     entries.insert("pibad".to_owned(), PluginState::Loaded(Arc::new(bad)));

@@ -9,6 +9,7 @@ pub(super) use super::fetch::testutil::{LockProbeFetcher, StubFetcher};
 pub(super) use super::manifest::testutil::manifest_json;
 use super::{PluginService, fetch::Fetcher};
 use crate::{
+    paths::Paths,
     store::{AppStore, Config, Store},
     testutil::setup_paths,
 };
@@ -26,13 +27,13 @@ pub(super) fn stub_service(home: &Path, fetcher: StubFetcher) -> PluginService {
 /// 测试服务一律不读真实环境。
 pub(super) fn fetcher_service(home: &Path, fetcher: Arc<dyn Fetcher>) -> PluginService {
     setup_paths(home);
-    PluginService::with_fetcher(fetcher)
+    PluginService::with_fetcher(Paths::from_home(home), fetcher)
 }
 
 pub(crate) fn store_at(home: &Path) -> AppStore {
     setup_paths(home);
     AppStore {
-        store: RwLock::new(Store::new()),
+        store: RwLock::new(Store::new(Paths::from_home(home).config_path())),
     }
 }
 

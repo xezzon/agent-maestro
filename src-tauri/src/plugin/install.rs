@@ -8,7 +8,6 @@ use std::{fs, path::Path, sync::Arc};
 
 use crate::{
     errors::user_message,
-    paths::Paths,
     store::{AppStore, PluginEntry, StoreError},
 };
 
@@ -70,7 +69,7 @@ impl PluginService {
         // plugin config_dir。
         validate_component(&self.engine, &placed.wasm, &manifest.id)?;
         // 解析配置目录：显式的一步（建目录在此发生），在链接期校验之后、落位之前。
-        let config_dir = manifest.config_dir.resolve(&Paths::get())?;
+        let config_dir = manifest.config_dir.resolve(&self.paths)?;
         let loaded = LoadedPlugin::from_parts(manifest, config_dir, placed);
         loaded.plugin.save()?;
 
@@ -165,7 +164,7 @@ impl PluginService {
         };
 
         Ok((
-            PlacedPlugin::new(&Paths::get().plugin_dir(&manifest.id), raw_manifest, &wasm),
+            PlacedPlugin::new(&self.paths.plugin_dir(&manifest.id), raw_manifest, &wasm),
             manifest,
         ))
     }
@@ -218,7 +217,10 @@ impl PluginService {
         // 启用先装载再写配置：装载失败不写条目、不动注册表，旧状态保持可用。
         // 禁用不装载：注册表里已有一份描述，降级即可。
         let loaded = if enabled {
-            Some(PlacedPlugin::from_plugin_dir(&Paths::get().plugin_dir(&entry.id))?.load()?)
+            Some(
+                PlacedPlugin::from_plugin_dir(&self.paths.plugin_dir(&entry.id))?
+                    .load(&self.paths)?,
+            )
         } else {
             None
         };
@@ -303,7 +305,7 @@ impl PluginService {
         };
 
         // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
-        remove_placed_dir(&Paths::get().plugin_dir(&entry.id))
+        remove_placed_dir(&self.paths.plugin_dir(&entry.id))
     }
 
     /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，按「先
@@ -343,7 +345,7 @@ impl PluginService {
         // 目录，避免未授权写入。
         validate_component(&self.engine, &placed.wasm, &manifest.id)?;
         // 解析配置目录：显式的一步（建目录在此发生），在链接期校验之后、落位之前。
-        let config_dir = manifest.config_dir.resolve(&Paths::get())?;
+        let config_dir = manifest.config_dir.resolve(&self.paths)?;
         let loaded = LoadedPlugin::from_parts(manifest, config_dir, placed);
         // 逐文件覆盖落位产物：不触碰目录中宿主产物以外的文件（见 ADR 0018）。
         loaded.plugin.save()?;

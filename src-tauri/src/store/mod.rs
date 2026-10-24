@@ -29,7 +29,7 @@ use std::{
     sync::RwLock,
 };
 
-use crate::{paths::Paths, provider::Provider, variables::Variables};
+use crate::{provider::Provider, variables::Variables};
 
 pub(crate) use schema::{CONFIG_VERSION, Config, PluginEntry, StoreError};
 
@@ -72,10 +72,12 @@ pub(crate) struct Store {
 }
 
 impl Store {
-    /// 从全局 [`Paths`] 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
+    /// 从给定路径加载配置。文件不存在视为首次使用（空配置）；
     /// 损坏则进入保护状态。
-    pub(crate) fn new() -> Self {
-        let config_path = Paths::get().config_path();
+    ///
+    /// 路径由构造方（`lib.rs` 的装配、测试夹具）显式传入：构造函数不再自己去
+    /// 取全局环境，依赖在签名上可见，测试也能指向任意配置文件（#141 I-4）。
+    pub(crate) fn new(config_path: PathBuf) -> Self {
         let state = match fs::read_to_string(&config_path) {
             Ok(text) => Self::parse(&config_path, &text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),

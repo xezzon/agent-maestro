@@ -309,7 +309,6 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_global::TestGuard;
 
     fn manifest_text(id: &str, entry: &str) -> String {
         crate::plugin::testutil::manifest_json(id, "$HOME/.x", entry)
@@ -330,17 +329,19 @@ mod tests {
         PluginSource::Builtin("pi".to_owned())
     }
 
-    /// 注入的基准目录：全部落在临时目录下，不读真实环境。
-    fn platform_dirs_setup() -> (tempfile::TempDir, TestGuard<Paths>) {
+    /// 基准目录：全部落在临时目录下，不读真实环境。
+    ///
+    /// 语法检查（[`DeclaredConfigDir::parse`]）与路径解析（`resolve`）都接收
+    /// [`Paths`] 值、不读进程级全局——夹具因此不注入全局，直接返回值（#141 I-4）。
+    fn platform_dirs_setup() -> (tempfile::TempDir, Paths) {
         let root = tempfile::tempdir().unwrap();
-        let dirs = Paths::distinct_under(root.path());
-        let guard = Paths::test_guard(dirs);
-        (root, guard)
+        let paths = Paths::distinct_under(root.path());
+        (root, paths)
     }
 
     #[test]
     fn manifest_parses_required_fields_and_tolerates_unknown_fields() {
-        let (_root, _g) = platform_dirs_setup();
+        let (_root, _paths) = platform_dirs_setup();
         let manifest = parse_manifest(
             &file_source(),
             r#"{
@@ -366,7 +367,7 @@ mod tests {
     /// 的 manifest 不得在用户主目录下留下任何目录。
     #[test]
     fn parsing_a_manifest_creates_no_directory() {
-        let (root, _g) = platform_dirs_setup();
+        let (root, _paths) = platform_dirs_setup();
 
         let manifest = parse_manifest(&file_source(), &manifest_text("pi", "p.wasm")).unwrap();
 
@@ -382,7 +383,7 @@ mod tests {
     /// 缺省即 None（该插件无需用户填写表单）。
     #[test]
     fn manifest_settings_schema_is_passed_through_verbatim_and_optional() {
-        let (_root, _g) = platform_dirs_setup();
+        let (_root, _paths) = platform_dirs_setup();
         let schema = serde_json::json!({
             "type": "object",
             "properties": { "model": { "type": "string", "title": "模型" } },
@@ -413,7 +414,7 @@ mod tests {
     /// rjsf 按 `properties` 的顺序排布表单字段，序列化时不得按字典序重排。
     #[test]
     fn settings_schema_property_order_matches_the_manifest() {
-        let (_root, _g) = platform_dirs_setup();
+        let (_root, _paths) = platform_dirs_setup();
         let text = r#"{
                 "id": "zed",
                 "config_dir": "$HOME/.zed",
@@ -445,7 +446,7 @@ mod tests {
 
     #[test]
     fn manifest_with_invalid_id_is_rejected() {
-        let (_root, _g) = platform_dirs_setup();
+        let (_root, _paths) = platform_dirs_setup();
         for id in ["Pi", "1pi", "-pi", "pi.", "pi 中文", ""] {
             let text = manifest_text(id, "p.wasm");
             let err = parse_manifest(&file_source(), &text).unwrap_err();
@@ -471,8 +472,7 @@ mod tests {
     /// 由 resolve 建出。
     #[test]
     fn config_dir_resolves_each_platform_variable_into_its_base_dir() {
-        let (root, _g) = platform_dirs_setup();
-        let paths = Paths::get();
+        let (root, paths) = platform_dirs_setup();
 
         for (declared, base, relative) in [
             ("$HOME/.pi", "home", ".pi"),
@@ -504,8 +504,7 @@ mod tests {
 
     #[test]
     fn config_dir_treats_tilde_as_home() {
-        let (_root, _g) = platform_dirs_setup();
-        let paths = Paths::get();
+        let (_root, paths) = platform_dirs_setup();
 
         let tilde = DeclaredConfigDir::parse("~/.x")
             .unwrap()
@@ -522,8 +521,7 @@ mod tests {
     /// 三个键都给上、各指不同基准目录，断言随运行平台分派。
     #[test]
     fn config_dir_object_picks_the_current_platform_declaration() {
-        let (root, _g) = platform_dirs_setup();
-        let paths = Paths::get();
+        let (root, paths) = platform_dirs_setup();
         let text = r#"{
             "id": "zed",
             "config_dir": {
@@ -586,7 +584,7 @@ mod tests {
 
     #[test]
     fn config_dir_object_rejects_unknown_keys_non_string_values_and_non_object_shapes() {
-        let (root, _g) = platform_dirs_setup();
+        let (root, _paths) = platform_dirs_setup();
 
         for (config_dir, expected) in [
             // 键固定为三个平台名，未知键拒绝。
@@ -627,7 +625,7 @@ mod tests {
     /// manifest 不合法就不该触发 wasm 下载，更不该留下目录。
     #[test]
     fn config_dir_rejects_shapes_outside_the_grammar() {
-        let (root, _g) = platform_dirs_setup();
+        let (root, _paths) = platform_dirs_setup();
 
         for (declared, expected) in [
             ("$FOO/.x", "不支持的平台变量"),
@@ -657,8 +655,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn config_dir_rejects_a_symlink_escaping_its_base_dir() {
-        let (root, _g) = platform_dirs_setup();
-        let paths = Paths::get();
+        let (root, paths) = platform_dirs_setup();
         let outside = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         fs::create_dir_all(&home).unwrap();
@@ -677,8 +674,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn config_dir_rejects_a_path_that_canonicalizes_to_the_base_dir_itself() {
-        let (root, _g) = platform_dirs_setup();
-        let paths = Paths::get();
+        let (root, paths) = platform_dirs_setup();
         let home = root.path().join("home");
         fs::create_dir_all(&home).unwrap();
         // `home/loop` 是指向 `home` 的 symlink。`$HOME/loop` 形态合法但规范化后
@@ -695,7 +691,7 @@ mod tests {
 
     #[test]
     fn file_entry_must_be_a_relative_path_without_parent_dir() {
-        let (_root, _g) = platform_dirs_setup();
+        let (_root, _paths) = platform_dirs_setup();
         for entry in ["/etc/passwd", "../outside.wasm", "sub/../../outside.wasm"] {
             let err = parse_manifest(&file_source(), &manifest_text("pi", entry)).unwrap_err();
             assert!(err.contains("entry"), "entry {entry:?} 应被拒绝：{err}");
@@ -705,7 +701,7 @@ mod tests {
 
     #[test]
     fn file_entry_rejects_non_https_schemes() {
-        let (_root, _g) = platform_dirs_setup();
+        let (_root, _paths) = platform_dirs_setup();
         // 带 scheme 的 entry 只接受 https；http:// 等既不是相对路径也不会联网获取，
         // 必须在解析期拒绝，而不是当成相对路径去读一个不可能存在的文件。
         for entry in [
@@ -731,7 +727,7 @@ mod tests {
 
     #[test]
     fn https_entry_must_be_an_https_url() {
-        let (_root, _g) = platform_dirs_setup();
+        let (_root, _paths) = platform_dirs_setup();
         let ok = manifest_text("pi", "https://example.com/releases/download/v1/plugin.wasm");
         assert_eq!(
             parse_manifest(&https_source(), &ok).unwrap().entry,
@@ -756,7 +752,7 @@ mod tests {
 
     #[test]
     fn builtin_entry_is_not_constrained() {
-        let (_root, _g) = platform_dirs_setup();
+        let (_root, _paths) = platform_dirs_setup();
         // 内置插件的 wasm 内嵌于二进制，entry 不参与解析。
         let text = manifest_text("pi", "target/wasm32-wasip2/release/maestro_plugin_pi.wasm");
         assert!(parse_manifest(&builtin_source(), &text).is_ok());

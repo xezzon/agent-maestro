@@ -96,11 +96,11 @@ pub fn run() {
         // 添加插件对话框用它选择本机 manifest.json（file 来源）。
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            let store = Store::new();
+            let store = Store::new(paths.config_path());
             app.manage(AppStore {
                 store: RwLock::new(store),
             });
-            app.manage(PluginService::new());
+            app.manage(PluginService::new(paths));
 
             // logger 已随插件 setup attach：补报降级原因与非法级别值。
             if let Some(reason) = logging::degraded_reason() {

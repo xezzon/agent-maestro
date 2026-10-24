@@ -149,9 +149,9 @@ impl PlacedPlugin {
     ///
     /// 装载是**显式**的一步：解析（反序列化）只产出声明、不碰文件系统，落位
     /// 目录重建时由此把声明解析成宿主绝对路径并建出目录（见 ADR 0022）。
-    fn load(self) -> Result<LoadedPlugin, String> {
+    fn load(self, paths: &Paths) -> Result<LoadedPlugin, String> {
         let manifest = parse_placed(self.raw_manifest.as_str())?;
-        let config_dir = manifest.config_dir.resolve(&Paths::get())?;
+        let config_dir = manifest.config_dir.resolve(paths)?;
         Ok(LoadedPlugin::from_parts(manifest, config_dir, self))
     }
 }
@@ -302,6 +302,9 @@ pub(crate) struct PluginService {
     engine: Engine,
     /// https 拉取的注入点（生产为同步 reqwest 实现，测试为替身）。
     fetcher: Arc<dyn Fetcher>,
+    /// 宿主路径（构造时注入，#141 I-4）：落位目录与 `config_dir` 的平台变量
+    /// 解析都从它取值，不读进程级全局。
+    paths: Paths,
     /// 内存注册表：插件 id（配置条目的 `id`）→ 装载状态。
     /// 读多写少：`list` / `write_providers` 的快照读路径在锁内并发；
     /// 安装/启停/移除/重载写路径走 `entries.write()` 独占。
@@ -320,17 +323,18 @@ fn build_engine() -> Engine {
 }
 
 impl PluginService {
-    /// 构造：使用全局的 [`Paths`]，它在应用启动阶段完成初始化
-    /// （[`Paths::init_from_system`]，见 `lib.rs` 的 `run()`，早于 logger attach）。
-    pub(crate) fn new() -> Self {
-        Self::with_fetcher(Arc::new(HttpFetcher::new()))
+    /// 构造：注入宿主路径（`lib.rs` 在应用启动阶段完成初始化后传入，
+    /// 见 `run()` 的装配，早于 logger attach）。
+    pub(crate) fn new(paths: Paths) -> Self {
+        Self::with_fetcher(paths, Arc::new(HttpFetcher::new()))
     }
 
     /// 注入 fetcher：测试用替身。
-    fn with_fetcher(fetcher: Arc<dyn Fetcher>) -> Self {
+    fn with_fetcher(paths: Paths, fetcher: Arc<dyn Fetcher>) -> Self {
         Self {
             engine: build_engine(),
             fetcher,
+            paths,
             entries: RwLock::new(HashMap::new()),
             install_lock: Mutex::new(()),
         }
@@ -339,8 +343,8 @@ impl PluginService {
     /// 应用启动：从配置条目装载插件注册表（装载失败进错误态，离线可用），
     /// 并补装配置中缺失的内置插件——与其余来源同一安装管线（落位 + 写条目）。
     ///
-    /// 全局路径由应用 setup 阶段初始化（见 `lib.rs`），本方法只读不初始化。
-    /// 配置存储不可用则降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
+    /// 宿主路径由构造时注入（见 [`PluginService::new`]）。配置存储不可用则
+    /// 降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
     pub(crate) fn startup(&self, store: &AppStore) -> Result<(), String> {
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
         let plugin_entries = match store.with_read(|s| s.list_plugins()) {
@@ -357,7 +361,7 @@ impl PluginService {
         let mut plugins = HashMap::with_capacity(plugin_entries.len());
         for entry in &plugin_entries {
             let plugin_id = entry.id.clone();
-            let plugin_dir = Paths::get().plugin_dir(&plugin_id);
+            let plugin_dir = self.paths.plugin_dir(&plugin_id);
             let placed_plugin = match PlacedPlugin::from_plugin_dir(&plugin_dir) {
                 Ok(placed_plugin) => placed_plugin,
                 Err(err) => {
@@ -365,7 +369,7 @@ impl PluginService {
                     continue;
                 }
             };
-            let plugin_state = match placed_plugin.load() {
+            let plugin_state = match placed_plugin.load(&self.paths) {
                 Ok(loaded_plugin) => {
                     if entry.enabled {
                         PluginState::Loaded(Arc::new(loaded_plugin))

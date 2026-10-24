@@ -158,12 +158,13 @@ mod testutil {
 
     /// 已装载的插件：走真实装载路径（`PlacedPlugin::load` 解析 `config_dir`）。
     /// manifest 声明 `$HOME/.pi`，平台基准目录全部指向传入的临时目录，解析结果
-    /// 随插件一并返回——断言对着它写，路径不必硬编码两次。
+    /// 随插件一并返回——断言对着它写，路径不必硬编码两次。装载接收 [`Paths`]
+    /// 值、不读进程级全局（#141 I-4）。
     pub(crate) fn loaded_plugin(root: &Path, wasm: &[u8]) -> (LoadedPlugin, PathBuf) {
-        Paths::init_test(Paths::from_root(root));
+        let paths = Paths::from_root(root);
         let manifest = testutil::manifest_json("pi", "$HOME/.pi", "plugin.wasm");
         let loaded = PlacedPlugin::new(&root.join("placed"), manifest, wasm)
-            .load()
+            .load(&paths)
             .unwrap();
         let config_dir = loaded.meta.config_dir.clone();
         (loaded, config_dir)

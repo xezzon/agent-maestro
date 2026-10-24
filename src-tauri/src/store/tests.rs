@@ -2,8 +2,16 @@
 
 use super::*;
 use crate::errors::user_message;
+use crate::paths::Paths;
 use crate::provider::{ApiKey, ModelEntry, Protocol};
-use crate::testutil::temp_home;
+
+/// 临时主目录 + 显式路径（不注入进程级全局）：`Store::new` 收路径参数后，
+/// 存储层测试不再需要「让 Store 找到全局」的注入，直接指定配置路径（#141 I-4）。
+fn temp_paths() -> (tempfile::TempDir, Paths) {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::from_home(home.path());
+    (home, paths)
+}
 
 #[test]
 fn empty_config_serializes_to_version_1_schema() {
@@ -60,8 +68,8 @@ fn config_parses_version_1_document() {
 
 #[test]
 fn missing_file_opens_as_empty_config() {
-    let _home = temp_home();
-    let store = Store::new();
+    let (_home, paths) = temp_paths();
+    let store = Store::new(paths.config_path());
 
     assert_eq!(store.get().unwrap(), &Config::default());
     assert!(store.get().unwrap().providers.is_empty());
@@ -69,8 +77,8 @@ fn missing_file_opens_as_empty_config() {
 
 #[test]
 fn create_provider_persists_and_round_trips_through_disk() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     store
         .create_provider(
@@ -85,7 +93,7 @@ fn create_provider_persists_and_round_trips_through_disk() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let provider = &reopened.get().unwrap().providers["ollama"];
     assert_eq!(
         provider
@@ -101,8 +109,8 @@ fn create_provider_persists_and_round_trips_through_disk() {
 
 #[test]
 fn update_provider_persists_and_round_trips_through_disk() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider(
             "ollama",
@@ -130,7 +138,7 @@ fn update_provider_persists_and_round_trips_through_disk() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let provider = &reopened.get().unwrap().providers["ollama"];
     assert_eq!(
         provider
@@ -146,8 +154,8 @@ fn update_provider_persists_and_round_trips_through_disk() {
 
 #[test]
 fn update_provider_missing_slug_is_rejected_without_upsert() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     let err = store
         .update_provider(
@@ -165,15 +173,15 @@ fn update_provider_missing_slug_is_rejected_without_upsert() {
     assert!(user_message(err).contains("ghost"));
     assert!(store.get().unwrap().providers.is_empty());
     assert!(
-        !Paths::get().config_path().exists(),
+        !paths.config_path().exists(),
         "报错路径不得静默写入文件"
     );
 }
 
 #[test]
 fn update_provider_replaces_api_key_with_whole_record() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider(
             "ollama",
@@ -243,7 +251,7 @@ fn update_provider_replaces_api_key_with_whole_record() {
         "api_key 为空串即清除凭证"
     );
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert!(
         !reopened.get().unwrap().providers["ollama"].api_key.is_set(),
         "api_key 未设置"
@@ -252,10 +260,10 @@ fn update_provider_replaces_api_key_with_whole_record() {
 
 #[test]
 fn delete_provider_removes_record_with_models_and_api_key() {
-    let _home = temp_home();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
     fs::write(
-        Paths::get().config_path(),
+        paths.config_path(),
         r#"{
                 "version": 1,
                 "providers": {
@@ -273,11 +281,11 @@ fn delete_provider_removes_record_with_models_and_api_key() {
             }"#,
     )
     .unwrap();
-    let mut store = Store::new();
+    let mut store = Store::new(paths.config_path());
 
     store.delete_provider("openrouter").unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert!(
         reopened.get().unwrap().providers.is_empty(),
         "删除后不留孤儿数据：端点、模型与 API Key 随记录一并移除"
@@ -286,8 +294,8 @@ fn delete_provider_removes_record_with_models_and_api_key() {
 
 #[test]
 fn delete_provider_missing_slug_is_rejected() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     let err = store.delete_provider("ghost").unwrap_err();
 
@@ -297,8 +305,8 @@ fn delete_provider_missing_slug_is_rejected() {
 
 #[test]
 fn deleted_slug_can_be_recreated() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider(
             "ollama",
@@ -326,7 +334,7 @@ fn deleted_slug_can_be_recreated() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let provider = &reopened.get().unwrap().providers["ollama"];
     assert_eq!(
         provider
@@ -341,8 +349,8 @@ fn deleted_slug_can_be_recreated() {
 
 #[test]
 fn persisted_file_omits_unconfigured_protocol_slots() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     store
         .create_provider(
@@ -357,7 +365,7 @@ fn persisted_file_omits_unconfigured_protocol_slots() {
         )
         .unwrap();
 
-    let text = fs::read_to_string(Paths::get().config_path()).unwrap();
+    let text = fs::read_to_string(paths.config_path()).unwrap();
     assert!(text.contains(r#""openai-completions""#));
     assert!(
         !text.contains(r#""anthropic-messages""#),
@@ -367,8 +375,8 @@ fn persisted_file_omits_unconfigured_protocol_slots() {
 
 #[test]
 fn providers_are_written_sorted_by_slug() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     for slug in ["zeta", "alpha", "midway"] {
         store
@@ -385,7 +393,7 @@ fn providers_are_written_sorted_by_slug() {
             .unwrap();
     }
 
-    let text = fs::read_to_string(Paths::get().config_path()).unwrap();
+    let text = fs::read_to_string(paths.config_path()).unwrap();
     let alpha = text.find("\"alpha\"").unwrap();
     let midway = text.find("\"midway\"").unwrap();
     let zeta = text.find("\"zeta\"").unwrap();
@@ -394,8 +402,8 @@ fn providers_are_written_sorted_by_slug() {
 
 #[test]
 fn multiple_providers_round_trip_through_disk() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     store
         .create_provider(
@@ -422,7 +430,7 @@ fn multiple_providers_round_trip_through_disk() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let config = reopened.get().unwrap();
     assert_eq!(config.providers.len(), 2);
     assert_eq!(
@@ -443,10 +451,10 @@ fn multiple_providers_round_trip_through_disk() {
 
 #[test]
 fn create_provider_preserves_other_providers_models_and_endpoints() {
-    let _home = temp_home();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
     fs::write(
-        Paths::get().config_path(),
+        paths.config_path(),
         r#"{
                 "version": 1,
                 "providers": {
@@ -465,7 +473,7 @@ fn create_provider_preserves_other_providers_models_and_endpoints() {
             }"#,
     )
     .unwrap();
-    let mut store = Store::new();
+    let mut store = Store::new(paths.config_path());
 
     store
         .create_provider(
@@ -480,7 +488,7 @@ fn create_provider_preserves_other_providers_models_and_endpoints() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let openrouter = &reopened.get().unwrap().providers["openrouter"];
     assert_eq!(openrouter.api_key.as_deref(), Some("sk-live"),);
     assert_eq!(openrouter.models.len(), 2);
@@ -504,16 +512,16 @@ fn create_provider_preserves_other_providers_models_and_endpoints() {
 
 #[test]
 fn corrupt_file_reports_error_with_path_and_refuses_writes() {
-    let _home = temp_home();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
-    fs::write(Paths::get().config_path(), "不是 JSON {{{").unwrap();
-    let original = fs::read_to_string(Paths::get().config_path()).unwrap();
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
+    fs::write(paths.config_path(), "不是 JSON {{{").unwrap();
+    let original = fs::read_to_string(paths.config_path()).unwrap();
 
-    let mut store = Store::new();
+    let mut store = Store::new(paths.config_path());
 
     let err = store.get().unwrap_err();
     assert!(matches!(err, StoreError::Corrupt { .. }));
-    assert!(user_message(err).contains(Paths::get().config_path().to_str().unwrap()));
+    assert!(user_message(err).contains(paths.config_path().to_str().unwrap()));
 
     assert!(
         store
@@ -530,27 +538,27 @@ fn corrupt_file_reports_error_with_path_and_refuses_writes() {
             .is_err()
     );
     assert_eq!(
-        fs::read_to_string(Paths::get().config_path()).unwrap(),
+        fs::read_to_string(paths.config_path()).unwrap(),
         original
     );
 }
 
 #[test]
 fn unsupported_version_reports_error_with_path_and_refuses_writes() {
-    let _home = temp_home();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
     fs::write(
-        Paths::get().config_path(),
+        paths.config_path(),
         r#"{"version":99,"providers":{}}"#,
     )
     .unwrap();
-    let original = fs::read_to_string(Paths::get().config_path()).unwrap();
+    let original = fs::read_to_string(paths.config_path()).unwrap();
 
-    let mut store = Store::new();
+    let mut store = Store::new(paths.config_path());
 
     let err = store.get().unwrap_err();
     assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
-    assert!(user_message(err).contains(Paths::get().config_path().to_str().unwrap()));
+    assert!(user_message(err).contains(paths.config_path().to_str().unwrap()));
 
     assert!(
         store
@@ -567,15 +575,15 @@ fn unsupported_version_reports_error_with_path_and_refuses_writes() {
             .is_err()
     );
     assert_eq!(
-        fs::read_to_string(Paths::get().config_path()).unwrap(),
+        fs::read_to_string(paths.config_path()).unwrap(),
         original
     );
 }
 
 #[test]
 fn duplicate_slug_is_rejected_and_original_kept() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     store
         .create_provider(
@@ -622,8 +630,8 @@ fn duplicate_slug_is_rejected_and_original_kept() {
 
 #[test]
 fn create_provider_creates_missing_directories() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     store
         .create_provider(
@@ -638,13 +646,13 @@ fn create_provider_creates_missing_directories() {
         )
         .unwrap();
 
-    assert!(Paths::get().config_path().exists());
+    assert!(paths.config_path().exists());
 }
 
 #[test]
 fn provider_with_models_round_trips_through_disk_order_preserved() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     let models = vec![
         ModelEntry {
             id: "accounts/fireworks/models/llama3.1".to_owned(),
@@ -677,7 +685,7 @@ fn provider_with_models_round_trips_through_disk_order_preserved() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let provider = &reopened.get().unwrap().providers["openrouter"];
     assert_eq!(
         provider.models, models,
@@ -687,8 +695,8 @@ fn provider_with_models_round_trips_through_disk_order_preserved() {
 
 #[test]
 fn same_model_id_can_exist_in_different_providers() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     let gpt_4o = || ModelEntry {
         id: "gpt-4o".to_owned(),
         display_name: Option::None,
@@ -729,7 +737,7 @@ fn same_model_id_can_exist_in_different_providers() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let config = reopened.get().unwrap();
     assert_eq!(config.providers["openai"].models, vec![gpt_4o()]);
     assert_eq!(
@@ -748,8 +756,8 @@ fn same_model_id_can_exist_in_different_providers() {
 #[test]
 fn store_does_not_validate_model_ids() {
     // 业务校验（非空、Provider 内唯一）由前端内联完成；存储层原样保存，不拦不补。
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     store
         .create_provider(
@@ -781,7 +789,7 @@ fn store_does_not_validate_model_ids() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let models = &reopened.get().unwrap().providers["foo"].models;
     assert_eq!(models.len(), 3);
     assert_eq!(models[0].id, "gpt-4o");
@@ -791,15 +799,15 @@ fn store_does_not_validate_model_ids() {
 
 #[test]
 fn plugins_section_defaults_to_empty_for_legacy_config_files() {
-    let _home = temp_home();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
     fs::write(
-        Paths::get().config_path(),
+        paths.config_path(),
         r#"{"version":1,"providers":{}}"#,
     )
     .unwrap();
 
-    let store = Store::new();
+    let store = Store::new(paths.config_path());
 
     assert!(
         store.get().unwrap().plugins.is_empty(),
@@ -811,15 +819,15 @@ fn plugins_section_defaults_to_empty_for_legacy_config_files() {
 /// CONFIG_VERSION 保持 1；空表照常写出为 `{}`。
 #[test]
 fn variables_default_to_empty_and_serialize_as_an_empty_object() {
-    let _home = temp_home();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
     fs::write(
-        Paths::get().config_path(),
+        paths.config_path(),
         r#"{"version":1,"providers":{}}"#,
     )
     .unwrap();
 
-    let store = Store::new();
+    let store = Store::new(paths.config_path());
 
     assert!(store.get().unwrap().variables.is_empty());
     assert_eq!(
@@ -831,8 +839,8 @@ fn variables_default_to_empty_and_serialize_as_an_empty_object() {
 
 #[test]
 fn variables_round_trip_through_disk() {
-    let _home = temp_home();
-    let store = Store::new();
+    let (_home, paths) = temp_paths();
+    let store = Store::new(paths.config_path());
     let variables = BTreeMap::from([
         ("HOST".to_owned(), "api.example.com".to_owned()),
         ("EMPTY".to_owned(), String::new()),
@@ -843,7 +851,7 @@ fn variables_round_trip_through_disk() {
         store.persist(&config).unwrap();
     }
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
 
     assert_eq!(reopened.get().unwrap().variables, variables);
 }
@@ -852,8 +860,8 @@ fn variables_round_trip_through_disk() {
 /// 成功后原子写回磁盘。
 #[test]
 fn set_variables_replaces_whole_table_and_round_trips_through_disk() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     store
         .set_variables(BTreeMap::from([
@@ -869,7 +877,7 @@ fn set_variables_replaces_whole_table_and_round_trips_through_disk() {
         ]))
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert_eq!(
         reopened.get().unwrap().variables,
         BTreeMap::from([
@@ -882,8 +890,8 @@ fn set_variables_replaces_whole_table_and_round_trips_through_disk() {
 /// 变量表清空同样是合法保存：空表照常写出为 `{}`。
 #[test]
 fn set_variables_to_empty_clears_the_table() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .set_variables(BTreeMap::from([(
             "HOST".to_owned(),
@@ -894,10 +902,10 @@ fn set_variables_to_empty_clears_the_table() {
     store.set_variables(BTreeMap::new()).unwrap();
 
     assert!(store.get().unwrap().variables.is_empty());
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert!(reopened.get().unwrap().variables.is_empty());
     assert_eq!(
-        fs::read_to_string(Paths::get().config_path()).unwrap(),
+        fs::read_to_string(paths.config_path()).unwrap(),
         "{\n  \"version\": 1,\n  \"providers\": {},\n  \"variables\": {}\n}\n"
     );
 }
@@ -906,8 +914,8 @@ fn set_variables_to_empty_clears_the_table() {
 /// 嵌套渲染同样不得携带 api_key 明文。
 #[test]
 fn config_debug_output_never_contains_the_api_key() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider(
             "openrouter",
@@ -928,10 +936,10 @@ fn config_debug_output_never_contains_the_api_key() {
 
 #[test]
 fn corrupt_store_refuses_plugin_writes() {
-    let _home = temp_home();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
-    fs::write(Paths::get().config_path(), "不是 JSON {{{").unwrap();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
+    fs::write(paths.config_path(), "不是 JSON {{{").unwrap();
+    let mut store = Store::new(paths.config_path());
     let entry = PluginEntry {
         source: "https://example.com/manifest.json".to_owned(),
         enabled: true,
@@ -948,11 +956,11 @@ fn corrupt_store_refuses_plugin_writes() {
 /// 抢先复述成 `Corrupt`），且损坏的原文件不被改写。
 #[test]
 fn invalid_variable_names_win_over_a_corrupt_config() {
-    let _home = temp_home();
-    let config_path = Paths::get().config_path();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    let (_home, paths) = temp_paths();
+    let config_path = paths.config_path();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
     fs::write(&config_path, "不是 JSON {{{").unwrap();
-    let mut store = Store::new();
+    let mut store = Store::new(paths.config_path());
 
     let err = store
         .set_variables(BTreeMap::from([("a-b".to_owned(), "x".to_owned())]))
@@ -967,8 +975,8 @@ fn invalid_variable_names_win_over_a_corrupt_config() {
 
 #[test]
 fn create_provider_rejects_references_to_undefined_variables() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     let err = store
         .create_provider(
@@ -989,7 +997,7 @@ fn create_provider_rejects_references_to_undefined_variables() {
     assert!(message.contains("base_url.openai-completions"), "{message}");
     assert!(store.get().unwrap().providers.is_empty());
     assert!(
-        !Paths::get().config_path().exists(),
+        !paths.config_path().exists(),
         "报错路径不得静默写入文件"
     );
 }
@@ -1000,8 +1008,8 @@ fn create_provider_rejects_references_to_undefined_variables() {
 /// **两条路径汇入同一句式**。
 #[test]
 fn store_and_projection_report_interpolation_failures_identically() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     let provider = Provider {
         base_url: BTreeMap::from([(Protocol::OpenaiCompletions, "https://${HOST}/v1".to_owned())]),
         ..Provider::default()
@@ -1029,8 +1037,8 @@ fn store_and_projection_report_interpolation_failures_identically() {
 /// 已定义的变量与带内联默认值的引用都可通过；存储层原样保存，插值发生在投影时。
 #[test]
 fn create_provider_accepts_defined_variables_and_inline_defaults() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .set_variables(BTreeMap::from([(
             "HOST".to_owned(),
@@ -1054,7 +1062,7 @@ fn create_provider_accepts_defined_variables_and_inline_defaults() {
         )
         .unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert_eq!(
         reopened.get().unwrap().providers["gateway"]
             .base_url
@@ -1066,8 +1074,8 @@ fn create_provider_accepts_defined_variables_and_inline_defaults() {
 
 #[test]
 fn update_provider_rejects_undefined_variables_and_keeps_the_original() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider(
             "gateway",
@@ -1095,7 +1103,7 @@ fn update_provider_rejects_undefined_variables_and_keeps_the_original() {
         .unwrap_err();
 
     assert!(matches!(err, StoreError::Interpolation { .. }));
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert_eq!(
         reopened.get().unwrap().providers["gateway"]
             .base_url
@@ -1109,8 +1117,8 @@ fn update_provider_rejects_undefined_variables_and_keeps_the_original() {
 /// 删除在用变量整表拒绝：报错与投影时插值失败同款文案，落盘不变。
 #[test]
 fn set_variables_rejects_removing_a_variable_in_use() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .set_variables(BTreeMap::from([
             ("HOST".to_owned(), "api.example.com".to_owned()),
@@ -1138,7 +1146,7 @@ fn set_variables_rejects_removing_a_variable_in_use() {
     let message = user_message(err);
     assert!(message.contains("HOST"), "{message}");
     assert!(message.contains("gateway"), "{message}");
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert!(
         reopened.get().unwrap().variables.contains_key("HOST"),
         "被拒的保存不落盘，变量表保持不变"
@@ -1148,8 +1156,8 @@ fn set_variables_rejects_removing_a_variable_in_use() {
 /// 只被带内联默认值的引用提到的变量可以删除（删除后插值仍可解析）。
 #[test]
 fn set_variables_allows_removing_a_variable_only_referenced_with_inline_default() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .set_variables(BTreeMap::from([("OPT".to_owned(), "x".to_owned())]))
         .unwrap();
@@ -1174,8 +1182,8 @@ fn set_variables_allows_removing_a_variable_only_referenced_with_inline_default(
 /// 改值与新增不受一致性约束：在用变量的值可以修改。
 #[test]
 fn set_variables_allows_changing_the_value_of_a_variable_in_use() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .set_variables(BTreeMap::from([(
             "HOST".to_owned(),
@@ -1211,8 +1219,8 @@ fn set_variables_allows_changing_the_value_of_a_variable_in_use() {
 /// 占位符语法错误同样在落盘前拦截：与投影时插值失败同因同报。
 #[test]
 fn create_provider_rejects_malformed_placeholders() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     let err = store
         .create_provider(
@@ -1236,10 +1244,10 @@ fn create_provider_rejects_malformed_placeholders() {
 /// 当前（变更后的）变量表可插值。
 #[test]
 fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
-    let _home = temp_home();
-    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
     fs::write(
-        Paths::get().config_path(),
+        paths.config_path(),
         r#"{
                 "version": 1,
                 "providers": {
@@ -1253,8 +1261,8 @@ fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
             }"#,
     )
     .unwrap();
-    let original = fs::read_to_string(Paths::get().config_path()).unwrap();
-    let mut store = Store::new();
+    let original = fs::read_to_string(paths.config_path()).unwrap();
+    let mut store = Store::new(paths.config_path());
 
     let err = store
         .set_variables(BTreeMap::from([(
@@ -1265,7 +1273,7 @@ fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
 
     assert!(matches!(err, StoreError::Interpolation { .. }));
     assert_eq!(
-        fs::read_to_string(Paths::get().config_path()).unwrap(),
+        fs::read_to_string(paths.config_path()).unwrap(),
         original,
         "被拒的保存不落盘"
     );
@@ -1275,8 +1283,8 @@ fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
 /// 直传命令的非法键名整表拒绝、不落盘。
 #[test]
 fn set_variables_rejects_invalid_variable_names() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     for name in ["a-b", "", "带 空格"] {
         let err = store
@@ -1287,7 +1295,7 @@ fn set_variables_rejects_invalid_variable_names() {
             matches!(err, StoreError::InvalidVariableName { .. }),
             "name={name:?}"
         );
-        assert!(!Paths::get().config_path().exists(), "报错路径不得落盘");
+        assert!(!paths.config_path().exists(), "报错路径不得落盘");
     }
 }
 
@@ -1295,8 +1303,8 @@ fn set_variables_rejects_invalid_variable_names() {
 /// 后端不拒绝；非空的合法名照常保存。
 #[test]
 fn set_variables_accepts_an_empty_default_value() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     store
         .set_variables(BTreeMap::from([
@@ -1306,7 +1314,7 @@ fn set_variables_accepts_an_empty_default_value() {
         .unwrap();
 
     assert_eq!(store.get().unwrap().variables["EMPTY"], "");
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert_eq!(reopened.get().unwrap().variables["EMPTY"], "");
 }
 
@@ -1314,8 +1322,8 @@ fn set_variables_accepts_an_empty_default_value() {
 /// 原有数据（端点/模型/api_key/变量）一字不丢。
 #[test]
 fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
-    let _home = temp_home();
-    let path = Paths::get().config_path();
+    let (_home, paths) = temp_paths();
+    let path = paths.config_path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
@@ -1333,7 +1341,7 @@ fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
     )
     .unwrap();
 
-    let mut store = Store::new();
+    let mut store = Store::new(paths.config_path());
     assert!(
         store.get().unwrap().providers["ollama"].enabled,
         "旧配置缺 enabled 键即视为启用"
@@ -1344,7 +1352,7 @@ fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
     variables.insert("EXTRA".to_owned(), "1".to_owned());
     store.set_variables(variables).unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     let provider = &reopened.get().unwrap().providers["ollama"];
     assert!(provider.enabled);
     assert_eq!(
@@ -1370,8 +1378,8 @@ fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
 fn provider_with_custom_header_limit_and_capabilities_round_trips_through_disk() {
     use crate::provider::{ModelCapability, ModelLimit};
 
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     let provider = Provider {
         base_url: BTreeMap::from([(
             Protocol::OpenaiCompletions,
@@ -1393,7 +1401,7 @@ fn provider_with_custom_header_limit_and_capabilities_round_trips_through_disk()
 
     store.create_provider("gateway", provider.clone()).unwrap();
 
-    let reopened = Store::new();
+    let reopened = Store::new(paths.config_path());
     assert_eq!(
         reopened.get().unwrap().providers["gateway"],
         provider,
@@ -1405,8 +1413,8 @@ fn provider_with_custom_header_limit_and_capabilities_round_trips_through_disk()
 /// 空 limit、空能力集合；随后任一次落盘补齐固定形状。
 #[test]
 fn legacy_config_without_new_fields_reads_as_unset_and_writes_fixed_shape() {
-    let _home = temp_home();
-    let path = Paths::get().config_path();
+    let (_home, paths) = temp_paths();
+    let path = paths.config_path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
@@ -1422,7 +1430,7 @@ fn legacy_config_without_new_fields_reads_as_unset_and_writes_fixed_shape() {
     )
     .unwrap();
 
-    let mut store = Store::new();
+    let mut store = Store::new(paths.config_path());
     let provider = &store.get().unwrap().providers["ollama"];
     assert!(provider.custom_header.is_empty(), "旧配置读作空映射");
     assert_eq!(
@@ -1452,8 +1460,8 @@ fn legacy_config_without_new_fields_reads_as_unset_and_writes_fixed_shape() {
 
 #[test]
 fn set_provider_enabled_toggles_and_round_trips_through_disk() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider("ollama", Provider::default())
         .unwrap();
@@ -1462,18 +1470,18 @@ fn set_provider_enabled_toggles_and_round_trips_through_disk() {
 
     assert!(!store.get().unwrap().providers["ollama"].enabled);
     assert!(
-        !Store::new().get().unwrap().providers["ollama"].enabled,
+        !Store::new(paths.config_path()).get().unwrap().providers["ollama"].enabled,
         "禁用态随记录落盘"
     );
 
     store.set_provider_enabled("ollama", true).unwrap();
-    assert!(Store::new().get().unwrap().providers["ollama"].enabled);
+    assert!(Store::new(paths.config_path()).get().unwrap().providers["ollama"].enabled);
 }
 
 #[test]
 fn set_provider_enabled_is_idempotent_and_missing_slug_is_rejected() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider("ollama", Provider::default())
         .unwrap();
@@ -1493,12 +1501,12 @@ fn set_provider_enabled_is_idempotent_and_missing_slug_is_rejected() {
 /// 可被改写且翻转被记录——否则「文件没变」可能只是文件坏了。
 #[test]
 fn set_provider_enabled_does_not_write_to_disk_when_state_is_unchanged() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider("ollama", Provider::default())
         .unwrap();
-    let path = Paths::get().config_path();
+    let path = paths.config_path();
 
     // 手工把磁盘内容改成与内存不同的样子：ollama 在盘上是禁用态。
     let hand_edited = r#"{
@@ -1529,7 +1537,7 @@ fn set_provider_enabled_does_not_write_to_disk_when_state_is_unchanged() {
         "状态变化时必须写盘"
     );
     assert!(
-        !Store::new().get().unwrap().providers["ollama"].enabled,
+        !Store::new(paths.config_path()).get().unwrap().providers["ollama"].enabled,
         "翻转后的启用态必须落盘"
     );
 }
@@ -1538,8 +1546,8 @@ fn set_provider_enabled_does_not_write_to_disk_when_state_is_unchanged() {
 /// 禁用只是投影时的结构过滤，不放宽 provider↔variables 一致性。
 #[test]
 fn disabled_provider_is_still_subject_to_interpolation_checks() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
 
     // 禁用态也不能保存引用未定义变量的记录。
     let err = store
@@ -1590,8 +1598,8 @@ fn disabled_provider_is_still_subject_to_interpolation_checks() {
 /// 整包更新为禁用态同样要过插值校验：不能把记录改成引用未定义变量。
 #[test]
 fn update_provider_to_disabled_still_checks_interpolation() {
-    let _home = temp_home();
-    let mut store = Store::new();
+    let (_home, paths) = temp_paths();
+    let mut store = Store::new(paths.config_path());
     store
         .create_provider("gateway", Provider::default())
         .unwrap();
