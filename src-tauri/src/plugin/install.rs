@@ -212,11 +212,10 @@ impl PluginService {
 
         // 启用先装载再写配置：装载失败不写条目、不动注册表，旧状态保持可用。
         // 禁用不装载：注册表里已有一份描述，降级即可。
-        let loaded = match enabled {
-            true => {
-                Some(PlacedPlugin::from_plugin_dir(&Paths::get().plugin_dir(&entry.id))?.load()?)
-            }
-            false => None,
+        let loaded = if enabled {
+            Some(PlacedPlugin::from_plugin_dir(&Paths::get().plugin_dir(&entry.id))?.load()?)
+        } else {
+            None
         };
 
         // 复检：条目可能已被移除，不得按过期条目继续写。install_lock 已让
