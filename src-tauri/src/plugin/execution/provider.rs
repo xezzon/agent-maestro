@@ -494,7 +494,7 @@ mod tests {
 
         // 宿主插值：`\$` 还原为字面 `$`，值里仍是一个普通 `$`。
         let interpolated =
-            crate::interpolate::interpolate_providers(&raw, &crate::variables::Variables::new())
+            crate::provider::interpolate_providers(&raw, &crate::variables::Variables::new())
                 .unwrap();
         assert_eq!(
             interpolated["gateway"].custom_header["X-Gateway-Key"],

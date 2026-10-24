@@ -7,9 +7,8 @@ use std::{
 };
 
 use crate::{
-    interpolate,
     paths::Paths,
-    provider::Provider,
+    provider::{Provider, interpolate_providers},
     store::{AppStore, StoreError},
     variables::Variables,
 };
@@ -126,7 +125,7 @@ impl PluginService {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e| format!("序列化插件 form 失败：{e}"))?;
-        let projected = interpolate::interpolate_providers(providers, &merged)?;
+        let projected = interpolate_providers(providers, &merged)?;
         let (files, skipped) = loaded_plugin
             .instantiate_component(&self.engine, form)?
             .write_provider(&projected)?;

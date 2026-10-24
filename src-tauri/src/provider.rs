@@ -5,7 +5,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::interpolate::interpolate_value;
+use crate::{
+    interpolate::{interpolate_value, interpolation_failure_message},
+    variables::Variables,
+};
 
 /// Provider 在各协议下的端点（每协议至多一个；见 ADR 0003）。
 ///
@@ -341,6 +344,38 @@ impl Provider {
     }
 }
 
+/// 对传入的每个 Provider 插值，返回替换后的字面值副本。
+///
+/// 作用域＝Provider 中除 `api_key`、模型 `id` 与 header **键**外的字符串值
+/// （ADR 0015；header 的值是配置值、参与插值）。
+/// 是否参与投影由调用方决定：本函数不感知 `enabled`，对传入的每一项都插值；
+/// 任一字段失败即整体失败，原因含 slug + 字段名 + 库报错，不含值与密钥。
+///
+/// 与 [`Provider::interpolate`]/[`ModelEntry::interpolate`] 同住一处：本模块
+/// 持有「Provider 的插值作用域」的全部三层（逐字段、逐条目、跨 Provider 编排），
+/// `interpolate` 模块因此只余换库接缝（ADR 0014），不再反向引用领域类型。
+pub(crate) fn interpolate_providers(
+    providers: &BTreeMap<String, Provider>,
+    variables: &Variables,
+) -> Result<BTreeMap<String, Provider>, String> {
+    let mut projected = BTreeMap::new();
+    for (slug, provider) in providers {
+        match provider.interpolate(variables) {
+            Ok(provider) => {
+                projected.insert(slug.clone(), provider);
+            }
+            Err(error) => {
+                return Err(interpolation_failure_message(
+                    slug,
+                    &error.field,
+                    &error.reason,
+                ));
+            }
+        }
+    }
+    Ok(projected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +667,10 @@ mod tests {
             .collect()
     }
 
+    fn error(template: &str, variables: &Variables) -> String {
+        interpolate_value(template, variables).unwrap_err()
+    }
+
     /// 插值（`Provider::interpolate`）输出全部字面值副本：除模型 ID、api_key 与
     /// header 键（原样保留）外逐字段替换，原值不动。
     #[test]
@@ -818,6 +857,62 @@ mod tests {
 
         assert_eq!(error.field, "base_url.openai-completions");
         assert!(error.reason.contains("UNDEFINED_VAR"), "{}", error.reason);
+    }
+
+    /// 投影时插值失败的文案逐字断言：slug、字段名、原因三者都在句子里，
+    /// 且与落盘前拦截（`store::StoreError::Interpolation`）同一句式。
+    ///
+    /// 原因取自库（`interpolate_value` 的真实报错）而非写死：句式是本模块的
+    /// 契约，库的措辞由 ADR 0014 的换库哨兵盯着（换库即红，见 `interpolate`
+    /// 模块的换库哨兵测试）。
+    #[test]
+    fn provider_interpolation_failure_message_is_verbatim() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "gateway".to_owned(),
+            Provider {
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${HOST}/v1".to_owned(),
+                )]),
+                ..Default::default()
+            },
+        );
+        let reason = error("https://${HOST}/v1", &vars(&[]));
+
+        let err = interpolate_providers(&providers, &vars(&[])).unwrap_err();
+
+        assert_eq!(
+            err,
+            format!("Provider「gateway」的 base_url.openai-completions 插值失败：{reason}")
+        );
+    }
+
+    /// 任一字段失败即整体失败：原因含 slug + 字段名 + 变量名，不含值与密钥。
+    #[test]
+    fn provider_interpolation_failure_reports_slug_field_and_variable_only() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "gateway".to_owned(),
+            Provider {
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${HOST}/v1".to_owned(),
+                )]),
+                api_key: ApiKey::new("sk-canary-do-not-leak".to_owned()),
+                ..Default::default()
+            },
+        );
+
+        let err = interpolate_providers(&providers, &vars(&[])).unwrap_err();
+
+        assert!(err.contains("gateway"), "{err}");
+        assert!(err.contains("base_url.openai-completions"), "{err}");
+        assert!(err.contains("HOST"), "{err}");
+        assert!(
+            !err.contains("sk-canary-do-not-leak"),
+            "失败原因不得携带值与密钥：{err}"
+        );
     }
 
     /// custom_header 是记录的一部分且**恒落盘**：未设置时写出空映射，

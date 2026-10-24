@@ -1025,7 +1025,7 @@ fn store_and_projection_report_interpolation_failures_identically() {
 
     let stored = String::from(store.create_provider("gateway", provider).unwrap_err());
     let projected =
-        crate::interpolate::interpolate_providers(&providers, &Variables::new()).unwrap_err();
+        crate::provider::interpolate_providers(&providers, &Variables::new()).unwrap_err();
 
     assert_eq!(
         stored, projected,
