@@ -31,14 +31,36 @@ use std::{
 
 use crate::{paths::Paths, provider::Provider, variables::Variables};
 
-pub(crate) use schema::{Config, PluginEntry, StoreError};
+pub(crate) use schema::{CONFIG_VERSION, Config, PluginEntry, StoreError};
 
 use protected::ProtectedState;
-use schema::{CONFIG_VERSION, Change};
+use schema::Change;
 
 /// 配置存储的锁被毒化（其它命令持锁期间 panic）时对用户可见的原因。
 /// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
-const STORE_LOCK_POISONED: &str = "配置存储不可用";
+pub(crate) const STORE_LOCK_POISONED: &str = "配置存储不可用";
+
+/// 配置存储的锁毒化标记：[`AppStore::with_read`] / [`AppStore::with_write`]
+/// 在锁毒化时把本标记经 [`From`] 折进调用方闭包的错误类型——锁边界不擦除
+/// 错误类型（#141 I-3）。
+///
+/// 不是 [`StoreError`] 的一种：毒化的是 `AppStore` 的锁而非配置本身。两个
+/// 错误域各自折入、同一句文案（`STORE_LOCK_POISONED`）：
+/// [`StoreError`] 侧折为 [`StoreError::Unavailable`]，`String` 侧（插件服务
+/// 闭包自带的文案错误域）直接折为常量文案。
+pub(crate) struct LockPoisoned;
+
+impl From<LockPoisoned> for StoreError {
+    fn from(LockPoisoned: LockPoisoned) -> Self {
+        Self::Unavailable
+    }
+}
+
+impl From<LockPoisoned> for String {
+    fn from(LockPoisoned: LockPoisoned) -> Self {
+        STORE_LOCK_POISONED.to_owned()
+    }
+}
 
 /// 配置存储：启动时从磁盘加载进内存，变更后原子写回。
 ///
@@ -270,40 +292,37 @@ impl AppStore {
     /// plugin_by_source、provider 列表等只读路径在同一 Store 上并发；写操作
     /// 走 [`AppStore::with_write`] 独占。
     ///
-    /// 闭包报出的错误按 `Into<String>` 归一：存储错误（`StoreError`）转成
-    /// 面向用户的原因，闭包自己造的文案原样带出。
+    /// 锁边界不擦除错误类型（#141 I-3）：闭包的错误类型 `E` 原样透传——存储
+    /// 错误（[`StoreError`]）由命令层经 `crate::errors::user_message` 归一为
+    /// 面向用户的文案；锁毒化经 [`LockPoisoned`] 折进 `E`（两个错误域各一段
+    /// `From` 实现，见 [`LockPoisoned`]）。
     pub(crate) fn with_read<T, E>(
         &self,
         f: impl FnOnce(&Store) -> Result<T, E>,
-    ) -> Result<T, String>
+    ) -> Result<T, E>
     where
-        E: Into<String>,
+        E: From<LockPoisoned>,
     {
-        let guard = self
-            .store
-            .read()
-            .map_err(|_| STORE_LOCK_POISONED.to_owned())?;
-        f(&guard).map_err(Into::into)
+        let guard = self.store.read().map_err(|_| LockPoisoned)?;
+        f(&guard)
     }
 
     /// 在写锁内执行闭包：独占期间所有读守卫与其它写守卫均需等待。
     ///
-    /// 锁被毒化同样报错。闭包只应做「改内存里的配置」这一件事——**不要在
-    /// 闭包里做 IO**：写路径的原子落盘由 [`Store`] 在闭包返回后完成（见
-    /// [`Store::mutate`]），但那一步仍在这把锁内——落盘期间持锁是既有取舍
-    /// （写路径要「改内存 + 落盘」原子完成），本方法保证的是**调用方**的
-    /// 锁守卫出不了作用域，故调用方自己的 IO 不会落在锁内。
+    /// 锁被毒化同样报错（经 [`LockPoisoned`] 折进闭包的错误类型）。闭包只应做
+    /// 「改内存里的配置」这一件事——**不要在闭包里做 IO**：写路径的原子落盘
+    /// 由 [`Store`] 在闭包返回后完成（见 [`Store::mutate`]），但那一步仍在这把
+    /// 锁内——落盘期间持锁是既有取舍（写路径要「改内存 + 落盘」原子完成），
+    /// 本方法保证的是**调用方**的锁守卫出不了作用域，故调用方自己的 IO 不会
+    /// 落在锁内。
     pub(crate) fn with_write<T, E>(
         &self,
         f: impl FnOnce(&mut Store) -> Result<T, E>,
-    ) -> Result<T, String>
+    ) -> Result<T, E>
     where
-        E: Into<String>,
+        E: From<LockPoisoned>,
     {
-        let mut guard = self
-            .store
-            .write()
-            .map_err(|_| STORE_LOCK_POISONED.to_owned())?;
-        f(&mut guard).map_err(Into::into)
+        let mut guard = self.store.write().map_err(|_| LockPoisoned)?;
+        f(&mut guard)
     }
 }

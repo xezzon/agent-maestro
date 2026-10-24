@@ -3,13 +3,15 @@ use std::collections::BTreeMap;
 use tauri::State;
 
 use super::log_outcome;
-use crate::store::AppStore;
+use crate::{errors::user_message, store::AppStore};
 
 #[tauri::command]
 pub(crate) fn list_variables(
     store: State<'_, AppStore>,
 ) -> Result<BTreeMap<String, String>, String> {
-    let outcome = store.with_read(|s| s.variables_snapshot());
+    let outcome = store
+        .with_read(|s| s.variables_snapshot())
+        .map_err(user_message);
     log_outcome("list_variables", None, &outcome);
     outcome
 }
@@ -21,7 +23,9 @@ pub(crate) fn set_variables(
     store: State<'_, AppStore>,
     variables: BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let outcome = store.with_write(|s| s.set_variables(variables));
+    let outcome = store
+        .with_write(|s| s.set_variables(variables))
+        .map_err(user_message);
     log_outcome("set_variables", None, &outcome);
     outcome
 }

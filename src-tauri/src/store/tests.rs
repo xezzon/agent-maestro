@@ -1,6 +1,7 @@
 //! 配置存储的单元测试：读写、落盘往返、校验与保护态。
 
 use super::*;
+use crate::errors::user_message;
 use crate::provider::{ApiKey, ModelEntry, Protocol};
 use crate::testutil::temp_home;
 
@@ -161,7 +162,7 @@ fn update_provider_missing_slug_is_rejected_without_upsert() {
         )
         .unwrap_err();
     assert!(matches!(err, StoreError::MissingSlug { .. }));
-    assert!(String::from(err).contains("ghost"));
+    assert!(user_message(err).contains("ghost"));
     assert!(store.get().unwrap().providers.is_empty());
     assert!(
         !Paths::get().config_path().exists(),
@@ -291,7 +292,7 @@ fn delete_provider_missing_slug_is_rejected() {
     let err = store.delete_provider("ghost").unwrap_err();
 
     assert!(matches!(err, StoreError::MissingSlug { .. }));
-    assert!(String::from(err).contains("ghost"));
+    assert!(user_message(err).contains("ghost"));
 }
 
 #[test]
@@ -512,7 +513,7 @@ fn corrupt_file_reports_error_with_path_and_refuses_writes() {
 
     let err = store.get().unwrap_err();
     assert!(matches!(err, StoreError::Corrupt { .. }));
-    assert!(String::from(err).contains(Paths::get().config_path().to_str().unwrap()));
+    assert!(user_message(err).contains(Paths::get().config_path().to_str().unwrap()));
 
     assert!(
         store
@@ -549,7 +550,7 @@ fn unsupported_version_reports_error_with_path_and_refuses_writes() {
 
     let err = store.get().unwrap_err();
     assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
-    assert!(String::from(err).contains(Paths::get().config_path().to_str().unwrap()));
+    assert!(user_message(err).contains(Paths::get().config_path().to_str().unwrap()));
 
     assert!(
         store
@@ -983,7 +984,7 @@ fn create_provider_rejects_references_to_undefined_variables() {
         .unwrap_err();
 
     assert!(matches!(err, StoreError::Interpolation { .. }));
-    let message = String::from(err);
+    let message = user_message(err);
     assert!(message.contains("HOST"), "{message}");
     assert!(message.contains("base_url.openai-completions"), "{message}");
     assert!(store.get().unwrap().providers.is_empty());
@@ -993,25 +994,10 @@ fn create_provider_rejects_references_to_undefined_variables() {
     );
 }
 
-/// 落盘前拦截的文案逐字断言：slug、字段名、原因三者都在句子里，且与投影时
-/// 拦截同一句式（ADR 0015「报错与投影时同因同报」；共享构造函数见 issue #128）。
-#[test]
-fn interpolation_store_error_message_is_verbatim() {
-    let err = StoreError::Interpolation {
-        slug: "gateway".to_owned(),
-        field: "base_url.openai-completions".to_owned(),
-        reason: "No such variable: $HOST".to_owned(),
-    };
-
-    assert_eq!(
-        String::from(err),
-        "Provider「gateway」的 base_url.openai-completions 插值失败：No such variable: $HOST"
-    );
-}
-
 /// 落盘前拦截与投影时拦截逐字同报：同一份配置、同一个原因，两条路径给出
 /// 完全相同的一句文案（ADR 0015「报错与投影时同因同报」；共享构造函数见
-/// issue #128）。
+/// issue #128）。逐字断言本体住在 `crate::errors`（句式的家），这里钉的是
+/// **两条路径汇入同一句式**。
 #[test]
 fn store_and_projection_report_interpolation_failures_identically() {
     let _home = temp_home();
@@ -1023,9 +1009,16 @@ fn store_and_projection_report_interpolation_failures_identically() {
     let mut providers = BTreeMap::new();
     providers.insert("gateway".to_owned(), provider.clone());
 
-    let stored = String::from(store.create_provider("gateway", provider).unwrap_err());
-    let projected =
-        crate::provider::interpolate_providers(&providers, &Variables::new()).unwrap_err();
+    let stored = user_message(store.create_provider("gateway", provider).unwrap_err());
+    let projected = crate::provider::interpolate_providers(&providers, &Variables::new())
+        .map_err(|error| {
+            crate::errors::interpolation_failure_message(
+                &error.slug,
+                &error.error.field,
+                &error.error.reason,
+            )
+        })
+        .unwrap_err();
 
     assert_eq!(
         stored, projected,
@@ -1142,7 +1135,7 @@ fn set_variables_rejects_removing_a_variable_in_use() {
         .unwrap_err();
 
     assert!(matches!(err, StoreError::Interpolation { .. }));
-    let message = String::from(err);
+    let message = user_message(err);
     assert!(message.contains("HOST"), "{message}");
     assert!(message.contains("gateway"), "{message}");
     let reopened = Store::new();
@@ -1235,7 +1228,7 @@ fn create_provider_rejects_malformed_placeholders() {
         .unwrap_err();
 
     assert!(matches!(err, StoreError::Interpolation { .. }));
-    assert!(String::from(err).contains("base_url.openai-completions"));
+    assert!(user_message(err).contains("base_url.openai-completions"));
     assert!(store.get().unwrap().providers.is_empty());
 }
 

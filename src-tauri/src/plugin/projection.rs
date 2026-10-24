@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    errors::{interpolation_failure_message, user_message},
     paths::Paths,
     provider::{Provider, interpolate_providers},
     store::{AppStore, StoreError},
@@ -28,9 +29,11 @@ impl PluginService {
         &self,
         store: &AppStore,
     ) -> Result<Vec<PluginApplyReport>, String> {
-        let (providers, variables) = store.with_read(|s| -> Result<_, StoreError> {
-            Ok((s.enabled_providers()?, s.variables_snapshot()?))
-        })?;
+        let (providers, variables) = store
+            .with_read(|s| -> Result<_, StoreError> {
+                Ok((s.enabled_providers()?, s.variables_snapshot()?))
+            })
+            .map_err(user_message)?;
         let reports = self.write_providers(&providers, &variables)?;
         // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
         // 在此按插件各记一条（ADR 0008：服务层的投影步骤打 DEBUG，默认级别
@@ -125,7 +128,9 @@ impl PluginService {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e| format!("序列化插件 form 失败：{e}"))?;
-        let projected = interpolate_providers(providers, &merged)?;
+        let projected = interpolate_providers(providers, &merged).map_err(|error| {
+            interpolation_failure_message(&error.slug, &error.error.field, &error.error.reason)
+        })?;
         let (files, skipped) = loaded_plugin
             .instantiate_component(&self.engine, form)?
             .write_provider(&projected)?;

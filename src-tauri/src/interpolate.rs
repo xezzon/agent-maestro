@@ -9,7 +9,7 @@
 //! 结构知识在各自的配置类型（`Provider::interpolate`／`ModelEntry::interpolate`），
 //! 跨 Provider 的编排在 `provider::interpolate_providers`。
 //!
-//! 插值失败的面向用户文案由 `interpolation_failure_message` 一处产出：落盘前拦截
+//! 插值失败的面向用户句式由 `crate::errors` 一处产出：落盘前拦截
 //! （`StoreError::Interpolation`）与投影时拦截共用它，同因同报、逐字一致。
 
 use crate::variables::Variables;
@@ -17,14 +17,6 @@ use crate::variables::Variables;
 /// 对单个字符串值插值；失败原因即库报错（只含变量名与位置，不含值与密钥）。
 pub(crate) fn interpolate_value(template: &str, variables: &Variables) -> Result<String, String> {
     subst::substitute(template, variables).map_err(|e| e.to_string())
-}
-
-/// 插值失败的面向用户文案：slug + 字段名 + 原因。
-///
-/// 落盘前拦截（`StoreError::Interpolation`）与投影时拦截（`interpolate_providers`）
-/// 共用这一句式：同因同报、逐字一致，改一处即改两处。
-pub(crate) fn interpolation_failure_message(slug: &str, field: &str, reason: &str) -> String {
-    format!("Provider「{slug}」的 {field} 插值失败：{reason}")
 }
 
 #[cfg(test)]
@@ -123,18 +115,5 @@ mod tests {
         let variables = vars(&[]);
         let err = error("sk-$abc", &variables);
         assert!(err.contains("abc"), "{err}");
-    }
-
-    /// 共享文案：slug + 字段名 + 原因逐字入句式（落盘前拦截与投影时拦截共用）。
-    #[test]
-    fn interpolation_failure_message_renders_slug_field_and_reason() {
-        assert_eq!(
-            interpolation_failure_message(
-                "gateway",
-                "base_url.openai-completions",
-                "No such variable: $HOST"
-            ),
-            "Provider「gateway」的 base_url.openai-completions 插值失败：No such variable: $HOST"
-        );
     }
 }

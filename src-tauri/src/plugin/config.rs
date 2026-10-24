@@ -5,6 +5,7 @@
 use std::{fs, io::ErrorKind, path::Path};
 
 use crate::{
+    errors::user_message,
     paths::Paths,
     store::{AppStore, PluginEntry},
 };
@@ -20,7 +21,9 @@ impl PluginService {
         store: &AppStore,
         source: &str,
     ) -> Result<PluginConfig, String> {
-        let entry = store.with_read(|s| s.plugin_by_source(source))?;
+        let entry = store
+            .with_read(|s| s.plugin_by_source(source))
+            .map_err(user_message)?;
         read_plugin_config(&Paths::get().plugin_dir(&entry.id))
     }
 
@@ -43,7 +46,7 @@ impl PluginService {
 
         // 短锁内完成条目读取与校验：声明的真相源就是当前全局变量表。
         let entry = store.with_read(|guard| -> Result<PluginEntry, String> {
-            let variables = guard.variables_snapshot().map_err(String::from)?;
+            let variables = guard.variables_snapshot().map_err(user_message)?;
             for name in plugin_config.variables.keys() {
                 if !variables.contains_key(name) {
                     return Err(format!(
@@ -51,7 +54,7 @@ impl PluginService {
                     ));
                 }
             }
-            guard.plugin_by_source(source).map_err(String::from)
+            guard.plugin_by_source(source).map_err(user_message)
         })?;
 
         let plugin_dir = Paths::get().plugin_dir(&entry.id);

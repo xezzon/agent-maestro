@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{interpolate::interpolation_failure_message, provider::Provider, variables::Variables};
+use crate::{provider::Provider, variables::Variables};
 
 /// 配置文件 schema 版本（见 ADR 0001）。
 pub(crate) const CONFIG_VERSION: u32 = 1;
@@ -60,7 +60,7 @@ fn default_true() -> bool {
     true
 }
 
-/// 配置存储的错误；转为 `String` 时面向最终用户。
+/// 配置存储的错误；结构化携带原因，面向用户的句式由 `crate::errors` 统一排版。
 #[derive(Debug, Clone)]
 pub(crate) enum StoreError {
     /// 配置文件存在但无法解析。
@@ -86,8 +86,8 @@ pub(crate) enum StoreError {
     DuplicateId { id: String, source: String },
     /// Provider 对（变更后的）全局变量表插值失败：变量未定义或占位符语法
     /// 错误。与投影时的插值失败同因同报，只是提前到落盘前拦截
-    /// （provider↔variables 一致性，ADR 0015）。文案由
-    /// [`interpolation_failure_message`] 一处产出，与投影时逐字一致。
+    /// （provider↔variables 一致性，ADR 0015）。句式由 `crate::errors` 一处
+    /// 产出，与投影时逐字一致。
     Interpolation {
         slug: String,
         field: String,
@@ -95,6 +95,12 @@ pub(crate) enum StoreError {
     },
     /// 变量名不合法：占位符无法引用（变量名语法见 ADR 0014）。
     InvalidVariableName { name: String },
+    /// 配置存储的锁不可用（其它命令持锁期间 panic 毒化了锁）。
+    ///
+    /// 由 [`crate::store::LockPoisoned`] 折入：毒化的是 `AppStore` 的锁而非配置
+    /// 本身，但两条加锁路径对用户是同一件事（「配置存储不可用」，见
+    /// [`crate::store::STORE_LOCK_POISONED`]）。
+    Unavailable,
 }
 
 impl StoreError {
@@ -138,44 +144,6 @@ impl StoreError {
     pub(super) fn invalid_variable_name(name: &str) -> Self {
         Self::InvalidVariableName {
             name: name.to_owned(),
-        }
-    }
-}
-
-impl From<StoreError> for String {
-    fn from(value: StoreError) -> Self {
-        match value {
-            StoreError::Corrupt { path, detail } => format!(
-                "配置文件已损坏：{}\n原因：{detail}\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
-                path.display()
-            ),
-            StoreError::UnsupportedVersion { path, found } => format!(
-                "配置文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用仅支持 {CONFIG_VERSION}。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
-                path.display()
-            ),
-            StoreError::Io { path, detail } => {
-                format!("读写配置文件失败：{}\n原因：{detail}", path.display())
-            }
-            StoreError::Serialize { detail } => {
-                format!("序列化配置文件失败\n原因：{detail}")
-            }
-            StoreError::DuplicateSlug { slug } => format!("已存在同名 Provider：{slug}"),
-            StoreError::MissingSlug { slug } => format!("Provider 不存在：{slug}"),
-            StoreError::MissingSource { source } => format!("插件条目不存在：{source}"),
-            StoreError::DuplicateSource { source } => {
-                format!("已存在同一来源的插件条目：{source}")
-            }
-            StoreError::DuplicateId { id, source } => {
-                format!("插件 id「{id}」已被来源 {source} 占用")
-            }
-            StoreError::Interpolation {
-                slug,
-                field,
-                reason,
-            } => interpolation_failure_message(&slug, &field, &reason),
-            StoreError::InvalidVariableName { name } => format!(
-                "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
-            ),
         }
     }
 }

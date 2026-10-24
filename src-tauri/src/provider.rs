@@ -5,10 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    interpolate::{interpolate_value, interpolation_failure_message},
-    variables::Variables,
-};
+use crate::{interpolate::interpolate_value, variables::Variables};
 
 /// Provider 在各协议下的端点（每协议至多一个；见 ADR 0003）。
 ///
@@ -344,12 +341,26 @@ impl Provider {
     }
 }
 
+/// 跨 Provider 插值失败：出错的条目（slug）与其字段级失败。
+///
+/// 只携带结构化原因，不产出句式——面向用户的文案（slug + 字段名 + 原因入句）
+/// 由展示层（`crate::errors`）一处排版：落盘前拦截（`StoreError::Interpolation`）
+/// 与投影时拦截（调用方对本类型的排版）据此同因同报、逐字一致。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderInterpolationError {
+    /// 出错的 Provider（slug）。
+    pub(crate) slug: String,
+    /// 字段级失败：字段名 + 库报错。
+    pub(crate) error: FieldError,
+}
+
 /// 对传入的每个 Provider 插值，返回替换后的字面值副本。
 ///
 /// 作用域＝Provider 中除 `api_key`、模型 `id` 与 header **键**外的字符串值
 /// （ADR 0015；header 的值是配置值、参与插值）。
 /// 是否参与投影由调用方决定：本函数不感知 `enabled`，对传入的每一项都插值；
-/// 任一字段失败即整体失败，原因含 slug + 字段名 + 库报错，不含值与密钥。
+/// 任一字段失败即整体失败，失败原因含 slug + 字段名 + 库报错（由调用方排版），
+/// 不含值与密钥。
 ///
 /// 与 [`Provider::interpolate`]/[`ModelEntry::interpolate`] 同住一处：本模块
 /// 持有「Provider 的插值作用域」的全部三层（逐字段、逐条目、跨 Provider 编排），
@@ -357,7 +368,7 @@ impl Provider {
 pub(crate) fn interpolate_providers(
     providers: &BTreeMap<String, Provider>,
     variables: &Variables,
-) -> Result<BTreeMap<String, Provider>, String> {
+) -> Result<BTreeMap<String, Provider>, ProviderInterpolationError> {
     let mut projected = BTreeMap::new();
     for (slug, provider) in providers {
         match provider.interpolate(variables) {
@@ -365,11 +376,10 @@ pub(crate) fn interpolate_providers(
                 projected.insert(slug.clone(), provider);
             }
             Err(error) => {
-                return Err(interpolation_failure_message(
-                    slug,
-                    &error.field,
-                    &error.reason,
-                ));
+                return Err(ProviderInterpolationError {
+                    slug: slug.clone(),
+                    error,
+                });
             }
         }
     }
@@ -862,9 +872,9 @@ mod tests {
     /// 投影时插值失败的文案逐字断言：slug、字段名、原因三者都在句子里，
     /// 且与落盘前拦截（`store::StoreError::Interpolation`）同一句式。
     ///
-    /// 原因取自库（`interpolate_value` 的真实报错）而非写死：句式是本模块的
-    /// 契约，库的措辞由 ADR 0014 的换库哨兵盯着（换库即红，见 `interpolate`
-    /// 模块的换库哨兵测试）。
+    /// 原因取自库（`interpolate_value` 的真实报错）而非写死：句式是展示层的
+    /// 契约（`crate::errors` 一处产出），库的措辞由 ADR 0014 的换库哨兵盯着
+    /// （换库即红，见 `interpolate` 模块的换库哨兵测试）。
     #[test]
     fn provider_interpolation_failure_message_is_verbatim() {
         let mut providers = BTreeMap::new();
@@ -883,12 +893,16 @@ mod tests {
         let err = interpolate_providers(&providers, &vars(&[])).unwrap_err();
 
         assert_eq!(
-            err,
+            crate::errors::interpolation_failure_message(
+                &err.slug,
+                &err.error.field,
+                &err.error.reason
+            ),
             format!("Provider「gateway」的 base_url.openai-completions 插值失败：{reason}")
         );
     }
 
-    /// 任一字段失败即整体失败：原因含 slug + 字段名 + 变量名，不含值与密钥。
+    /// 任一字段失败即整体失败：结构化原因含 slug + 字段名 + 变量名，不含值与密钥。
     #[test]
     fn provider_interpolation_failure_reports_slug_field_and_variable_only() {
         let mut providers = BTreeMap::new();
@@ -906,12 +920,13 @@ mod tests {
 
         let err = interpolate_providers(&providers, &vars(&[])).unwrap_err();
 
-        assert!(err.contains("gateway"), "{err}");
-        assert!(err.contains("base_url.openai-completions"), "{err}");
-        assert!(err.contains("HOST"), "{err}");
+        assert_eq!(err.slug, "gateway");
+        assert_eq!(err.error.field, "base_url.openai-completions");
+        assert!(err.error.reason.contains("HOST"), "{}", err.error.reason);
         assert!(
-            !err.contains("sk-canary-do-not-leak"),
-            "失败原因不得携带值与密钥：{err}"
+            !err.error.reason.contains("sk-canary-do-not-leak"),
+            "失败原因不得携带值与密钥：{}",
+            err.error.reason
         );
     }
 
