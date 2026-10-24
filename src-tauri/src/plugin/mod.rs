@@ -115,7 +115,7 @@ impl PlacedPlugin {
         Ok(Self {
             plugin_dir: plugin_dir.to_path_buf(),
             raw_manifest,
-            wasm: Arc::from(wasm.as_slice()),
+            wasm: Arc::from(wasm),
         })
     }
 
