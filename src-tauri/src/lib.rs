@@ -74,21 +74,26 @@ pub fn run() {
             let _ = window.set_focus();
         }
     }));
+
+    // 全局路径（主目录 + 平台基准目录）在 logging::attach 之前一次性初始化：
+    // attach 靠它探测并注册文件日志目标（issue #137）——初始化晚于 attach 时
+    // 文件目标根本不会注册，日志只进 stdout。其余地方只读。主目录等不可用时在
+    // 这里（GTK/WebKit 初始化之前）以失败退出：run() 不返回 Result，用 panic
+    // 上抛原因（此时 logger 尚未 attach，由原 panic hook 打到 stderr）。
+    let paths = match paths::Paths::init_from_system() {
+        Ok(()) => paths::Paths::get(),
+        Err(err) => panic!("{err}"),
+    };
+
     // 日志设施（ADR 0008）：注册前对日志目录写探测，文件目标不可用时只装
     // Stdout，写不出日志绝不阻断启动。
-    let builder = logging::attach(builder);
+    let builder = logging::attach(builder, &paths);
 
     builder
         .plugin(tauri_plugin_opener::init())
         // 添加插件对话框用它选择本机 manifest.json（file 来源）。
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            // 全局路径（主目录 + 平台基准目录）在这里一次性初始化：其余地方只读。
-            // setup 之前 logger 已经能优雅地降级到 Stdout（`logging::attach` 看
-            // `try_get`），所以这里把解析放到第一次真正消费它的时机：缺失就同
-            // `service.startup` 一样用 `?` 抛出，让启动以失败退出，而不是悄悄
-            // 跳过 init 后让下游 panic。
-            paths::Paths::init_from_system()?;
             let store = Store::new();
             app.manage(AppStore {
                 store: RwLock::new(store),
@@ -104,8 +109,8 @@ pub fn run() {
             }
 
             // 启动时从配置条目重建注册表，并补装缺失的内置插件（落位 + 写条目，
-            // 与其余来源同一安装管线；不联网，离线可用）。平台目录不可用时让
-            // 启动失败，与主目录缺失的处理一致。
+            // 与其余来源同一安装管线；不联网，离线可用）。全局路径已在 run() 开头
+            // 校验通过，这里只消费；startup 自身的失败用 `?` 让启动退出。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
             service.startup(&app_store)?;
