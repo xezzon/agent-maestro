@@ -320,7 +320,7 @@ fn build_engine() -> Engine {
 
 impl PluginService {
     /// 构造：使用全局的 [`Paths`]，它在应用启动阶段完成初始化
-    /// （[`Paths::init_from_system`]，见 `lib.rs` 的 setup）。
+    /// （[`Paths::init_from_system`]，见 `lib.rs` 的 `run()`，早于 logger attach）。
     pub(crate) fn new() -> Self {
         Self::with_fetcher(Arc::new(HttpFetcher::new()))
     }

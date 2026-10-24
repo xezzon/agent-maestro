@@ -5,16 +5,15 @@
 //! 初始化、各自失败（一个 panic、一个返回 `Err`），主目录还被解析了两遍，改
 //! 一次主目录规则要改两处。现在合成一处：一个 [`Paths`] 同时持有主目录与四个
 //! 平台基准目录（主目录兼作 `$HOME` 的落点，五个变量各有一个基准目录），由
-//! `lib.rs` 的 setup 一次性初始化，其余地方只读。
+//! `lib.rs` 的 `run()` 在 attach logger 之前一次性初始化，其余地方只读。
 //!
 //! 平台基准目录是 `config_dir` 声明里变量前缀的落点（ADR 0011）：本模块只回答
 //! 「这个变量对应哪个目录」，声明的语法与逃逸校验归 `plugin::manifest`。
 //!
 //! 失败策略（全仓统一，此前是两个单例各说各的）：环境不可用（主目录或平台目录
-//! 解析不出来）由 [`Paths::init_from_system`] 返回 `Err`，调用方（应用 setup）
-//! 用 `?` 变成启动失败；全局尚未初始化是程序错误——应用 setup 必定先初始化，
-//! 测试夹具亦然——由 [`Paths::get`] panic 并给出明确消息，启动早期（logger
-//! attach）尚无实例的调用点用 [`Paths::try_get`]。
+//! 解析不出来）由 [`Paths::init_from_system`] 返回 `Err`，调用方（应用 `run()`，
+//! GTK/WebKit 初始化之前）让启动以失败退出；全局尚未初始化是程序错误——应用
+//! `run()` 必定先初始化，测试夹具亦然——由 [`Paths::get`] panic 并给出明确消息。
 
 use std::path::{Path, PathBuf};
 
@@ -119,18 +118,12 @@ impl Paths {
 
     /// 获取全局实例（值语义，clone 成本极低）。
     ///
-    /// 尚未初始化即 panic：这是程序错误而非运行时状态——应用 setup 阶段必定先
-    /// 初始化（[`Paths::init_from_system`]），测试夹具亦然。启动早期尚无实例的
-    /// 调用点（logger attach）用 [`Paths::try_get`]。
+    /// 尚未初始化即 panic：这是程序错误而非运行时状态——应用 `run()` 阶段必定
+    /// 先初始化（[`Paths::init_from_system`]），测试夹具亦然。
     pub(crate) fn get() -> Self {
-        Self::try_get().expect("全局路径尚未初始化：调用 Paths::init_from_system 后再使用")
-    }
-
-    /// 尝试获取全局实例；尚未初始化时返回 `None`。
-    ///
-    /// 用于启动早期（logger attach 等）调用点——此时路径可能还没解析出来。
-    pub(crate) fn try_get() -> Option<Self> {
-        PATHS.get()
+        PATHS
+            .get()
+            .expect("全局路径尚未初始化：调用 Paths::init_from_system 后再使用")
     }
 
     /// 测试辅助：设置当前线程的全局实例，返回 RAII guard（drop 时自动清理）。

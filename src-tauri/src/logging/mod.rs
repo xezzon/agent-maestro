@@ -27,7 +27,8 @@ const KEEP_ARCHIVES: usize = 15;
 /// 级别默认 INFO（开发与发布一致）；`MAESTRO_LOG_LEVEL` 可覆盖。
 const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
 
-/// 日志文件目标不可用的原因（probe 失败或主目录缺失）；logger 就绪后回报。
+/// 日志文件目标不可用的原因（probe 失败；主目录缺失在更早的路径初始化处已让
+/// 启动失败，见 `lib.rs` 的 `run()`）；logger 就绪后回报。
 static DEGRADED: OnceLock<String> = OnceLock::new();
 /// `MAESTRO_LOG_LEVEL` 的非法值；logger 就绪后回报并忽略。
 static INVALID_LEVEL: OnceLock<String> = OnceLock::new();
@@ -73,8 +74,15 @@ fn probe_log_dir(paths: &Paths) -> Result<(), String> {
 /// 级别是单一全局旋钮：默认 INFO，`MAESTRO_LOG_LEVEL` 接受裸级别名覆盖，
 /// 非法值忽略并在 logger 就绪后补 WARN（不写入 `config.json`）。
 ///
+/// `paths` 必须是已初始化的全局路径：调用方（`lib.rs` 的 `run()`）在 attach
+/// 之前完成 `Paths::init_from_system`，这里据此探测并注册文件目标（issue #137）。
+/// 写探测失败只装 Stdout，写不出日志绝不阻断启动。
+///
 /// 必须在单实例插件之后调用（该插件须先于其他插件注册）。
-pub(crate) fn attach(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+pub(crate) fn attach(
+    builder: tauri::Builder<tauri::Wry>,
+    paths: &Paths,
+) -> tauri::Builder<tauri::Wry> {
     let (level, invalid) = match std::env::var("MAESTRO_LOG_LEVEL") {
         Ok(raw) => match parse_level(&raw) {
             Some(level) => (level, None),
@@ -87,19 +95,13 @@ pub(crate) fn attach(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<taur
     }
 
     let mut targets = vec![Target::new(TargetKind::Stdout)];
-    match Paths::try_get() {
-        Some(paths) => match probe_log_dir(&paths) {
-            Ok(()) => targets.push(Target::new(TargetKind::Folder {
-                path: paths.logs_dir(),
-                file_name: Some(LOG_FILE_NAME.to_owned()),
-            })),
-            Err(reason) => {
-                let _ = DEGRADED.set(reason);
-            }
-        },
-        None => {
-            let _ = DEGRADED.set("home directory unavailable".to_owned());
-        }
+    if let Err(reason) = probe_log_dir(paths) {
+        let _ = DEGRADED.set(reason);
+    } else {
+        targets.push(Target::new(TargetKind::Folder {
+            path: paths.logs_dir(),
+            file_name: Some(LOG_FILE_NAME.to_owned()),
+        }));
     }
 
     builder.plugin(
@@ -138,6 +140,29 @@ mod tests {
         assert_eq!(parse_level("verbose"), None);
         // EnvFilter 指令语法不支持：假装支持只会静默误解析。
         assert_eq!(parse_level("agent_maestro_lib=debug"), None);
+    }
+
+    /// 写探测通过：日志目录可创建、日志文件可打开——这是文件目标得以注册的前提。
+    #[test]
+    fn probe_log_dir_succeeds_on_writable_home() {
+        let _home = crate::testutil::temp_home();
+        assert!(probe_log_dir(&Paths::get()).is_ok());
+    }
+
+    /// 日志目录写不出时写探测只返回原因、不 panic：attach 据此只装 Stdout、
+    /// 应用照常启动（ADR 0008 的既有保证）。用同名文件占住日志目录的落点，
+    /// 让 `create_dir_all` 必然失败。
+    #[test]
+    fn probe_log_dir_reports_reason_when_log_dir_unwritable() {
+        let home = crate::testutil::temp_home();
+        fs::create_dir_all(home.path().join(".maestro")).unwrap();
+        fs::write(home.path().join(".maestro/logs"), "").unwrap();
+
+        let reason = probe_log_dir(&Paths::get()).unwrap_err();
+        assert!(
+            reason.contains("create"),
+            "原因应指向目录创建失败：{reason}"
+        );
     }
 
     /// 捕获窗口按线程隔离：另一线程开自己的窗口既不进本窗口，也清空不了它。
