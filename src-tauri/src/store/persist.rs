@@ -24,7 +24,9 @@ pub(super) fn persist(config_path: &Path, config: &Config) -> Result<(), StoreEr
         detail: e.to_string(),
     })?;
 
-    // 配置文件没有第二来源：落盘前 fsync，掉电后仍是新内容。
+    // 配置文件没有第二来源：落盘前 fsync，保证文件内容已到设备——掉电后不会
+    // 读到半截内容。rename 的目录项未 fsync，掉电后目标可能仍是旧版（首次写入
+    // 时可能整个缺失）：耐久性只到文件内容为止，见 [`Durability`]。
     write_atomic(
         config_path,
         format!("{json}\n").as_bytes(),
