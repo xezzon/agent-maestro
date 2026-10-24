@@ -5,15 +5,17 @@
 //! 预开放给组件（guest 路径 `/`），插件在沙箱内经 WASI 直接落盘。
 //! 第三方来源（https 与 file）的获取、落位与生命周期见 ADR 0006。
 //!
-//! 本模块持有插件服务的共享词汇：三层类型（`PlacedPlugin` → `LoadedPlugin` →
-//! `PluginState`）、落位目录约定，以及与配置存储、命令层共用的条目 / 视图 /
-//! 配置类型。前两者是模块私有项——定义在模块根，子模块可直接使用（Rust 的
-//! 私有项对后代模块可见），不向 crate 外暴露。
+//! 本模块持有插件服务的共享词汇：四层类型（`PlacedPlugin` → `PluginMeta` →
+//! `LoadedPlugin` → `PluginState`）、落位目录约定，以及与配置存储、命令层共用的
+//! 条目 / 视图 / 配置类型。前几者是模块私有项——定义在模块根，子模块可直接使用
+//! （Rust 的私有项对后代模块可见），不向 crate 外暴露。
 //!
 //! 行为按职责拆在同级子模块：
 //! - [`install`]：获取、落位、启停、移除与重新加载；
 //! - [`projection`]：Provider 投影与文件路径拼接；
-//! - [`config`]：插件配置（`config.json`）读写。
+//! - [`config`]：插件配置（`config.json`）读写；
+//! - [`source`]：插件来源与 https 地址的判定；
+//! - [`manifest`]：manifest 的解析、校验与 `config_dir` 声明语法。
 
 mod builtin;
 mod config;
@@ -22,6 +24,7 @@ mod fetch;
 mod install;
 mod manifest;
 mod projection;
+mod source;
 
 #[cfg(test)]
 mod tests;
@@ -41,14 +44,16 @@ use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
 use crate::{
-    paths::MaestroPaths,
+    fs_util::{Durability, write_atomic},
+    paths::Paths,
     plugin::builtin::BUILTINS,
     store::{AppStore, PluginEntry},
     variables::Variables,
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
-use manifest::{Manifest, PlatformDirs, PluginSource, parse_placed};
+use manifest::{Manifest, parse_placed};
+use source::PluginSource;
 
 /// 落位目录中的 manifest 文件名。
 const PLACED_MANIFEST: &str = "manifest.json";
@@ -68,11 +73,23 @@ const INSTALL_LOCK_POISONED: &str = "插件安装锁不可用";
 struct PlacedPlugin {
     plugin_dir: PathBuf,
     raw_manifest: String,
-    wasm: Vec<u8>,
+    /// wasm 字节：与装载后的插件共用同一份（Arc 克隆），不复制整份字节。
+    wasm: Arc<[u8]>,
+}
+
+/// 插件描述：manifest 声明 + 解析后的配置目录。
+///
+/// 两者分开持有：manifest 是反序列化的产物（`config_dir` 只是**声明**），
+/// 配置目录是显式解析一步的产物（宿主绝对路径，见 ADR 0022）。禁用态也保留
+/// 这份描述——列表要展示配置目录。
+#[derive(Clone)]
+struct PluginMeta {
+    manifest: Manifest,
+    config_dir: PathBuf,
 }
 
 struct LoadedPlugin {
-    manifest: Manifest,
+    meta: PluginMeta,
     wasm: Arc<[u8]>,
     plugin: PlacedPlugin,
 }
@@ -82,7 +99,7 @@ impl PlacedPlugin {
         Self {
             plugin_dir: plugin_dir.to_path_buf(),
             raw_manifest,
-            wasm: wasm.into(),
+            wasm: Arc::from(wasm),
         }
     }
 
@@ -98,7 +115,7 @@ impl PlacedPlugin {
         Ok(Self {
             plugin_dir: plugin_dir.to_path_buf(),
             raw_manifest,
-            wasm,
+            wasm: Arc::from(wasm),
         })
     }
 
@@ -118,7 +135,7 @@ impl PlacedPlugin {
             PLACED_MANIFEST,
             self.raw_manifest.as_bytes(),
         )?;
-        write_placed_file(&self.plugin_dir, PLACED_WASM, &self.wasm)?;
+        write_placed_file(&self.plugin_dir, PLACED_WASM, self.wasm.as_ref())?;
         log::debug!("placed plugin: {}", self.plugin_dir.display());
         Ok(())
     }
@@ -127,32 +144,49 @@ impl PlacedPlugin {
         remove_placed_dir(&self.plugin_dir)
     }
 
-    /// 装载：解析 manifest 并按当前平台解析 `config_dir`（见 ADR 0011）。
+    /// 装载：解析 manifest 并解析 `config_dir`（见 ADR 0011）。
     ///
-    /// 解析是装载的必经步骤，在此完成而非留给调用点——装载是 `LoadedPlugin`
-    /// 的唯一构造点，因此 `config_dir` 已解析为宿主绝对路径由装载路径保证。
-    ///
-    /// 使用全局 [`PlatformDirs`] 解析，调用前需先初始化。
+    /// 装载是**显式**的一步：解析（反序列化）只产出声明、不碰文件系统，落位
+    /// 目录重建时由此把声明解析成宿主绝对路径并建出目录（见 ADR 0022）。
     fn load(self) -> Result<LoadedPlugin, String> {
         let manifest = parse_placed(self.raw_manifest.as_str())?;
-        let wasm = Arc::from(self.wasm.clone());
-        Ok(LoadedPlugin {
-            manifest,
+        let config_dir = manifest.config_dir.resolve(&Paths::get())?;
+        Ok(LoadedPlugin::from_parts(manifest, config_dir, self))
+    }
+}
+
+impl LoadedPlugin {
+    /// 由已解析的 manifest 与落位产物装配：配置目录必须已解析（显式一步的产物）。
+    ///
+    /// 安装路径上，manifest 只解析一次：来源侧解析出的 manifest 直接交给本
+    /// 构造器，不再由落位产物重新解析一遍。
+    fn from_parts(manifest: Manifest, config_dir: PathBuf, plugin: PlacedPlugin) -> Self {
+        // wasm 字节与落位产物共用同一份：装载不再复制整份字节。
+        let wasm = Arc::clone(&plugin.wasm);
+        Self {
+            meta: PluginMeta {
+                manifest,
+                config_dir,
+            },
             wasm,
-            plugin: self,
-        })
+            plugin,
+        }
+    }
+
+    /// 插件 id（落位目录名、id 冲突检查与投影报告的键）。
+    fn id(&self) -> &str {
+        &self.meta.manifest.id
     }
 }
 
 /// 落位目录内逐文件覆盖一个文件：同目录临时文件 + 原子改名（tmp + rename）。
 /// 落位产物（manifest/wasm）与插件配置共用这一条原子写路径。
+///
+/// 原子写的实现收在 crate 级 [`crate::fs_util`]：宿主侧另有一处同样的
+/// 「tmp + rename」（配置存储），两份实现曾各自漂移过一次。耐久性策略在这里
+/// 显式声明——插件侧产物不 fsync（可从来源重新获取，见 [`Durability`]）。
 fn write_placed_file(dir: &Path, name: &str, contents: &[u8]) -> Result<(), String> {
-    let tmp = tempfile::Builder::new()
-        .prefix(&format!(".{name}.tmp-"))
-        .tempfile_in(dir)
-        .map_err(|e| format!("创建落位临时文件失败：{e}"))?;
-    fs::write(tmp.path(), contents).map_err(|e| format!("写入 {name} 失败：{e}"))?;
-    fs::rename(tmp.path(), dir.join(name)).map_err(|e| format!("覆盖 {name} 失败：{e}"))
+    write_atomic(&dir.join(name), contents, Durability::Unsynced).map_err(|e| e.to_string())
 }
 
 /// 删除落位目录；目录已不存在同样成功（幂等）。
@@ -254,8 +288,8 @@ pub(crate) struct PluginConfig {
 enum PluginState {
     /// 损坏的插件
     Error(String),
-    /// 禁用的插件，不加载到内存
-    Disabled(Manifest),
+    /// 禁用的插件，不加载到内存（保留描述供列表展示）。
+    Disabled(PluginMeta),
     /// 已落位且文件没有损坏的插件，可以正常加载。
     /// Arc 便于投影前克隆快照、锁外执行 wasm（见 `write_providers`）。
     Loaded(Arc<LoadedPlugin>),
@@ -285,8 +319,8 @@ fn build_engine() -> Engine {
 }
 
 impl PluginService {
-    /// 构造：使用全局的 [`MaestroPaths`] 与 [`PlatformDirs`]，两者均在应用启动阶段
-    /// 完成初始化（[`MaestroPaths::init`] / [`PluginService::startup`]）。
+    /// 构造：使用全局的 [`Paths`]，它在应用启动阶段完成初始化
+    /// （[`Paths::init_from_system`]，见 `lib.rs` 的 setup）。
     pub(crate) fn new() -> Self {
         Self::with_fetcher(Arc::new(HttpFetcher::new()))
     }
@@ -301,14 +335,12 @@ impl PluginService {
         }
     }
 
-    /// 应用启动：初始化平台目录、从配置条目装载插件注册表（装载失败进错误态，
-    /// 离线可用），并补装配置中缺失的内置插件——与其余来源同一安装管线（落位 + 写条目）。
+    /// 应用启动：从配置条目装载插件注册表（装载失败进错误态，离线可用），
+    /// 并补装配置中缺失的内置插件——与其余来源同一安装管线（落位 + 写条目）。
     ///
-    /// 平台目录是 `config_dir` 解析的前提，不可用时启动失败（与主目录缺失的处理一致）；
+    /// 全局路径由应用 setup 阶段初始化（见 `lib.rs`），本方法只读不初始化。
     /// 配置存储不可用则降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
     pub(crate) fn startup(&self, store: &AppStore) -> Result<(), String> {
-        PlatformDirs::init_from_system()?;
-
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
         let plugin_entries = match store.with_read(|s| s.list_plugins()) {
             Ok(plugin_entries) => plugin_entries,
@@ -323,7 +355,7 @@ impl PluginService {
         let mut plugins = HashMap::with_capacity(plugin_entries.len());
         for entry in &plugin_entries {
             let plugin_id = entry.id.clone();
-            let plugin_dir = MaestroPaths::get().plugin_dir(&plugin_id);
+            let plugin_dir = Paths::get().plugin_dir(&plugin_id);
             let placed_plugin = match PlacedPlugin::from_plugin_dir(&plugin_dir) {
                 Ok(placed_plugin) => placed_plugin,
                 Err(err) => {
@@ -336,7 +368,7 @@ impl PluginService {
                     if entry.enabled {
                         PluginState::Loaded(Arc::new(loaded_plugin))
                     } else {
-                        PluginState::Disabled(loaded_plugin.manifest)
+                        PluginState::Disabled(loaded_plugin.meta)
                     }
                 }
                 Err(err) => PluginState::Error(err),
@@ -371,7 +403,7 @@ impl PluginService {
         let plugin_entries = store.with_read(|s| s.list_plugins())?;
         let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
         let plugin_view =
-            |entry: &PluginEntry, manifest: Option<&Manifest>, error: Option<String>| PluginView {
+            |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginView {
                 source: entry.source.clone(),
                 builtin: matches!(
                     PluginSource::parse(&entry.source),
@@ -379,8 +411,8 @@ impl PluginService {
                 ),
                 enabled: entry.enabled,
                 id: entry.id.clone(),
-                config_dir: manifest.map(|m| m.config_dir.display().to_string()),
-                settings_schema: manifest.and_then(|m| m.settings_schema.clone()),
+                config_dir: meta.map(|m| m.config_dir.display().to_string()),
+                settings_schema: meta.and_then(|m| m.manifest.settings_schema.clone()),
                 error,
             };
         Ok(plugin_entries
@@ -390,9 +422,9 @@ impl PluginService {
                 match plugin {
                     Some(plugin) => match plugin {
                         PluginState::Loaded(loaded_plugin) => {
-                            plugin_view(entry, Some(&loaded_plugin.manifest), None)
+                            plugin_view(entry, Some(&loaded_plugin.meta), None)
                         }
-                        PluginState::Disabled(manifest) => plugin_view(entry, Some(manifest), None),
+                        PluginState::Disabled(meta) => plugin_view(entry, Some(meta), None),
                         PluginState::Error(err) => plugin_view(entry, None, Some(err.to_owned())),
                     },
                     None => plugin_view(entry, None, Some(format!("插件 {} 未加载", entry.id))),

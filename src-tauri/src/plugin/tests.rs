@@ -10,17 +10,19 @@ use std::{
 use super::{
     ApplyStatus, PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport,
     PluginConfig, PluginState, PluginView, apply_summary, builtin,
-    manifest::is_https_url,
+    manifest::parse_count,
     projection::project_files,
+    source::is_https_url,
     testutil::{
         LockProbeFetcher, StubFetcher, fetcher_service, manifest_json, snapshot, store_at,
-        stub_service, temp_home, test_service,
+        stub_service, test_service,
     },
 };
 use crate::{
-    paths::MaestroPaths,
+    paths::Paths,
     provider::{ApiKey, Provider},
     store::PluginEntry,
+    testutil::temp_home,
 };
 
 const MANIFEST_URL: &str = "https://example.com/releases/download/v1/manifest.json";
@@ -78,7 +80,7 @@ fn add_https_plugin_writes_entry_places_files_and_loads() {
     let home = temp_home();
     let store = store_at(home.path());
     let service = stub_service(home.path(), https_stub("pi2"));
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
 
     service.add_plugin(&store, MANIFEST_URL).unwrap();
 
@@ -116,7 +118,7 @@ fn add_https_plugin_writes_entry_places_files_and_loads() {
 fn add_file_plugin_reads_manifest_and_entry_from_the_source_dir() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = test_service(home.path());
     let entry = "target/wasm32-wasip2/release/maestro_plugin_pi.wasm";
     let (source, manifest) = source_dir("pi2", entry);
@@ -189,8 +191,7 @@ fn add_plugin_rejects_duplicate_source_before_downloading() {
 #[test]
 fn add_plugin_rejects_id_conflict_without_placing() {
     let home = temp_home();
-    MaestroPaths::init(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
     fs::write(
         maestro_paths.config_path(),
@@ -214,7 +215,7 @@ fn add_plugin_rejects_id_conflict_without_placing() {
 fn add_plugin_writes_nothing_when_download_fails() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let fetcher = StubFetcher::new();
     fetcher.fail(MANIFEST_URL, "网络不可达");
     let service = stub_service(home.path(), fetcher);
@@ -233,7 +234,7 @@ fn add_plugin_writes_nothing_when_download_fails() {
 fn add_plugin_rejects_wasm_that_is_not_a_component() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let fetcher = StubFetcher::new();
     fetcher.serve(MANIFEST_URL, manifest_json("pi2", "$HOME/.pi2", WASM_URL));
     fetcher.serve(WASM_URL, b"not a wasm component".to_vec());
@@ -249,11 +250,74 @@ fn add_plugin_rejects_wasm_that_is_not_a_component() {
     );
 }
 
+/// 安装失败不得在用户主目录下留下配置目录：解析 manifest 不建目录，建目录是
+/// 显式的一步且发生在链接期校验之后（ADR 0022）。
+#[test]
+fn add_plugin_creates_no_config_dir_when_the_wasm_is_invalid() {
+    let home = temp_home();
+    let store = store_at(home.path());
+    let fetcher = StubFetcher::new();
+    fetcher.serve(MANIFEST_URL, manifest_json("pi2", "$HOME/.pi2", WASM_URL));
+    fetcher.serve(WASM_URL, b"not a wasm component".to_vec());
+    let service = stub_service(home.path(), fetcher);
+
+    let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+    assert!(err.contains("不是有效的 WASM 组件"), "{err}");
+    assert!(
+        !home.path().join(".pi2").exists(),
+        "校验失败不得留下配置目录：{}",
+        home.path().join(".pi2").display()
+    );
+}
+
+/// 同上，但失败发生在 id 冲突预检：冲突在解析配置目录之前就被拒，目录压根没被
+/// 建出来（ADR 0022）。
+#[test]
+fn add_plugin_creates_no_config_dir_when_the_id_conflicts() {
+    let home = temp_home();
+    let maestro_paths = Paths::get();
+    fs::create_dir_all(maestro_paths.maestro_dir()).unwrap();
+    fs::write(
+        maestro_paths.config_path(),
+        format!(
+            r#"{{"version":1,"providers":{{}},"plugins":[{{"source":"{}","enabled":true,"id":"pi"}}]}}"#,
+            builtin::source_of(builtin::BUILTIN_PI_ID)
+        ),
+    )
+    .unwrap();
+    let store = store_at(home.path());
+    let service = stub_service(home.path(), https_stub("pi"));
+
+    let err = service.add_plugin(&store, MANIFEST_URL).unwrap_err();
+
+    assert!(err.contains("已被来源 builtin:pi 占用"), "{err}");
+    assert!(
+        !home.path().join(".pi").exists(),
+        "id 冲突不得留下配置目录：{}",
+        home.path().join(".pi").display()
+    );
+}
+
+/// 一次安装只解析一次 manifest：来源侧解析出的 manifest 直接交给后面的校验
+/// 与装配，落位产物不再被重新解析一遍（ADR 0022）。
+#[test]
+fn add_plugin_parses_the_manifest_only_once() {
+    let home = temp_home();
+    let store = store_at(home.path());
+    let service = stub_service(home.path(), https_stub("pi2"));
+
+    let before = parse_count();
+    service.add_plugin(&store, MANIFEST_URL).unwrap();
+
+    assert_eq!(parse_count() - before, 1, "一次安装只解析一次 manifest");
+}
+
 #[test]
 fn add_plugin_rejects_config_dir_escaping_its_base() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let fetcher = StubFetcher::new();
     fetcher.serve(
         MANIFEST_URL,
@@ -316,7 +380,7 @@ fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
             let home = home_path.clone();
             thread::spawn(move || {
                 // 子线程 thread_local 为空，需重新设置全局目录。
-                crate::plugin::testutil::setup_test_dirs(&home);
+                crate::testutil::setup_paths(&home);
                 service.add_plugin(&store, source_a)
             })
         },
@@ -325,7 +389,7 @@ fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
             let service = Arc::clone(&service);
             let home = home_path.clone();
             thread::spawn(move || {
-                crate::plugin::testutil::setup_test_dirs(&home);
+                crate::testutil::setup_paths(&home);
                 service.add_plugin(&store, source_b)
             })
         },
@@ -343,7 +407,7 @@ fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
     assert_eq!(plugins[0].id, "pi", "赢家的 id 落盘");
 
     // 赢家的落位目录与产物必须保留——这是修复的核心不变量。
-    let placed_dir = MaestroPaths::get().plugin_dir("pi");
+    let placed_dir = Paths::get().plugin_dir("pi");
     assert!(
         placed_dir.join(PLACED_MANIFEST).exists(),
         "赢家的 manifest.json 必须保留"
@@ -377,7 +441,7 @@ fn set_enabled_waits_for_the_install_lock() {
         let home = home_path.clone();
         thread::spawn(move || {
             // 子线程 thread_local 为空，需重新设置全局目录。
-            crate::plugin::testutil::setup_test_dirs(&home);
+            crate::testutil::setup_paths(&home);
             tx.send(service.disable(&store, MANIFEST_URL)).unwrap();
         })
     };
@@ -427,7 +491,7 @@ fn set_enabled_disables_and_re_enables_the_plugin() {
 fn set_enabled_enable_fails_without_touching_config_when_placed_files_are_missing() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = stub_service(home.path(), https_stub("pi2"));
     service.add_plugin(&store, MANIFEST_URL).unwrap();
     service.disable(&store, MANIFEST_URL).unwrap();
@@ -458,7 +522,7 @@ fn set_enabled_unknown_source_is_rejected() {
 fn remove_plugin_unloads_memory_deletes_entry_then_dir() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = stub_service(home.path(), https_stub("pi2"));
     service.add_plugin(&store, MANIFEST_URL).unwrap();
     // 插件配置随插件存在（ADR 0018）：移除连落位目录带 config.json 一并删除。
@@ -531,7 +595,7 @@ fn remove_plugin_rejects_builtin_source() {
 fn remove_plugin_keeps_the_user_project_dir_for_file_sources() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = test_service(home.path());
     let entry = "target/wasm32-wasip2/release/maestro_plugin_pi.wasm";
     let (source, manifest) = source_dir("pi2", entry);
@@ -552,7 +616,7 @@ fn remove_plugin_keeps_the_user_project_dir_for_file_sources() {
 fn reload_plugin_refetches_and_replaces_the_placed_version() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let fetcher = Arc::new(https_stub("pi2"));
     let service = fetcher_service(home.path(), fetcher.clone());
     service.add_plugin(&store, MANIFEST_URL).unwrap();
@@ -584,7 +648,7 @@ fn reload_plugin_refetches_and_replaces_the_placed_version() {
 fn reload_plugin_keeps_unrelated_files_in_the_placed_dir() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let fetcher = Arc::new(https_stub("pi2"));
     let service = fetcher_service(home.path(), fetcher.clone());
     service.add_plugin(&store, MANIFEST_URL).unwrap();
@@ -614,7 +678,7 @@ fn reload_plugin_keeps_unrelated_files_in_the_placed_dir() {
 fn reload_plugin_write_failure_leaves_a_mixed_placed_state() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let fetcher = Arc::new(https_stub("pi2"));
     let service = fetcher_service(home.path(), fetcher.clone());
     service.add_plugin(&store, MANIFEST_URL).unwrap();
@@ -648,7 +712,7 @@ fn reload_plugin_write_failure_leaves_a_mixed_placed_state() {
 fn reload_plugin_rejects_upstream_id_change_and_keeps_old_state() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let fetcher = Arc::new(https_stub("pi2"));
     let service = fetcher_service(home.path(), fetcher.clone());
     service.add_plugin(&store, MANIFEST_URL).unwrap();
@@ -684,7 +748,7 @@ fn reload_plugin_rejects_upstream_id_change_and_keeps_old_state() {
 fn reload_plugin_keeps_the_disabled_state_with_a_fresh_manifest() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let fetcher = Arc::new(https_stub("pi2"));
     let service = fetcher_service(home.path(), fetcher.clone());
     service.add_plugin(&store, MANIFEST_URL).unwrap();
@@ -729,7 +793,7 @@ fn reload_plugin_rejects_unknown_sources() {
 fn reload_builtin_plugin_restores_a_corrupted_placed_copy() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = test_service(home.path());
 
     service.startup(&store).unwrap();
@@ -766,7 +830,7 @@ fn reload_builtin_plugin_restores_a_corrupted_placed_copy() {
 fn startup_installs_missing_builtin_plugin_like_any_other_source() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = test_service(home.path());
 
     service.startup(&store).unwrap();
@@ -812,7 +876,7 @@ fn startup_installs_missing_builtin_plugin_like_any_other_source() {
 fn builtin_source_dispatches_to_its_own_manifest_and_wasm() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = test_service(home.path());
 
     service.startup(&store).unwrap();
@@ -1224,7 +1288,7 @@ fn write_providers_fails_the_whole_plugin_when_its_plugin_config_is_corrupt() {
     let store = store_at(home.path());
     let service = test_service(home.path());
     service.startup(&store).unwrap();
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     fs::write(
         maestro_paths.plugin_dir("pi").join(PLACED_CONFIG),
         "{ not json",
@@ -1322,7 +1386,7 @@ fn get_plugin_config_returns_no_overrides_and_no_form_for_a_freshly_installed_pl
 fn set_plugin_config_persists_variables_and_form_and_reads_back() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = test_service(home.path());
     service.startup(&store).unwrap();
     store
@@ -1361,7 +1425,7 @@ fn set_plugin_config_persists_variables_and_form_and_reads_back() {
 fn set_plugin_config_rejects_variables_not_declared_in_the_global_table() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = test_service(home.path());
     service.startup(&store).unwrap();
 
@@ -1387,7 +1451,7 @@ fn set_plugin_config_rejects_variables_not_declared_in_the_global_table() {
 fn get_plugin_config_reports_corruption_instead_of_degrading() {
     let home = temp_home();
     let store = store_at(home.path());
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     let service = test_service(home.path());
     service.startup(&store).unwrap();
     fs::write(
@@ -1460,7 +1524,7 @@ fn apply_providers_logs_each_failed_plugin_with_its_reason() {
     let store = store_at(home.path());
     let service = test_service(home.path());
     service.startup(&store).unwrap();
-    let maestro_paths = MaestroPaths::get();
+    let maestro_paths = Paths::get();
     fs::write(
         maestro_paths.plugin_dir("pi").join(PLACED_CONFIG),
         "{ not json",

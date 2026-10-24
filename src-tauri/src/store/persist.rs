@@ -1,8 +1,13 @@
 //! 原子落盘：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
+//!
+//! 「怎么写」收在 crate 级 [`crate::fs_util`]：宿主侧另有一处同样的
+//! 「tmp + rename」（插件落位产物），两份实现各自漂移过一次——本模块只决定
+//! 「写什么」与「要不要 fsync」，怎么做由 `fs_util` 统一。
 
-use std::{fs, io::Write, path::Path};
+use std::{fs, path::Path};
 
 use super::schema::{Config, StoreError};
+use crate::fs_util::{Durability, write_atomic};
 
 /// 原子写入：同目录临时文件 → 落盘 → rename 覆盖目标。
 ///
@@ -19,12 +24,13 @@ pub(super) fn persist(config_path: &Path, config: &Config) -> Result<(), StoreEr
         detail: e.to_string(),
     })?;
 
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io_error)?;
-    tmp.write_all(format!("{json}\n").as_bytes())
-        .map_err(io_error)?;
-    tmp.as_file().sync_all().map_err(io_error)?;
-
-    // PersistError 内含真正的 io::Error；临时文件随后 drop 时自动清理。
-    tmp.persist(config_path).map_err(|e| io_error(e.error))?;
-    Ok(())
+    // 配置文件没有第二来源：落盘前 fsync，保证文件内容已到设备——掉电后不会
+    // 读到半截内容。rename 的目录项未 fsync，掉电后目标可能仍是旧版（首次写入
+    // 时可能整个缺失）：耐久性只到文件内容为止，见 [`Durability`]。
+    write_atomic(
+        config_path,
+        format!("{json}\n").as_bytes(),
+        Durability::Synced,
+    )
+    .map_err(io_error)
 }

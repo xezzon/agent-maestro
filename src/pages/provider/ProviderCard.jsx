@@ -15,10 +15,9 @@ export default function ProviderCard({ provider, onReload }) {
   const [editing, setEditing] = useState(false);
   // 开关与编辑表单互斥：任一方进行中另一方整体禁用。否则切换成功后、
   // 列表刷新落地前提交的表单仍持有切换前的 provider，会把刚完成的禁用改回启用。
+  // 真正的不变式是「表单打开期间不允许切换启用状态」——故编辑期间开关直接
+  // 禁用，父组件不必知道表单内部的保存态。
   const [toggling, runToggle] = useAsyncAction();
-  // 表单保存时也要禁用开关：两个动作的进行中状态合并成一个「忙」。
-  const [formBusy, setFormBusy] = useState(false);
-  const busy = toggling || formBusy;
 
   /** 开关独立于编辑表单：切换失败保持原状态。 */
   async function handleToggleEnabled(enabled) {
@@ -38,7 +37,7 @@ export default function ProviderCard({ provider, onReload }) {
         checked={provider.enabled}
         checkedChildren="启用"
         unCheckedChildren="禁用"
-        disabled={busy}
+        disabled={toggling || editing}
         onChange={handleToggleEnabled}
       />
     </Flex>
@@ -53,8 +52,7 @@ export default function ProviderCard({ provider, onReload }) {
         <ProviderForm
           mode={MODE_UPDATE}
           provider={provider}
-          disabled={busy}
-          onBusyChange={setFormBusy}
+          disabled={toggling}
           onCancel={() => setEditing(false)}
           onSaved={() => {
             setEditing(false);

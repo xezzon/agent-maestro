@@ -7,15 +7,17 @@
 use std::{fs, path::Path, sync::Arc};
 
 use crate::{
-    paths::MaestroPaths,
+    paths::Paths,
     store::{AppStore, PluginEntry, StoreError},
 };
 
 use super::{
-    INSTALL_LOCK_POISONED, PlacedPlugin, PluginService, PluginState, REGISTRY_LOCK_POISONED,
-    builtin,
-    manifest::{PluginSource, is_https_url, parse_manifest},
+    INSTALL_LOCK_POISONED, LoadedPlugin, PlacedPlugin, PluginService, PluginState,
+    REGISTRY_LOCK_POISONED, builtin,
+    execution::validate_component,
+    manifest::{Manifest, parse_manifest},
     remove_placed_dir,
+    source::{PluginSource, is_https_url},
 };
 
 impl PluginService {
@@ -24,7 +26,7 @@ impl PluginService {
     /// 2. 随后获取 manifest 与 wasm、id 冲突检查、链接期校验，全部通过才落位。
     /// 3. 安装成功后写入配置条目；此前任何一步失败都不写条目、不留落位残留。
     ///
-    /// 链接期校验（`LoadedPlugin::validate`）只做字节反序列化与导入/导出类型匹配，
+    /// 链接期校验（[`execution::validate_component`]）只做字节反序列化与导入/导出类型匹配，
     /// 不触发组件 init、不预开放真实配置目录。实投影阶段才完整实例化（见
     /// `write_providers`）。
     ///
@@ -39,11 +41,7 @@ impl PluginService {
 
         // 来源形态在发起获取之前判定：无法识别的来源直接拒绝。判定一次即成
         // 为值（`PluginSource`），后续流程只 match，不再重新解析同一串文本。
-        let parsed = PluginSource::parse(source).ok_or_else(|| {
-            format!(
-                "无法识别的插件来源：{source}（支持内置 builtin:<id>、指向 manifest.json 的 https 地址或本机绝对路径）"
-            )
-        })?;
+        let parsed = PluginSource::parse_or_err(source)?;
         let source_text = parsed.source();
 
         // 1. 来源即条目唯一身份：重复添加在发起下载之前拒绝。
@@ -59,14 +57,18 @@ impl PluginService {
         }
 
         // 2. 获取 manifest 与 wasm、校验并落位；获取与校验全程不持配置存储锁。
-        //    `load` 顺带解析 `config_dir`，解析先于 validate() 与 save()。
-        let loaded = self.fetch_placed(&parsed)?.load()?;
+        //    manifest 只解析这一次：解析结果直接交给后面的校验与装配。
+        let (placed, manifest) = self.fetch_placed(&parsed)?;
         // id 冲突预检：与写入时的复检问同一句规则（见 `Store::check_plugin_id_conflict`）。
-        store.with_read(|s| s.check_plugin_id_conflict(&source_text, &loaded.manifest.id))?;
-        // 链接期校验先于落位：wasm 不是组件或接口不兼容时不落位、不写条目。
-        // 仅做字节反序列化与类型检查，不触发组件 init、不预开放真实配置目录；
-        // 避免未授权的 init 代码在安装失败时仍写入 plugin config_dir。
-        loaded.validate(&self.engine)?;
+        store.with_read(|s| s.check_plugin_id_conflict(&source_text, &manifest.id))?;
+        // 链接期校验先于解析配置目录与落位：wasm 不是组件或接口不兼容时不建
+        // 目录、不落位、不写条目。仅做字节反序列化与类型检查，不触发组件 init、
+        // 不预开放真实配置目录；避免未授权的 init 代码在安装失败时仍写入
+        // plugin config_dir。
+        validate_component(&self.engine, &placed.wasm, &manifest.id)?;
+        // 解析配置目录：显式的一步（建目录在此发生），在链接期校验之后、落位之前。
+        let config_dir = manifest.config_dir.resolve(&Paths::get())?;
+        let loaded = LoadedPlugin::from_parts(manifest, config_dir, placed);
         loaded.plugin.save()?;
 
         // 3. 安装成功后写入条目：`id` 是来源到落位目录的唯一映射（见 ADR 0006）。
@@ -74,7 +76,7 @@ impl PluginService {
         let entry = PluginEntry {
             source: source_text,
             enabled: true,
-            id: loaded.manifest.id.clone(),
+            id: loaded.id().to_owned(),
         };
         if let Err(e) = store.with_write(|s| s.add_plugin(&entry)) {
             // 条目写不进去，就不能留下注册表看不见的落位目录。
@@ -93,7 +95,7 @@ impl PluginService {
             .write()
             .map_err(|_| REGISTRY_LOCK_POISONED)?
             .insert(
-                loaded.manifest.id.clone(),
+                loaded.id().to_owned(),
                 PluginState::Loaded(Arc::new(loaded)),
             );
         Ok(())
@@ -105,7 +107,10 @@ impl PluginService {
     /// 内置来源直接取内嵌字节（见 ADR 0004）。
     ///
     /// 来源已由调用方解析为 [`PluginSource`]：这里只按值分派，不再重新判。
-    fn fetch_placed(&self, source: &PluginSource) -> Result<PlacedPlugin, String> {
+    ///
+    /// 一并返回**已解析的 manifest**：安装路径上 manifest 只解析这一次，解析
+    /// 结果直接交给后面的校验与装配（不再由落位产物重新解析一遍）。
+    fn fetch_placed(&self, source: &PluginSource) -> Result<(PlacedPlugin, Manifest), String> {
         let source_text = source.source();
         log::debug!("fetching plugin artifacts: source={source_text}");
 
@@ -156,17 +161,37 @@ impl PluginService {
             }
         };
 
-        Ok(PlacedPlugin::new(
-            &MaestroPaths::get().plugin_dir(&manifest.id),
-            raw_manifest,
-            &wasm,
+        Ok((
+            PlacedPlugin::new(&Paths::get().plugin_dir(&manifest.id), raw_manifest, &wasm),
+            manifest,
         ))
     }
 
-    /// 启用插件条目。
+    /// 启用插件条目：与禁用同一条流程（见 [`Self::set_enabled`]），只是方向不同。
     ///
     /// 先从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步注册表
     /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
+    pub(crate) fn enable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        self.set_enabled(store, source, true)
+    }
+
+    /// 禁用插件条目：与启用同一条流程（见 [`Self::set_enabled`]），只是方向不同。
+    ///
+    /// 先改配置条目，再把内存注册表换成 Disabled 态（保留描述供列表展示）。
+    pub(crate) fn disable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+        self.set_enabled(store, source, false)
+    }
+
+    /// 启用/禁用插件条目：两条流程的共同实现。
+    ///
+    /// 两条流程此前是两个逐段同构的方法（取锁 → 读条目 → 已处于目标态即返回
+    /// → `with_write` 复检并写条目 → 更新注册表），差异只有「装载 vs 降级」与
+    /// 方向。锁语义改一次要改两遍，且两处必须保持对称——现合成一处，差异
+    /// 只在两处分叉：启用要先装载，禁用只降级注册表。
+    ///
+    /// 启用：从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步
+    /// 注册表——装载失败即报错且不改配置，修复落位文件后重新启用即可。
+    /// 禁用：先改配置条目，再把内存注册表换成 Disabled 态（保留描述供列表展示）。
     ///
     /// 整个流程在 `install_lock` 内独占：与添加、移除、重新加载互斥。
     /// 否则移除可能插进「写配置条目」与「同步注册表」之间，留下条目与落位文件
@@ -174,80 +199,56 @@ impl PluginService {
     /// `enabled` 并按它覆盖注册表，与刚落盘的配置对不上。
     /// 锁序 `install_lock` → store → entries，与其余安装类流程一致；
     /// 本流程只读本机文件、不联网，临界区比含下载的流程短。
-    pub(crate) fn enable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
         let _install_guard = self
             .install_lock
             .lock()
             .map_err(|_| INSTALL_LOCK_POISONED)?;
 
         let entry = store.with_read(|s| s.plugin_by_source(source))?;
-        if entry.enabled {
+        if entry.enabled == enabled {
             return Ok(());
         }
 
         // 启用先装载再写配置：装载失败不写条目、不动注册表，旧状态保持可用。
-        let placed = PlacedPlugin::from_plugin_dir(&MaestroPaths::get().plugin_dir(&entry.id))?;
-        let loaded = placed.load()?;
+        // 禁用不装载：注册表里已有一份描述，降级即可。
+        let loaded = if enabled {
+            Some(PlacedPlugin::from_plugin_dir(&Paths::get().plugin_dir(&entry.id))?.load()?)
+        } else {
+            None
+        };
 
         // 复检：条目可能已被移除，不得按过期条目继续写。install_lock 已让
         // 移除与本流程互斥，此处是纵深防御。并发方已完成同样的切换时返回
         // `None`（配置与注册表均已同步，直接成功）。
         let entry = store.with_write(|guard| -> Result<Option<PluginEntry>, StoreError> {
             let entry = guard.plugin_by_source(source)?;
-            if entry.enabled {
+            if entry.enabled == enabled {
                 return Ok(None);
             }
-            guard.set_plugin_enabled(source, true)?;
+            guard.set_plugin_enabled(source, enabled)?;
             Ok(Some(entry))
         })?;
         let Some(entry) = entry else {
             return Ok(());
         };
 
-        self.entries
-            .write()
-            .map_err(|_| REGISTRY_LOCK_POISONED)?
-            .insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
-        Ok(())
-    }
-
-    /// 禁用插件条目。
-    ///
-    /// 先改配置条目，再把内存注册表换成 Disabled 态（保留 manifest 供列表展示）。
-    ///
-    /// 整个流程在 `install_lock` 内独占：与添加、启用、移除、重新加载互斥
-    /// （理由见 [`Self::enable`]）；本流程只读本机文件、不联网。
-    pub(crate) fn disable(&self, store: &AppStore, source: &str) -> Result<(), String> {
-        let _install_guard = self
-            .install_lock
-            .lock()
-            .map_err(|_| INSTALL_LOCK_POISONED)?;
-
-        let entry = store.with_read(|s| s.plugin_by_source(source))?;
-        if !entry.enabled {
-            return Ok(());
-        }
-
-        // 复检：条目可能已被移除，不得按过期条目继续写。并发方已完成同样的
-        // 切换时返回 `None`（配置与注册表均已同步，直接成功）。
-        let entry = store.with_write(|guard| -> Result<Option<PluginEntry>, StoreError> {
-            let entry = guard.plugin_by_source(source)?;
-            if !entry.enabled {
-                return Ok(None);
+        match loaded {
+            Some(loaded) => {
+                self.entries
+                    .write()
+                    .map_err(|_| REGISTRY_LOCK_POISONED)?
+                    .insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
             }
-            guard.set_plugin_enabled(source, false)?;
-            Ok(Some(entry))
-        })?;
-        let Some(entry) = entry else {
-            return Ok(());
-        };
-
-        let mut entries = self.entries.write().map_err(|_| REGISTRY_LOCK_POISONED)?;
-        if let Some(state) = entries.get_mut(&entry.id)
-            && let PluginState::Loaded(loaded) = state
-        {
-            let manifest = loaded.manifest.clone();
-            *state = PluginState::Disabled(manifest);
+            None => {
+                let mut entries = self.entries.write().map_err(|_| REGISTRY_LOCK_POISONED)?;
+                if let Some(state) = entries.get_mut(&entry.id)
+                    && let PluginState::Loaded(loaded) = state
+                {
+                    let meta = loaded.meta.clone();
+                    *state = PluginState::Disabled(meta);
+                }
+            }
         }
         Ok(())
     }
@@ -295,7 +296,7 @@ impl PluginService {
         };
 
         // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
-        remove_placed_dir(&MaestroPaths::get().plugin_dir(&entry.id))
+        remove_placed_dir(&Paths::get().plugin_dir(&entry.id))
     }
 
     /// 重新加载：「按配置中的来源」无条件重新获取 manifest 与 wasm，按「先
@@ -318,23 +319,23 @@ impl PluginService {
         let entry = store.with_read(|s| s.plugin_by_source(source))?;
 
         // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。
-        //    `load` 顺带解析 `config_dir`，解析先于 validate() 与 save()。
-        let parsed = PluginSource::parse(source).ok_or_else(|| {
-            format!(
-                "无法识别的插件来源：{source}（支持内置 builtin:<id>、指向 manifest.json 的 https 地址或本机绝对路径）"
-            )
-        })?;
-        let loaded = self.fetch_placed(&parsed)?.load()?;
+        //    manifest 只解析这一次，解析结果直接交给后面的校验与装配。
+        let parsed = PluginSource::parse_or_err(source)?;
+        let (placed, manifest) = self.fetch_placed(&parsed)?;
         // 上游 id 变更报错并保持旧状态：落位目录由条目 id 定位，id 漂移会架空映射。
-        if loaded.manifest.id != entry.id {
+        if manifest.id != entry.id {
             return Err(format!(
                 "上游 manifest 的插件 id 已从「{}」变更为「{}」，拒绝重新加载",
-                entry.id, loaded.manifest.id
+                entry.id, manifest.id
             ));
         }
-        // 链接期校验先于落位：wasm 不是组件或接口不兼容时不落位、注册表保持旧状态。
-        // 不触发组件 init、不预开放真实配置目录，避免未授权写入。
-        loaded.validate(&self.engine)?;
+        // 链接期校验先于解析配置目录与落位：wasm 不是组件或接口不兼容时不建
+        // 目录、不落位、注册表保持旧状态。不触发组件 init、不预开放真实配置
+        // 目录，避免未授权写入。
+        validate_component(&self.engine, &placed.wasm, &manifest.id)?;
+        // 解析配置目录：显式的一步（建目录在此发生），在链接期校验之后、落位之前。
+        let config_dir = manifest.config_dir.resolve(&Paths::get())?;
+        let loaded = LoadedPlugin::from_parts(manifest, config_dir, placed);
         // 逐文件覆盖落位产物：不触碰目录中宿主产物以外的文件（见 ADR 0018）。
         loaded.plugin.save()?;
 
@@ -342,7 +343,7 @@ impl PluginService {
         let state = if entry.enabled {
             PluginState::Loaded(Arc::new(loaded))
         } else {
-            PluginState::Disabled(loaded.manifest)
+            PluginState::Disabled(loaded.meta)
         };
         self.entries
             .write()

@@ -10,7 +10,7 @@ import {
   Typography,
 } from "antd";
 import { listProviders, normalizeEndpoints } from "@/api/provider";
-import { applyProviders, isUsablePlugin, listPlugins } from "@/api/plugins";
+import { applyProviders, isUsablePlugin } from "@/api/plugins";
 import { listVariables } from "@/api/variables";
 import VariablesCard from "@/components/VariablesCard";
 import ProviderCard from "./ProviderCard";
@@ -19,15 +19,23 @@ import { MODE_CREATE } from "./formMode";
 import ApplyResultList from "./ApplyResultList";
 import useAsyncAction from "@/hooks/useAsyncAction";
 
-export default function ProvidersPage() {
+/**
+ * Provider 页：Provider 列表 + 全局变量表 + 投影。
+ *
+ * 插件列表由 App 传入（全应用一份数据）：没有可用插件（已启用且加载成功）时
+ * 投影按钮禁用（用户故事 24）。
+ * @param {Object} param0
+ * @param {import("@/api/plugins").PluginView[]} param0.plugins 插件列表
+ */
+export default function ProvidersPage({ plugins }) {
   const [providers, setProviders] = useState([]);
   const [variables, setVariables] = useState({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [creating, setCreating] = useState(false);
   const [applying, runApply] = useAsyncAction();
-  const [canApply, setCanApply] = useState(false);
   const [reports, setReports] = useState(null);
+  const canApply = plugins.some(isUsablePlugin);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -48,10 +56,6 @@ export default function ProvidersPage() {
 
   useEffect(() => {
     reload();
-    // 没有可用插件（已启用且加载成功）时投影按钮禁用（用户故事 24）。
-    listPlugins()
-      .then((plugins) => setCanApply(plugins.some(isUsablePlugin)))
-      .catch(() => setCanApply(false));
   }, [reload]);
 
   async function handleApply() {

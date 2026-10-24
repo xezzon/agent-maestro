@@ -3,7 +3,7 @@
 //! 模块按职责拆开：
 //! - [`schema`]：配置的形状（顶层文档、插件条目、存储错误、变更标记）；
 //! - [`protected`]：保护态（配置文件损坏时拒绝一切读写）；
-//! - [`persist`]：原子落盘（临时文件 + rename）；
+//! - [`persist`]：原子落盘（临时文件 + rename，写法见 crate 级 `fs_util`）；
 //! - [`providers`]：Provider 仓储（新增/更新/删除/启停 + 落盘前的一致性校验）；
 //! - [`plugins`]：插件条目仓储（新增/删除/启停）；
 //! - [`variable_table`]：变量表（整包替换 + 名合法性）。
@@ -21,8 +21,6 @@ mod variable_table;
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod testutil;
 
 use std::{
     collections::BTreeMap,
@@ -31,7 +29,7 @@ use std::{
     sync::RwLock,
 };
 
-use crate::{paths::MaestroPaths, provider::Provider, variables::Variables};
+use crate::{paths::Paths, provider::Provider, variables::Variables};
 
 pub(crate) use schema::{Config, PluginEntry, StoreError};
 
@@ -52,10 +50,10 @@ pub(crate) struct Store {
 }
 
 impl Store {
-    /// 从全局 [`MaestroPaths`] 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
+    /// 从全局 [`Paths`] 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
     /// 损坏则进入保护状态。
     pub(crate) fn new() -> Self {
-        let config_path = MaestroPaths::get().config_path();
+        let config_path = Paths::get().config_path();
         let state = match fs::read_to_string(&config_path) {
             Ok(text) => Self::parse(&config_path, &text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),

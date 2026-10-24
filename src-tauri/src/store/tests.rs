@@ -1,8 +1,8 @@
 //! 配置存储的单元测试：读写、落盘往返、校验与保护态。
 
-use super::testutil::temp_home;
 use super::*;
 use crate::provider::{ApiKey, ModelEntry, Protocol};
+use crate::testutil::temp_home;
 
 #[test]
 fn empty_config_serializes_to_version_1_schema() {
@@ -164,7 +164,7 @@ fn update_provider_missing_slug_is_rejected_without_upsert() {
     assert!(String::from(err).contains("ghost"));
     assert!(store.get().unwrap().providers.is_empty());
     assert!(
-        !MaestroPaths::get().config_path().exists(),
+        !Paths::get().config_path().exists(),
         "报错路径不得静默写入文件"
     );
 }
@@ -252,9 +252,9 @@ fn update_provider_replaces_api_key_with_whole_record() {
 #[test]
 fn delete_provider_removes_record_with_models_and_api_key() {
     let _home = temp_home();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
     fs::write(
-        MaestroPaths::get().config_path(),
+        Paths::get().config_path(),
         r#"{
                 "version": 1,
                 "providers": {
@@ -356,7 +356,7 @@ fn persisted_file_omits_unconfigured_protocol_slots() {
         )
         .unwrap();
 
-    let text = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
+    let text = fs::read_to_string(Paths::get().config_path()).unwrap();
     assert!(text.contains(r#""openai-completions""#));
     assert!(
         !text.contains(r#""anthropic-messages""#),
@@ -384,7 +384,7 @@ fn providers_are_written_sorted_by_slug() {
             .unwrap();
     }
 
-    let text = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
+    let text = fs::read_to_string(Paths::get().config_path()).unwrap();
     let alpha = text.find("\"alpha\"").unwrap();
     let midway = text.find("\"midway\"").unwrap();
     let zeta = text.find("\"zeta\"").unwrap();
@@ -443,9 +443,9 @@ fn multiple_providers_round_trip_through_disk() {
 #[test]
 fn create_provider_preserves_other_providers_models_and_endpoints() {
     let _home = temp_home();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
     fs::write(
-        MaestroPaths::get().config_path(),
+        Paths::get().config_path(),
         r#"{
                 "version": 1,
                 "providers": {
@@ -504,15 +504,15 @@ fn create_provider_preserves_other_providers_models_and_endpoints() {
 #[test]
 fn corrupt_file_reports_error_with_path_and_refuses_writes() {
     let _home = temp_home();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
-    fs::write(MaestroPaths::get().config_path(), "不是 JSON {{{").unwrap();
-    let original = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    fs::write(Paths::get().config_path(), "不是 JSON {{{").unwrap();
+    let original = fs::read_to_string(Paths::get().config_path()).unwrap();
 
     let mut store = Store::new();
 
     let err = store.get().unwrap_err();
     assert!(matches!(err, StoreError::Corrupt { .. }));
-    assert!(String::from(err).contains(MaestroPaths::get().config_path().to_str().unwrap()));
+    assert!(String::from(err).contains(Paths::get().config_path().to_str().unwrap()));
 
     assert!(
         store
@@ -529,7 +529,7 @@ fn corrupt_file_reports_error_with_path_and_refuses_writes() {
             .is_err()
     );
     assert_eq!(
-        fs::read_to_string(MaestroPaths::get().config_path()).unwrap(),
+        fs::read_to_string(Paths::get().config_path()).unwrap(),
         original
     );
 }
@@ -537,19 +537,19 @@ fn corrupt_file_reports_error_with_path_and_refuses_writes() {
 #[test]
 fn unsupported_version_reports_error_with_path_and_refuses_writes() {
     let _home = temp_home();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
     fs::write(
-        MaestroPaths::get().config_path(),
+        Paths::get().config_path(),
         r#"{"version":99,"providers":{}}"#,
     )
     .unwrap();
-    let original = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
+    let original = fs::read_to_string(Paths::get().config_path()).unwrap();
 
     let mut store = Store::new();
 
     let err = store.get().unwrap_err();
     assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
-    assert!(String::from(err).contains(MaestroPaths::get().config_path().to_str().unwrap()));
+    assert!(String::from(err).contains(Paths::get().config_path().to_str().unwrap()));
 
     assert!(
         store
@@ -566,7 +566,7 @@ fn unsupported_version_reports_error_with_path_and_refuses_writes() {
             .is_err()
     );
     assert_eq!(
-        fs::read_to_string(MaestroPaths::get().config_path()).unwrap(),
+        fs::read_to_string(Paths::get().config_path()).unwrap(),
         original
     );
 }
@@ -637,7 +637,7 @@ fn create_provider_creates_missing_directories() {
         )
         .unwrap();
 
-    assert!(MaestroPaths::get().config_path().exists());
+    assert!(Paths::get().config_path().exists());
 }
 
 #[test]
@@ -791,9 +791,9 @@ fn store_does_not_validate_model_ids() {
 #[test]
 fn plugins_section_defaults_to_empty_for_legacy_config_files() {
     let _home = temp_home();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
     fs::write(
-        MaestroPaths::get().config_path(),
+        Paths::get().config_path(),
         r#"{"version":1,"providers":{}}"#,
     )
     .unwrap();
@@ -811,9 +811,9 @@ fn plugins_section_defaults_to_empty_for_legacy_config_files() {
 #[test]
 fn variables_default_to_empty_and_serialize_as_an_empty_object() {
     let _home = temp_home();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
     fs::write(
-        MaestroPaths::get().config_path(),
+        Paths::get().config_path(),
         r#"{"version":1,"providers":{}}"#,
     )
     .unwrap();
@@ -896,7 +896,7 @@ fn set_variables_to_empty_clears_the_table() {
     let reopened = Store::new();
     assert!(reopened.get().unwrap().variables.is_empty());
     assert_eq!(
-        fs::read_to_string(MaestroPaths::get().config_path()).unwrap(),
+        fs::read_to_string(Paths::get().config_path()).unwrap(),
         "{\n  \"version\": 1,\n  \"providers\": {},\n  \"variables\": {}\n}\n"
     );
 }
@@ -928,8 +928,8 @@ fn config_debug_output_never_contains_the_api_key() {
 #[test]
 fn corrupt_store_refuses_plugin_writes() {
     let _home = temp_home();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
-    fs::write(MaestroPaths::get().config_path(), "不是 JSON {{{").unwrap();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
+    fs::write(Paths::get().config_path(), "不是 JSON {{{").unwrap();
     let mut store = Store::new();
     let entry = PluginEntry {
         source: "https://example.com/manifest.json".to_owned(),
@@ -948,8 +948,8 @@ fn corrupt_store_refuses_plugin_writes() {
 #[test]
 fn invalid_variable_names_win_over_a_corrupt_config() {
     let _home = temp_home();
-    let config_path = MaestroPaths::get().config_path();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+    let config_path = Paths::get().config_path();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
     fs::write(&config_path, "不是 JSON {{{").unwrap();
     let mut store = Store::new();
 
@@ -988,7 +988,7 @@ fn create_provider_rejects_references_to_undefined_variables() {
     assert!(message.contains("base_url.openai-completions"), "{message}");
     assert!(store.get().unwrap().providers.is_empty());
     assert!(
-        !MaestroPaths::get().config_path().exists(),
+        !Paths::get().config_path().exists(),
         "报错路径不得静默写入文件"
     );
 }
@@ -1244,9 +1244,9 @@ fn create_provider_rejects_malformed_placeholders() {
 #[test]
 fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
     let _home = temp_home();
-    fs::create_dir_all(MaestroPaths::get().maestro_dir()).unwrap();
+    fs::create_dir_all(Paths::get().maestro_dir()).unwrap();
     fs::write(
-        MaestroPaths::get().config_path(),
+        Paths::get().config_path(),
         r#"{
                 "version": 1,
                 "providers": {
@@ -1260,7 +1260,7 @@ fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
             }"#,
     )
     .unwrap();
-    let original = fs::read_to_string(MaestroPaths::get().config_path()).unwrap();
+    let original = fs::read_to_string(Paths::get().config_path()).unwrap();
     let mut store = Store::new();
 
     let err = store
@@ -1272,7 +1272,7 @@ fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
 
     assert!(matches!(err, StoreError::Interpolation { .. }));
     assert_eq!(
-        fs::read_to_string(MaestroPaths::get().config_path()).unwrap(),
+        fs::read_to_string(Paths::get().config_path()).unwrap(),
         original,
         "被拒的保存不落盘"
     );
@@ -1294,10 +1294,7 @@ fn set_variables_rejects_invalid_variable_names() {
             matches!(err, StoreError::InvalidVariableName { .. }),
             "name={name:?}"
         );
-        assert!(
-            !MaestroPaths::get().config_path().exists(),
-            "报错路径不得落盘"
-        );
+        assert!(!Paths::get().config_path().exists(), "报错路径不得落盘");
     }
 }
 
@@ -1325,7 +1322,7 @@ fn set_variables_accepts_an_empty_default_value() {
 #[test]
 fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
     let _home = temp_home();
-    let path = MaestroPaths::get().config_path();
+    let path = Paths::get().config_path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
@@ -1416,7 +1413,7 @@ fn provider_with_custom_header_limit_and_capabilities_round_trips_through_disk()
 #[test]
 fn legacy_config_without_new_fields_reads_as_unset_and_writes_fixed_shape() {
     let _home = temp_home();
-    let path = MaestroPaths::get().config_path();
+    let path = Paths::get().config_path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
@@ -1508,7 +1505,7 @@ fn set_provider_enabled_does_not_write_to_disk_when_state_is_unchanged() {
     store
         .create_provider("ollama", Provider::default())
         .unwrap();
-    let path = MaestroPaths::get().config_path();
+    let path = Paths::get().config_path();
 
     // 手工把磁盘内容改成与内存不同的样子：ollama 在盘上是禁用态。
     let hand_edited = r#"{

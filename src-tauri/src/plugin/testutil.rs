@@ -9,20 +9,9 @@ pub(super) use super::fetch::testutil::{LockProbeFetcher, StubFetcher};
 pub(super) use super::manifest::testutil::manifest_json;
 use super::{PluginService, fetch::Fetcher};
 use crate::{
-    paths::MaestroPaths,
-    plugin::manifest::PlatformDirs,
     store::{AppStore, Config, Store},
+    testutil::setup_paths,
 };
-
-pub(crate) fn temp_home() -> tempfile::TempDir {
-    tempfile::tempdir().unwrap()
-}
-
-/// 设置测试用全局目录（MaestroPaths + PlatformDirs），落在临时主目录下。
-pub(super) fn setup_test_dirs(home: &Path) {
-    MaestroPaths::init(home);
-    PlatformDirs::init_test(PlatformDirs::from_home(home));
-}
 
 /// 不联网的插件服务：任何未预置的拉取都会失败。
 pub(crate) fn test_service(home: &Path) -> PluginService {
@@ -33,15 +22,15 @@ pub(super) fn stub_service(home: &Path, fetcher: StubFetcher) -> PluginService {
     fetcher_service(home, Arc::new(fetcher))
 }
 
-/// 注入 fetcher 的插件服务：同时设置全局 MaestroPaths 与 PlatformDirs，
+/// 注入 fetcher 的插件服务：同时注入全局路径（主目录 + 平台基准目录），
 /// 测试服务一律不读真实环境。
 pub(super) fn fetcher_service(home: &Path, fetcher: Arc<dyn Fetcher>) -> PluginService {
-    setup_test_dirs(home);
+    setup_paths(home);
     PluginService::with_fetcher(fetcher)
 }
 
 pub(crate) fn store_at(home: &Path) -> AppStore {
-    MaestroPaths::init(home);
+    setup_paths(home);
     AppStore {
         store: RwLock::new(Store::new()),
     }

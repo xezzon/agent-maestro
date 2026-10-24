@@ -65,13 +65,13 @@ pub(crate) fn find_by_id(id: &str) -> Option<&'static BuiltinPlugin> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::manifest::{PluginSource, parse_manifest};
+    use crate::plugin::{manifest::parse_manifest, source::PluginSource};
 
     #[test]
     fn embedded_pi_manifest_is_valid_and_matches_builtin_identity() {
         let root = tempfile::tempdir().unwrap();
-        let dirs = crate::plugin::PlatformDirs::from_home(root.path());
-        let _g = crate::plugin::PlatformDirs::test_guard(dirs);
+        let paths = crate::paths::Paths::from_home(root.path());
+        let _g = crate::paths::Paths::test_guard(paths.clone());
         let manifest = parse_manifest(
             &PluginSource::Builtin(BUILTIN_PI_ID.to_owned()),
             PI_MANIFEST_JSON,
@@ -80,7 +80,7 @@ mod tests {
 
         assert_eq!(manifest.id, BUILTIN_PI_ID);
         assert_eq!(
-            manifest.config_dir,
+            manifest.config_dir.resolve(&paths).unwrap(),
             root.path().canonicalize().unwrap().join(".pi")
         );
         assert_eq!(

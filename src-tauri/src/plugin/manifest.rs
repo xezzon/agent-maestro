@@ -1,76 +1,31 @@
-use crate::plugin::builtin;
+//! 插件 manifest：插件 metadata 的唯一来源（插件根目录的 `manifest.json`）。
+//!
+//! 宿主直接读文件，组件不导出 get-metadata；容忍未知字段，必填字段缺失或
+//! 插件 id 不合法即加载失败（见 issue #34）。`config_dir` 的声明语法与逃逸
+//! 校验也在这里（ADR 0011）；「平台变量前缀落在哪个目录」由 [`crate::paths`]
+//! 回答——本模块只管声明长什么样、能不能落到基准目录之内。
+
 use serde::Deserialize;
 use std::{
     fs,
     path::{Component, Path, PathBuf},
 };
 
-use crate::test_global::Global;
+use crate::paths::Paths;
 
-#[cfg(test)]
-use crate::test_global::TestGuard;
-
-/// 插件来源：解析一次，随值传递。
-///
-/// 来源字符串此前在四处各判一次（`SourceKind::from_source`），每次都重新解析
-/// 同一串文本；判出来的又只有「是哪种」而没有「是哪一条」。本类型把「是什么
-/// 来源、是哪一条」变成值的一部分：解析一次，之后只 match，不再重新判。
-///
-/// 三种来源共用同一份 manifest 校验，`entry` 语义按来源分列，不做跨协议的
-/// 统一解析（见 ADR 0006）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PluginSource {
-    /// 内置于应用：载荷是插件 id（`builtin:<id>`），wasm 内嵌，`entry` 不参与解析。
-    Builtin(String),
-    /// https 来源：载荷是 manifest.json 的 URL，`entry` 必须是 https URL。
-    Https(String),
-    /// 本机指向 manifest.json 的绝对路径（本地调试回路）：`entry` 是 manifest
-    /// 所在目录内的相对路径或 https URL。
-    File(PathBuf),
-}
-
-impl PluginSource {
-    /// 解析来源字符串；无法识别的形态返回 `None`。
-    ///
-    /// `builtin:<id>` 内置于应用；https URL 为正式发布来源；本机绝对路径为
-    /// file 来源。其余形态（如旧配置残留的 Git 地址、相对路径）无法识别，
-    /// 返回 `None` 由调用方报「暂不支持的插件来源」。
-    pub(crate) fn parse(source: &str) -> Option<Self> {
-        if let Some(id) = source.strip_prefix(builtin::SOURCE_PREFIX) {
-            Some(Self::Builtin(id.to_owned()))
-        } else if is_https_url(source) {
-            Some(Self::Https(source.to_owned()))
-        } else if Path::new(source).is_absolute() {
-            Some(Self::File(PathBuf::from(source)))
-        } else {
-            None
-        }
-    }
-
-    /// 来源字符串（条目的身份）：逐字还原成解析前的那一串。
-    pub(crate) fn source(&self) -> String {
-        match self {
-            Self::Builtin(id) => builtin::source_of(id),
-            Self::Https(url) => url.clone(),
-            Self::File(path) => path.to_string_lossy().into_owned(),
-        }
-    }
-}
+use super::source::{PluginSource, is_https_url};
 
 /// 插件 metadata 的唯一来源：插件根目录的 `manifest.json`。
-///
-/// 宿主直接读文件，组件不导出 get-metadata；容忍未知字段，
-/// 必填字段缺失或插件 id 不合法即加载失败（见 issue #34）。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct Manifest {
     /// 插件 id：`[a-z][a-z0-9_-]*`。
     pub(crate) id: String,
     /// 插件被授权写入的配置目录：字符串形式以平台变量前缀声明（`$HOME/.pi`、
     /// `$XDG_CONFIG_HOME/zed`…），对象形式按平台键各声明一条（键固定为
-    /// `linux`、`macos`、`windows`）；反序列化时即由 [`resolve_config_dir`] 解析为
-    /// 宿主绝对路径，构造出的 `Manifest` 只持有绝对路径。
+    /// `linux`、`macos`、`windows`）。反序列化只产出**声明**（形态已校验），
+    /// 解析为宿主绝对路径是显式的一步（见 [`DeclaredConfigDir::resolve`]）。
     #[serde(deserialize_with = "deserialize_config_dir")]
-    pub(crate) config_dir: PathBuf,
+    pub(crate) config_dir: DeclaredConfigDir,
     /// 入口 wasm 的回源地址（约束按来源种类分列，见 ADR 0006）。
     pub(crate) entry: String,
     /// 可选的内联 JSON Schema（draft 2020-12，ADR 0017）：描述该插件 `form`
@@ -79,221 +34,142 @@ pub(crate) struct Manifest {
     pub(crate) settings_schema: Option<serde_json::Value>,
 }
 
-/// 全局平台目录：生产期进程内一份，测试期每线程一份（见 [`crate::test_global`]）。
-static PLATFORM_DIRS: Global<PlatformDirs> = Global::new();
-
-/// 平台基准目录：`config_dir` 声明里的变量前缀在此解析为宿主绝对路径。
-#[derive(Clone, Debug)]
-pub(crate) struct PlatformDirs {
-    home: PathBuf,
-    config: PathBuf,
-    config_local: PathBuf,
-    data: PathBuf,
-    data_local: PathBuf,
+/// 声明里支持的平台变量前缀（错误信息里列给用户）。
+fn supported_variables() -> String {
+    crate::paths::SUPPORTED_VARIABLES.join("、")
 }
 
-impl PlatformDirs {
-    /// 读取宿主真实的平台目录并初始化全局实例；任一项不可用即报错。
-    /// 重复调用无效（以首次为准）。
+/// 解析计数（测试期）：本线程累计解析了多少份 manifest。
+///
+/// [`parse_placed`] 是 manifest 解析的唯一入口，计数落在它身上——「一次安装
+/// 只解析一次 manifest」因此是可执行断言，而不是靠读代码确认。
+#[cfg(test)]
+pub(crate) fn parse_count() -> usize {
+    PARSE_COUNT.with(Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 解析计数（测试期，每线程一份）：见 [`parse_count`]。
+    static PARSE_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+use std::cell::Cell;
+
+/// 插件被授权写入的配置目录：**声明**，尚未解析为宿主路径。
+///
+/// 声明形式是「变量前缀 + 相对片段」（`$HOME/.pi`、`$XDG_CONFIG_HOME/zed`）；
+/// `~/.pi` 与 `$HOME/.pi` 同义。
+///
+/// 本类型只经由反序列化构造，构造时已过一遍**纯语法**检查（不读目录、不碰
+/// 文件系统）：变量前缀必须是受支持的平台变量，相对片段不得为空、不得是绝对
+/// 路径、不得含 `..` 或裸 `.`。因此本类型保证声明的形态合法——「落到哪个
+/// 目录」由 [`DeclaredConfigDir::resolve`] 显式解析（ADR 0022）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclaredConfigDir {
+    /// 声明原文（错误信息里给用户看）。
+    declared: String,
+    /// 平台变量前缀（`$HOME` 等；`~` 是 `$HOME` 的别名）。
+    variable: String,
+    /// 相对片段（不含变量前缀）。
+    relative: PathBuf,
+}
+
+impl DeclaredConfigDir {
+    /// 语法检查（纯判断）：把声明拆成变量前缀与相对片段，不读目录、不碰文件系统。
     ///
-    /// 测试构建下不读取真实环境——全局实例由 `PlatformDirs::init_test` 或
-    /// `PlatformDirs::test_guard` 注入（见 `plugin::testutil`），故这里是空操作：
-    /// 测试若漏了注入，由 [`PlatformDirs::get`] 报错，而不是静默落到真实目录。
-    pub(crate) fn init_from_system() -> Result<(), String> {
-        #[cfg(not(test))]
-        {
-            let missing = |what: &str| format!("无法解析平台目录：{what}不可用");
-            let dirs = Self::new(
-                dirs::home_dir().ok_or_else(|| missing("主目录"))?,
-                dirs::config_dir().ok_or_else(|| missing("配置目录"))?,
-                dirs::config_local_dir().ok_or_else(|| missing("本地配置目录"))?,
-                dirs::data_dir().ok_or_else(|| missing("数据目录"))?,
-                dirs::data_local_dir().ok_or_else(|| missing("本地数据目录"))?,
-            );
-            PLATFORM_DIRS.set(dirs);
+    /// 语法错误在解析期就报：manifest 不合法就不该触发 wasm 下载，更不该留下目录。
+    fn parse(declared: &str) -> Result<Self, String> {
+        if declared.is_empty() {
+            return Err("config_dir 未配置".to_owned());
         }
-        Ok(())
-    }
-
-    /// 注入基准目录：测试用临时目录，不读真实环境。
-    pub(crate) fn new(
-        home: PathBuf,
-        config: PathBuf,
-        config_local: PathBuf,
-        data: PathBuf,
-        data_local: PathBuf,
-    ) -> Self {
-        Self {
-            home,
-            config,
-            config_local,
-            data,
-            data_local,
+        // 绝对路径以 `/` 开头，切出的变量前缀为空：与「没有 `/`」一样报前缀错误，
+        // 不要误报成「不支持的变量」。
+        let (variable, relative) = declared
+            .split_once('/')
+            .filter(|(variable, _)| !variable.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "config_dir「{declared}」必须以平台变量开头（支持：{}）",
+                    supported_variables()
+                )
+            })?;
+        // `~` 与 `$HOME` 同义：两者解析到同一基准目录。
+        if variable != "~" && !crate::paths::SUPPORTED_VARIABLES.contains(&variable) {
+            return Err(format!(
+                "config_dir「{declared}」使用了不支持的平台变量「{variable}」（支持：{}）",
+                supported_variables()
+            ));
         }
-    }
-
-    /// 全部基准目录都落在同一个根之下（测试用）。
-    ///
-    /// 五个基准目录此前由调用方各拼一遍——参数一多就容易拼错位（`new` 的
-    /// 五个参数全是 `PathBuf`，编译器分不清谁是谁）。派生规则收在这里一处。
-    #[cfg(test)]
-    pub(crate) fn from_root(root: &Path) -> Self {
-        Self {
-            home: root.to_path_buf(),
-            config: root.to_path_buf(),
-            config_local: root.to_path_buf(),
-            data: root.to_path_buf(),
-            data_local: root.to_path_buf(),
+        let relative = PathBuf::from(relative);
+        if relative.as_os_str().is_empty() {
+            return Err(format!("config_dir「{declared}」缺少相对片段"));
         }
-    }
-
-    /// 主目录 + 平台约定的子目录（测试用）。
-    #[cfg(test)]
-    pub(crate) fn from_home(home: &Path) -> Self {
-        Self {
-            home: home.to_path_buf(),
-            config: home.join(".config"),
-            config_local: home.join(".config"),
-            data: home.join(".local/share"),
-            data_local: home.join(".local/share"),
+        // 相对片段必须始终落在基准目录内部：绝对路径（`$HOME//etc`）、`..` 上跳与裸 `.
+        // `在同一条路径上拒绝，不依赖后面的规范化回退。裸 `.` 单列是因为它把基准目录整盘交出去。
+        if relative.components().any(|component| {
+            matches!(
+                component,
+                Component::RootDir
+                    | Component::Prefix(_)
+                    | Component::ParentDir
+                    | Component::CurDir
+            )
+        }) {
+            return Err(format!(
+                "config_dir「{declared}」的相对片段不得是绝对路径，也不得包含「..」或「.」"
+            ));
         }
-    }
-
-    /// 五个基准目录互不相同（各自是根下的一个具名子目录）。
-    ///
-    /// 只有「验证每个平台变量映射到自己的基准目录」时需要这种布局——五个
-    /// 基准目录若指向同一处，就分不清哪个变量解析到了哪里。
-    #[cfg(test)]
-    pub(crate) fn distinct_under(root: &Path) -> Self {
-        Self::new(
-            root.join("home"),
-            root.join("config"),
-            root.join("config-local"),
-            root.join("data"),
-            root.join("data-local"),
-        )
-    }
-
-    /// 获取全局实例（值语义，clone 成本极低）。
-    ///
-    /// 尚未初始化即报错，不 panic：本方法在 manifest 的反序列化路径上（经
-    /// [`resolve_config_dir`]），而 manifest 可能来自网络——解析一份不可信的
-    /// manifest 绝不能让进程崩掉。
-    fn get() -> Result<Self, String> {
-        PLATFORM_DIRS.get().ok_or_else(|| {
-            #[cfg(not(test))]
-            let message = "PlatformDirs 尚未初始化：调用 PlatformDirs::init_from_system 后再使用";
-            #[cfg(test)]
-            let message =
-                "测试线程未设置 PlatformDirs：使用 PlatformDirs::test_guard 或 PlatformDirs::init_test";
-            message.to_owned()
+        Ok(Self {
+            declared: declared.to_owned(),
+            variable: variable.to_owned(),
+            relative,
         })
     }
 
-    /// 测试辅助：设置当前线程的全局实例，返回 RAII guard（drop 时自动清理）。
-    #[cfg(test)]
-    pub(crate) fn test_guard(dirs: Self) -> TestGuard<PlatformDirs> {
-        Self::init_test(dirs);
-        TestGuard::new(&PLATFORM_DIRS)
-    }
+    /// 解析为宿主绝对路径：建目录、规范化、逃逸校验（ADR 0011）。
+    ///
+    /// 这一步**有副作用**（创建目录），因此是显式的一步：解析 manifest 不碰
+    /// 文件系统（ADR 0022）。调用方在链接期校验通过之后才调它——wasm 不合法
+    /// 时不留配置目录。
+    pub(crate) fn resolve(&self, paths: &Paths) -> Result<PathBuf, String> {
+        let base = paths
+            .base_dir(&self.variable)
+            .ok_or_else(|| {
+                format!(
+                    "config_dir「{}」使用了不支持的平台变量「{}」（支持：{}）",
+                    self.declared,
+                    self.variable,
+                    supported_variables()
+                )
+            })?
+            .to_path_buf();
 
-    /// 测试辅助：直接设置当前线程的全局实例（不返回 guard，自行管理生命周期）。
-    #[cfg(test)]
-    pub(crate) fn init_test(dirs: Self) {
-        PLATFORM_DIRS.set(dirs);
-    }
-
-    /// 变量前缀 → 基准目录；不支持的变量返回 `None`。
-    fn base_dir(&self, variable: &str) -> Option<&Path> {
-        match variable {
-            "$HOME" => Some(&self.home),
-            "$XDG_CONFIG_HOME" => Some(&self.config),
-            "$LOCAL_APP_CONFIG" => Some(&self.config_local),
-            "$XDG_DATA_HOME" => Some(&self.data),
-            "$LOCAL_APP_DATA" => Some(&self.data_local),
-            _ => None,
+        let dir = base.join(&self.relative);
+        fs::create_dir_all(&dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
+        // 目录可能是符号链接：以规范化后的真实路径确认它仍在基准目录内。
+        // 必须严格子代——相等（裸 `.` 已被语法检查拒掉；但以防万一把这一道关补上）
+        // 也视为逃逸，避免把整盘基准目录交出去。
+        let canonical_base = base
+            .canonicalize()
+            .map_err(|e| format!("解析平台基准目录失败：{e}"))?;
+        let canonical = dir
+            .canonicalize()
+            .map_err(|e| format!("解析插件配置目录失败：{e}"))?;
+        if canonical == canonical_base || !canonical.starts_with(&canonical_base) {
+            return Err(format!("config_dir「{}」逃逸了基准目录", self.declared));
         }
+        Ok(canonical)
     }
 }
 
-/// 声明里支持的平台变量前缀（错误信息里列给用户）。
-const SUPPORTED_VARIABLES: &str =
-    "$HOME、$XDG_CONFIG_HOME、$LOCAL_APP_CONFIG、$XDG_DATA_HOME、$LOCAL_APP_DATA";
-
-/// 把 manifest 声明的 `config_dir` 解析为宿主绝对路径。
-///
-/// 声明形式是「变量前缀 + 相对片段」（`$HOME/.pi`、`$XDG_CONFIG_HOME/zed`）；
-/// `~/.pi` 与 `$HOME/.pi` 同义。目录不存在时先创建（沿用既有行为），
-/// 随后按规范化的真实路径确认没有逃出该变量对应的基准目录。
-///
-/// 使用全局 [`PlatformDirs`] 解析，调用前需先初始化（未初始化即报错，不 panic）。
-/// 返回的原因不带层级前缀，由 [`parse_placed`] 统一补上「manifest.json 不合法：」。
-fn resolve_config_dir(declared: &str) -> Result<PathBuf, String> {
-    if declared.is_empty() {
-        return Err("config_dir 未配置".to_owned());
-    }
-    let dirs = PlatformDirs::get()?;
-    // 绝对路径以 `/` 开头，切出的变量前缀为空：与「没有 `/`」一样报前缀错误，
-    // 不要误报成「不支持的变量」。
-    let (variable, relative) = declared
-        .split_once('/')
-        .filter(|(variable, _)| !variable.is_empty())
-        .ok_or_else(|| {
-            format!("config_dir「{declared}」必须以平台变量开头（支持：{SUPPORTED_VARIABLES}）")
-        })?;
-    // `~` 与 `$HOME` 同义：两者解析到同一基准目录。
-    let base = if variable == "~" {
-        dirs.home.clone()
-    } else {
-        dirs.base_dir(variable).ok_or_else(|| {
-            format!(
-                "config_dir「{declared}」使用了不支持的平台变量「{variable}」（支持：{SUPPORTED_VARIABLES}）"
-            )
-        })?.to_path_buf()
-    };
-
-    let relative = Path::new(relative);
-    if relative.as_os_str().is_empty() {
-        return Err(format!("config_dir「{declared}」缺少相对片段"));
-    }
-    // 相对片段必须始终落在基准目录内部：绝对路径（`$HOME//etc`）、`..` 上跳与裸 `.
-    // `在同一条路径上拒绝，不依赖后面的规范化回退。裸 `.` 单列是因为它把基准目录整盘交出去。
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            Component::RootDir | Component::Prefix(_) | Component::ParentDir | Component::CurDir
-        )
-    }) {
-        return Err(format!(
-            "config_dir「{declared}」的相对片段不得是绝对路径，也不得包含「..」或「.」"
-        ));
-    }
-
-    let dir = base.join(relative);
-    fs::create_dir_all(&dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
-    // 目录可能是符号链接：以规范化后的真实路径确认它仍在基准目录内。
-    // 必须严格子代——相等（裸 `.` 经过上面那个检查已被拒；但以防万一把这一道关补上）
-    // 也视为逃逸，避免把整盘基准目录交出去。
-    let canonical_base = base
-        .canonicalize()
-        .map_err(|e| format!("解析平台基准目录失败：{e}"))?;
-    let canonical = dir
-        .canonicalize()
-        .map_err(|e| format!("解析插件配置目录失败：{e}"))?;
-    if canonical == canonical_base || !canonical.starts_with(&canonical_base) {
-        return Err(format!("config_dir「{declared}」逃逸了基准目录"));
-    }
-    Ok(canonical)
-}
-
-/// `config_dir` 字段的反序列化：声明经 [`resolve_config_dir`] 立即解析为宿主绝对路径。
+/// `config_dir` 字段的反序列化：声明经 [`DeclaredConfigDir::parse`] 校验形态，
+/// 产出**声明**（不解析成路径、不建目录）。
 ///
 /// 两种声明形式：字符串（单一声明，各平台共用）或对象（键固定为 `linux`、`macos`、
-/// `windows`，宿主取当前平台的键解析，见 [`platform_declaration`]）。
-///
-/// 解析收在反序列化里，`Manifest` 一经构造 `config_dir` 就是可用的绝对路径，不存在
-/// 「已解析 / 未解析」两种状态。使用全局 [`PlatformDirs`]，反序列化前需先初始化。
-fn deserialize_config_dir<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+/// `windows`，宿主取当前平台的键，见 [`platform_declaration`]）。
+fn deserialize_config_dir<'de, D>(deserializer: D) -> Result<DeclaredConfigDir, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -308,7 +184,7 @@ where
             ));
         }
     };
-    resolve_config_dir(&declared).map_err(serde::de::Error::custom)
+    DeclaredConfigDir::parse(&declared).map_err(serde::de::Error::custom)
 }
 
 /// config_dir 对象形式允许的平台键（错误信息里列给用户）。
@@ -328,7 +204,7 @@ fn current_platform_key() -> &'static str {
 /// 从 config_dir 对象声明里取 `platform` 平台的声明。
 ///
 /// 键固定为 [`SUPPORTED_PLATFORM_KEYS`] 列出的三个平台名，未知键与非字符串值一律拒绝；
-/// 取出的值交给 [`resolve_config_dir`] 走与字符串形式同一套变量语法。`platform` 由
+/// 取出的值交给 [`DeclaredConfigDir::parse`] 走与字符串形式同一套变量语法。`platform` 由
 /// 反序列化传入 [`current_platform_key`]，独立成参数以便测试覆盖三个平台的选取。
 fn platform_declaration(
     map: &serde_json::Map<String, serde_json::Value>,
@@ -350,11 +226,11 @@ fn platform_declaration(
         .ok_or_else(|| format!("config_dir 对象缺少平台「{platform}」的声明"))
 }
 
-/// 解析并校验落位 manifest；插件 id 与 `entry` 由这里把关，`config_dir` 已在
-/// 反序列化时由 [`resolve_config_dir`] 解析为宿主绝对路径。
-///
-/// 使用全局 [`PlatformDirs`]，调用前需先初始化。
+/// 解析并校验落位 manifest；插件 id 与 `entry` 由这里把关，`config_dir` 的**声明**
+/// 在反序列化时已校验形态（不解析成路径、不建目录）。
 pub(crate) fn parse_placed(value: &str) -> Result<Manifest, String> {
+    #[cfg(test)]
+    PARSE_COUNT.with(|count| count.set(count.get() + 1));
     let manifest: Manifest =
         serde_json::from_str(value).map_err(|e| format!("manifest.json 不合法：{e}"))?;
     if !is_valid_plugin_id(&manifest.id) {
@@ -406,11 +282,6 @@ pub(crate) fn parse_manifest(source: &PluginSource, text: &str) -> Result<Manife
     Ok(manifest)
 }
 
-/// 是否为绝对 https URL：明文 http、其他 scheme 与空主机一律拒绝。
-pub(crate) fn is_https_url(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
-}
-
 /// 插件 id 规则与 Provider slug 一致（见 docs/GLOSSARY.md）。
 fn is_valid_plugin_id(id: &str) -> bool {
     let mut chars = id.chars();
@@ -438,6 +309,7 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_global::TestGuard;
 
     fn manifest_text(id: &str, entry: &str) -> String {
         crate::plugin::testutil::manifest_json(id, "$HOME/.x", entry)
@@ -459,16 +331,16 @@ mod tests {
     }
 
     /// 注入的基准目录：全部落在临时目录下，不读真实环境。
-    fn platform_dirs_setup() -> (tempfile::TempDir, TestGuard<PlatformDirs>) {
+    fn platform_dirs_setup() -> (tempfile::TempDir, TestGuard<Paths>) {
         let root = tempfile::tempdir().unwrap();
-        let dirs = PlatformDirs::distinct_under(root.path());
-        let guard = PlatformDirs::test_guard(dirs);
+        let dirs = Paths::distinct_under(root.path());
+        let guard = Paths::test_guard(dirs);
         (root, guard)
     }
 
     #[test]
     fn manifest_parses_required_fields_and_tolerates_unknown_fields() {
-        let (root, _g) = platform_dirs_setup();
+        let (_root, _g) = platform_dirs_setup();
         let manifest = parse_manifest(
             &file_source(),
             r#"{
@@ -484,11 +356,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(manifest.id, "pi");
-        assert_eq!(
-            manifest.config_dir,
-            root.path().join("home").canonicalize().unwrap().join(".pi")
-        );
+        assert_eq!(manifest.config_dir.declared, "$HOME/.pi");
         assert_eq!(manifest.entry, "plugin.wasm");
+    }
+
+    /// 解析不碰文件系统：解析出的只是**声明**，声明指向的目录此刻并不存在。
+    ///
+    /// 这是「解析即建目录」被拆掉后的核心断言（ADR 0022）：解析一个来自网络
+    /// 的 manifest 不得在用户主目录下留下任何目录。
+    #[test]
+    fn parsing_a_manifest_creates_no_directory() {
+        let (root, _g) = platform_dirs_setup();
+
+        let manifest = parse_manifest(&file_source(), &manifest_text("pi", "p.wasm")).unwrap();
+
+        assert_eq!(manifest.config_dir.declared, "$HOME/.x");
+        assert!(
+            !root.path().join("home").join(".x").exists(),
+            "解析不得建出声明指向的目录：{}",
+            root.path().join("home").join(".x").display()
+        );
     }
 
     /// `settings_schema`（ADR 0017）可选：存在即整段透传，宿主不校验其内容；
@@ -579,9 +466,13 @@ mod tests {
         assert!(!is_valid_plugin_id("pi x"));
     }
 
+    /// 解析（纯）与解析成路径（显式一步）分开：语法检查在解析期，落地在
+    /// resolve 期——每个平台变量各自落到自己的基准目录之下，目录不存在时
+    /// 由 resolve 建出。
     #[test]
     fn config_dir_resolves_each_platform_variable_into_its_base_dir() {
         let (root, _g) = platform_dirs_setup();
+        let paths = Paths::get();
 
         for (declared, base, relative) in [
             ("$HOME/.pi", "home", ".pi"),
@@ -590,7 +481,10 @@ mod tests {
             ("$XDG_DATA_HOME/app/models", "data", "app/models"),
             ("$LOCAL_APP_DATA/app", "data-local", "app"),
         ] {
-            let resolved = resolve_config_dir(declared).unwrap();
+            let resolved = DeclaredConfigDir::parse(declared)
+                .unwrap()
+                .resolve(&paths)
+                .unwrap();
             assert_eq!(
                 resolved,
                 root.path()
@@ -611,11 +505,17 @@ mod tests {
     #[test]
     fn config_dir_treats_tilde_as_home() {
         let (_root, _g) = platform_dirs_setup();
+        let paths = Paths::get();
 
-        assert_eq!(
-            resolve_config_dir("~/.x").unwrap(),
-            resolve_config_dir("$HOME/.x").unwrap()
-        );
+        let tilde = DeclaredConfigDir::parse("~/.x")
+            .unwrap()
+            .resolve(&paths)
+            .unwrap();
+        let home = DeclaredConfigDir::parse("$HOME/.x")
+            .unwrap()
+            .resolve(&paths)
+            .unwrap();
+        assert_eq!(tilde, home);
     }
 
     /// 对象形式：宿主按当前平台取键，取出的值仍走同一套变量语法。
@@ -623,6 +523,7 @@ mod tests {
     #[test]
     fn config_dir_object_picks_the_current_platform_declaration() {
         let (root, _g) = platform_dirs_setup();
+        let paths = Paths::get();
         let text = r#"{
             "id": "zed",
             "config_dir": {
@@ -636,12 +537,23 @@ mod tests {
         let manifest = parse_manifest(&file_source(), text).unwrap();
 
         let canonical_root = root.path().canonicalize().unwrap();
-        let expected = match std::env::consts::OS {
-            "macos" => canonical_root.join("home/.config/zed"),
-            "windows" => canonical_root.join("config-local/Zed"),
-            _ => canonical_root.join("config/zed"),
+        let (expected_declared, expected) = match std::env::consts::OS {
+            "macos" => ("$HOME/.config/zed", canonical_root.join("home/.config/zed")),
+            "windows" => (
+                "$LOCAL_APP_CONFIG/Zed",
+                canonical_root.join("config-local/Zed"),
+            ),
+            _ => ("$XDG_CONFIG_HOME/zed", canonical_root.join("config/zed")),
         };
-        assert_eq!(manifest.config_dir, expected);
+        assert_eq!(
+            manifest.config_dir.declared, expected_declared,
+            "对象形式按当前平台取键"
+        );
+        assert_eq!(
+            manifest.config_dir.resolve(&paths).unwrap(),
+            expected,
+            "取出的声明按同一套变量语法解析"
+        );
     }
 
     /// 平台选取独立成 [`platform_declaration`] 的参数：三个平台的键都能在任意
@@ -683,7 +595,7 @@ mod tests {
                 r#"{"linux": "$HOME/.x", "Linux": "$HOME/.y"}"#,
                 "不支持的平台键",
             ),
-            // 值必须是字符串：拿到的声明要交给 resolve_config_dir 走变量语法。
+            // 值必须是字符串：拿到的声明要交给声明语法检查走变量语法。
             (r#"{"linux": 1}"#, "必须是字符串"),
             // 既不是字符串也不是对象。
             ("1", "必须是字符串或按平台键声明的对象"),
@@ -711,6 +623,8 @@ mod tests {
         );
     }
 
+    /// 语法不合法的声明在**解析期**就被拒（纯判断，不读目录、不碰文件系统）：
+    /// manifest 不合法就不该触发 wasm 下载，更不该留下目录。
     #[test]
     fn config_dir_rejects_shapes_outside_the_grammar() {
         let (root, _g) = platform_dirs_setup();
@@ -730,7 +644,7 @@ mod tests {
             ("$HOME/.", "或「.」"),
             ("$HOME/./x", "或「.」"),
         ] {
-            let err = resolve_config_dir(declared).unwrap_err();
+            let err = DeclaredConfigDir::parse(declared).unwrap_err();
             assert!(err.contains(expected), "{declared} 应被拒绝：{err}");
         }
         assert!(
@@ -744,12 +658,16 @@ mod tests {
     #[test]
     fn config_dir_rejects_a_symlink_escaping_its_base_dir() {
         let (root, _g) = platform_dirs_setup();
+        let paths = Paths::get();
         let outside = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(outside.path(), home.join("link")).unwrap();
 
-        let err = resolve_config_dir("$HOME/link").unwrap_err();
+        let err = DeclaredConfigDir::parse("$HOME/link")
+            .unwrap()
+            .resolve(&paths)
+            .unwrap_err();
 
         assert!(err.contains("逃逸了基准目录"), "{err}");
     }
@@ -760,13 +678,17 @@ mod tests {
     #[test]
     fn config_dir_rejects_a_path_that_canonicalizes_to_the_base_dir_itself() {
         let (root, _g) = platform_dirs_setup();
+        let paths = Paths::get();
         let home = root.path().join("home");
         fs::create_dir_all(&home).unwrap();
         // `home/loop` 是指向 `home` 的 symlink。`$HOME/loop` 形态合法但规范化后
         // 就是基准目录本身——形态校验放行，逃逸校验必须兜住。
         std::os::unix::fs::symlink(&home, home.join("loop")).unwrap();
 
-        let err = resolve_config_dir("$HOME/loop").unwrap_err();
+        let err = DeclaredConfigDir::parse("$HOME/loop")
+            .unwrap()
+            .resolve(&paths)
+            .unwrap_err();
 
         assert!(err.contains("逃逸了基准目录"), "{err}");
     }
@@ -838,57 +760,5 @@ mod tests {
         // 内置插件的 wasm 内嵌于二进制，entry 不参与解析。
         let text = manifest_text("pi", "target/wasm32-wasip2/release/maestro_plugin_pi.wasm");
         assert!(parse_manifest(&builtin_source(), &text).is_ok());
-    }
-
-    #[test]
-    fn is_https_url_accepts_only_absolute_https_urls() {
-        assert!(is_https_url("https://example.com/manifest.json"));
-        assert!(is_https_url("https://example.com:8443/a/b?c=d"));
-        assert!(!is_https_url("http://example.com/manifest.json"));
-        assert!(!is_https_url("file:///tmp/manifest.json"));
-        assert!(!is_https_url("/tmp/manifest.json"));
-        assert!(!is_https_url("https://"));
-        assert!(!is_https_url(""));
-    }
-
-    /// 来源解析一次即成为值：解析出来的载荷与来源字符串逐字对应。
-    #[test]
-    fn plugin_source_is_parsed_from_the_source_string() {
-        assert_eq!(
-            PluginSource::parse("builtin:pi"),
-            Some(PluginSource::Builtin("pi".to_owned()))
-        );
-        assert_eq!(
-            PluginSource::parse("https://example.com/manifest.json"),
-            Some(PluginSource::Https(
-                "https://example.com/manifest.json".to_owned()
-            ))
-        );
-        assert_eq!(
-            PluginSource::parse("/tmp/plugin/manifest.json"),
-            Some(PluginSource::File(PathBuf::from(
-                "/tmp/plugin/manifest.json"
-            )))
-        );
-        assert_eq!(
-            PluginSource::parse("plugins/pi/manifest.json"),
-            None,
-            "相对路径不是合法的来源身份（file 来源要求本机绝对路径）"
-        );
-        assert_eq!(PluginSource::parse("file:///tmp/manifest.json"), None);
-        assert_eq!(PluginSource::parse("git://example.com/x.git"), None);
-    }
-
-    /// 来源字符串逐字还原：它是条目的身份，不能因为解析而变形。
-    #[test]
-    fn plugin_source_round_trips_to_the_original_string() {
-        for source in [
-            "builtin:pi",
-            "https://example.com/manifest.json",
-            "/tmp/plugin/manifest.json",
-        ] {
-            let parsed = PluginSource::parse(source).unwrap();
-            assert_eq!(parsed.source(), source);
-        }
     }
 }
