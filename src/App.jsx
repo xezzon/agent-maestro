@@ -5,6 +5,7 @@ import PluginConfigPage from "@/pages/plugin-config";
 import ProvidersPage from "@/pages/provider";
 import { listPlugins } from "@/api/plugins";
 import { currentPluginOf, pluginNavItems } from "./navigation";
+import { createLatestRequestGate } from "./latestRequest";
 import "./App.css";
 
 const { Sider, Content } = Layout;
@@ -21,23 +22,30 @@ function App() {
   const [plugins, setPlugins] = useState([]);
   const [pluginsLoading, setPluginsLoading] = useState(true);
   const [pluginsError, setPluginsError] = useState(null);
+  // 刷新闸门：切页刷新与 Plugins 页的显式刷新会重叠，较慢的旧请求可能在较新
+  // 的请求之后落地，把插件列表覆盖成旧快照。只有最新一次请求的结果才写回。
+  const [requestGate] = useState(createLatestRequestGate);
 
   /** 刷新插件列表：成功返回列表；失败置 pluginsError 并返回 `null`（区别于空列表）。 */
   const reloadPlugins = useCallback(async () => {
+    const requestId = requestGate.begin();
     setPluginsLoading(true);
     try {
       const list = await listPlugins();
+      // 已被更新的请求取代：结果过期，丢弃（不覆盖较新的列表，也不提前清掉 loading）。
+      if (!requestGate.isLatest(requestId)) return null;
       setPlugins(list);
       setPluginsError(null);
       return list;
     } catch (err) {
-      setPluginsError(String(err));
       console.warn("failed to refresh plugins", err);
+      if (!requestGate.isLatest(requestId)) return null;
+      setPluginsError(String(err));
       return null;
     } finally {
-      setPluginsLoading(false);
+      if (requestGate.isLatest(requestId)) setPluginsLoading(false);
     }
-  }, []);
+  }, [requestGate]);
 
   // 导航项随切页刷新：插件在 Plugins 页增删启停之后，重新进入任何页面时
   // 都取最新列表（list_plugins 是本地命令，代价可忽略）；取不到时保留旧列表，
