@@ -9,7 +9,7 @@ use std::{
 
 use super::{
     PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginConfig, PluginOutcome,
-    PluginRecord, PluginState, ProjectionStatus, builtin,
+    PluginRecord, PluginState, ProjectionStatus, apply_summary, builtin,
     manifest::parse_count,
     projection::project_files,
     source::is_https_url,
@@ -1665,6 +1665,30 @@ fn apply_providers_projects_from_an_in_memory_store_without_writing_the_config_f
     assert!(
         !home.path().join(".maestro").join("config.json").exists(),
         "配置存储不该落盘：内存替身全程没碰文件系统"
+    );
+}
+
+/// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有
+/// 插件时不带上下文——成功行因此不留尾随的冒号与空格。
+#[test]
+fn apply_summary_lists_each_plugin_status() {
+    assert_eq!(apply_summary(&[]), None, "没有插件即没有上下文");
+
+    let outcome = |id: &str, status: ProjectionStatus| PluginOutcome {
+        id: id.to_owned(),
+        status,
+        files: Vec::new(),
+        skipped: Vec::new(),
+        reason: None,
+    };
+    let outcomes = vec![
+        outcome("pi", ProjectionStatus::Applied),
+        outcome("claude-code", ProjectionStatus::Failed),
+    ];
+
+    assert_eq!(
+        apply_summary(&outcomes).as_deref(),
+        Some("pi:applied claude-code:failed")
     );
 }
 

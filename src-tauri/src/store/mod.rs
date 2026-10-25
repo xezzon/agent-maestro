@@ -35,16 +35,12 @@ use std::{
 };
 
 use crate::{
-    config::{CONFIG_VERSION, Change, Config, PluginEntry, StoreError},
+    config::{CONFIG_VERSION, Change, Config, PluginEntry, STORE_LOCK_POISONED, StoreError},
     provider::Provider,
     variables::Variables,
 };
 
 use protected::ProtectedState;
-
-/// 配置存储的锁被毒化（其它命令持锁期间 panic）时对用户可见的原因。
-/// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
-pub(crate) const STORE_LOCK_POISONED: &str = "配置存储不可用";
 
 /// 配置存储的锁毒化标记：[`AppStore::with_read`] / [`AppStore::with_write`]
 /// 在锁毒化时把本标记经 [`From`] 折进调用方闭包的错误类型——锁边界不擦除

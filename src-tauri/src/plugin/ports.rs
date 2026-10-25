@@ -46,8 +46,10 @@ pub(crate) trait PluginEntries {
     fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError>;
     /// 新增条目（来源重复或 id 冲突即报错）。
     fn add_plugin(&self, entry: &PluginEntry) -> Result<(), StoreError>;
-    /// 删除条目，返回被删的那一条。
-    fn delete_plugin(&self, source: &str) -> Result<PluginEntry, StoreError>;
+    /// 删除条目，返回被删的那一条；条目不存在即 `None`（幂等）。
+    ///
+    /// 「找条目 + 删条目」在存储侧同处一把写锁：两步之间不留窗口。
+    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, StoreError>;
     /// 切换启用态：条目不存在即报错；已处于目标态则不写盘并返回 `None`。
     ///
     /// 读-判断-写在同一把锁内完成（适配器侧的纪律）：并发方已完成切换时

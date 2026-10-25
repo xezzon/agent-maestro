@@ -20,6 +20,12 @@ use crate::{
 /// 配置文件 schema 版本（见 ADR 0001）。
 pub(crate) const CONFIG_VERSION: u32 = 1;
 
+/// 配置存储的锁被毒化（其它命令持锁期间 panic）时对用户可见的原因。
+///
+/// 住在中立层而非存储层：说这句文案的是 [`StoreError`]（命令层经它排版），
+/// 若文案跟着锁一起住在存储层，中立层就要反向依赖存储层——依赖箭头会成环。
+pub(crate) const STORE_LOCK_POISONED: &str = "配置存储不可用";
+
 /// `~/.maestro/config.json` 的顶层文档（version 1 schema）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Config {
@@ -52,8 +58,8 @@ impl Default for Config {
 /// 写入（内置插件由启动时装载管线补写，与其余来源同一流程）——它是来源到落位
 /// 目录的唯一映射（见 ADR 0006）。
 ///
-/// 条目住在存储层：它是配置文件的形状，不是插件服务的内部状态。插件服务消费
-/// 条目，不定义条目——否则存储层与插件服务会互相依赖成环。
+/// 条目住在中立层：它是配置文件的形状，不是任何一侧的内部状态。存储层把它
+/// 落盘，插件服务消费条目——两侧都不定义它，故不互相依赖（#141 I-1）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PluginEntry {
     pub(crate) source: String,
@@ -103,7 +109,7 @@ pub(crate) enum StoreError {
     ///
     /// 由 [`crate::store::LockPoisoned`] 折入：毒化的是 `AppStore` 的锁而非配置
     /// 本身，但两条加锁路径对用户是同一件事（「配置存储不可用」，见
-    /// [`crate::store::STORE_LOCK_POISONED`]）。
+    /// [`STORE_LOCK_POISONED`]）。
     Unavailable,
 }
 
@@ -190,7 +196,7 @@ impl Display for StoreError {
                 f,
                 "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
             ),
-            StoreError::Unavailable => write!(f, "{}", crate::store::STORE_LOCK_POISONED),
+            StoreError::Unavailable => write!(f, "{}", STORE_LOCK_POISONED),
         }
     }
 }
@@ -334,12 +340,5 @@ mod tests {
             err.to_string(),
             "变量名不合法：「a-b」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
         );
-    }
-
-    /// 锁毒化与 `String` 错误域同句：两条加锁路径对用户是同一件事。
-    #[test]
-    fn lock_poisoned_folds_into_the_same_reason_for_both_error_domains() {
-        assert_eq!(String::from(crate::store::LockPoisoned), "配置存储不可用");
-        assert_eq!(StoreError::Unavailable.to_string(), "配置存储不可用");
     }
 }

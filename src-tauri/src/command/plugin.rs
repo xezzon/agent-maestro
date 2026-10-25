@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
@@ -7,7 +5,8 @@ use super::log_outcome;
 use crate::{
     AppStore,
     plugin::{
-        PluginConfig, PluginOutcome, PluginRecord, PluginService, ProjectionStatus, SkippedProvider,
+        PluginConfig, PluginOutcome, PluginRecord, PluginService, ProjectionStatus,
+        SkippedProvider, apply_summary,
     },
 };
 
@@ -61,17 +60,6 @@ pub(crate) enum ApplyStatus {
     Skipped,
 }
 
-impl Display for ApplyStatus {
-    /// 线格式词（与序列化形态一致）：日志摘要与序列化同源，不再各写一份。
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            ApplyStatus::Applied => "applied",
-            ApplyStatus::Failed => "failed",
-            ApplyStatus::Skipped => "skipped",
-        })
-    }
-}
-
 impl From<ProjectionStatus> for ApplyStatus {
     fn from(status: ProjectionStatus) -> Self {
         match status {
@@ -104,24 +92,6 @@ impl From<PluginOutcome> for PluginApplyReport {
             reason: outcome.reason,
         }
     }
-}
-
-/// 逐插件状态摘要（`id:status` 逐项，空格分隔）：命令层结果行的识别参数。
-///
-/// 结果行按 ADR 0008 携带逐插件状态摘要——某个插件投影失败时，日志里要能
-/// 看出是哪一个。没有插件时返回 `None`：成功行不带上下文，不留尾随的
-/// 冒号与空格。
-fn apply_summary(reports: &[PluginApplyReport]) -> Option<String> {
-    if reports.is_empty() {
-        return None;
-    }
-    Some(
-        reports
-            .iter()
-            .map(|report| format!("{}:{}", report.id, report.status))
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
 }
 
 /// 列出插件注册表（metadata 与加载状态）。
@@ -262,16 +232,19 @@ pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
-    let outcome = service.apply_providers(store.inner()).map(|outcomes| {
+    let outcomes = service.apply_providers(store.inner());
+    // 摘要取自服务层的内部形状：状态词由服务层产出（ADR 0008 的日志词），
+    // 与线格式同形（由 `apply_status_wire_values_are_pinned` 钉住）。
+    let context = outcomes
+        .as_ref()
+        .ok()
+        .and_then(|outcomes| apply_summary(outcomes));
+    let outcome = outcomes.map(|outcomes| {
         outcomes
             .into_iter()
             .map(PluginApplyReport::from)
             .collect::<Vec<_>>()
     });
-    let context = outcome
-        .as_ref()
-        .ok()
-        .and_then(|reports| apply_summary(reports));
     log_outcome("apply_providers", context.as_deref(), &outcome);
     outcome
 }
@@ -299,68 +272,30 @@ where
 mod tests {
     use std::path::PathBuf;
 
-    use super::{ApplyStatus, PluginApplyReport, PluginView, apply_summary};
+    use super::{ApplyStatus, PluginApplyReport, PluginView};
     use crate::plugin::{PluginOutcome, PluginRecord, ProjectionStatus};
 
-    /// 投影状态的线格式钉死：序列化与 `Display` 同为 `applied` / `failed` /
-    /// `skipped` 三个小写词。前端按同一组词渲染标签（见
+    /// 投影状态的线格式钉死：序列化出来就是 `applied` / `failed` / `skipped`
+    /// 三个小写词。前端按同一组词渲染标签（见
     /// `src/pages/provider/applyStatus.js`），改词即前端标签静默失效——
     /// 故这三条断言是跨端契约的护栏。
+    ///
+    /// 同一组词也是服务层日志行用的词（ADR 0008）：两处同形，日志与界面才
+    /// 不会各说各话。
     #[test]
     fn apply_status_wire_values_are_pinned() {
-        for (status, wire) in [
-            (ApplyStatus::Applied, "applied"),
-            (ApplyStatus::Failed, "failed"),
-            (ApplyStatus::Skipped, "skipped"),
+        for (status, wire, internal) in [
+            (ApplyStatus::Applied, "applied", ProjectionStatus::Applied),
+            (ApplyStatus::Failed, "failed", ProjectionStatus::Failed),
+            (ApplyStatus::Skipped, "skipped", ProjectionStatus::Skipped),
         ] {
             assert_eq!(
                 serde_json::to_value(status).unwrap(),
                 serde_json::json!(wire),
                 "序列化形态与线格式词一致"
             );
-            assert_eq!(status.to_string(), wire, "Display 与线格式词一致");
+            assert_eq!(internal.to_string(), wire, "日志词与线格式词同形");
         }
-    }
-
-    /// 线格式词与服务层的内部状态词同形：日志行（ADR 0008）与 IPC 载荷说的是
-    /// 同一件事，两处一旦漂移，日志与界面就会各说各话。
-    #[test]
-    fn wire_status_words_match_the_service_side_words() {
-        for (internal, wire) in [
-            (ProjectionStatus::Applied, ApplyStatus::Applied),
-            (ProjectionStatus::Failed, ApplyStatus::Failed),
-            (ProjectionStatus::Skipped, ApplyStatus::Skipped),
-        ] {
-            assert_eq!(
-                internal.to_string(),
-                wire.to_string(),
-                "日志词与线格式词同形"
-            );
-        }
-    }
-
-    /// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有
-    /// 插件时不带上下文——成功行因此不留尾随的冒号与空格。
-    #[test]
-    fn apply_summary_lists_each_plugin_status() {
-        assert_eq!(apply_summary(&[]), None, "没有插件即没有上下文");
-
-        let report = |id: &str, status: ApplyStatus| PluginApplyReport {
-            id: id.to_owned(),
-            status,
-            files: Vec::new(),
-            skipped: Vec::new(),
-            reason: None,
-        };
-        let reports = vec![
-            report("pi", ApplyStatus::Applied),
-            report("claude-code", ApplyStatus::Failed),
-        ];
-
-        assert_eq!(
-            apply_summary(&reports).as_deref(),
-            Some("pi:applied claude-code:failed")
-        );
     }
 
     /// 映射：服务层的注册表描述 → 线格式。配置目录在交付层才转成字符串——

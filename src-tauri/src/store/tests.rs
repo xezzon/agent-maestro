@@ -1607,3 +1607,10 @@ fn update_provider_to_disabled_still_checks_interpolation() {
         Some("https://${MISSING}/v1")
     );
 }
+
+/// 锁毒化与 `String` 错误域同句：两条加锁路径对用户是同一件事。
+#[test]
+fn lock_poisoned_folds_into_the_same_reason_for_both_error_domains() {
+    assert_eq!(String::from(LockPoisoned), "配置存储不可用");
+    assert_eq!(StoreError::Unavailable.to_string(), "配置存储不可用");
+}

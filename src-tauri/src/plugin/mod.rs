@@ -261,6 +261,25 @@ pub(crate) struct PluginOutcome {
     pub(crate) reason: Option<String>,
 }
 
+/// 逐插件状态摘要（`id:status` 逐项，空格分隔）：结果行的识别参数。
+///
+/// 结果行按 ADR 0008 携带逐插件状态摘要——某个插件投影失败时，日志里要能
+/// 看出是哪一个。摘要由本模块产出（命令层只负责把它交给 `log_outcome`，
+/// 不自己拼串）。没有插件时返回 `None`：成功行不带上下文，不留尾随的
+/// 冒号与空格。
+pub(crate) fn apply_summary(outcomes: &[PluginOutcome]) -> Option<String> {
+    if outcomes.is_empty() {
+        return None;
+    }
+    Some(
+        outcomes
+            .iter()
+            .map(|outcome| format!("{}:{}", outcome.id, outcome.status))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 /// 插件配置（落位目录 `<id>/config.json`，ADR 0018）：该插件对全局变量的覆盖
 /// 与它私有的表单数据，与插件一一对应、随插件存在。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -44,8 +44,14 @@ impl PluginEntries for AppStore {
         self.with_write(|store| store.add_plugin(entry))
     }
 
-    fn delete_plugin(&self, source: &str) -> Result<PluginEntry, StoreError> {
-        self.with_write(|store| store.delete_plugin(source))
+    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, StoreError> {
+        // 找条目 + 删条目同处一把写锁：两步之间不留「条目已找、条目未删」的窗口。
+        self.with_write(|store| match store.delete_plugin(source) {
+            Ok(entry) => Ok(Some(entry)),
+            // 条目已不存在：幂等（调用方据此认定「已移除」）。
+            Err(StoreError::MissingSource { .. }) => Ok(None),
+            Err(err) => Err(err),
+        })
     }
 
     fn set_plugin_enabled(

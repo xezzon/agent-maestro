@@ -283,25 +283,23 @@ impl PluginService {
             return Err(format!("内置插件不可移除：{source}"));
         }
 
-        // 读条目、卸载注册表与删条目三步之间不持存储锁：端口的每个操作自带
-        // 一把短临界区（见 `store::ports`），服务层拿不到锁，也就没有在锁内
-        // 做 IO 的可能。条目写入的互斥由 `install_lock` 保证（所有装卸路径都
-        // 在它里面）。
-        let entry = match store.plugin_by_source(source) {
-            Ok(entry) => entry,
-            // 条目已不存在：上一次移除已连同落位目录一并删除，幂等成功。
-            Err(StoreError::MissingSource { .. }) => return Ok(()),
-            Err(e) => return Err(e.to_string()),
+        // 1. 删配置条目：存储侧原子（找条目 + 删条目同处一把写锁，见 `store::ports`）。
+        //    条目不存在即幂等成功——上一次移除已连同落位目录一并删除。
+        let Some(entry) = store.delete_plugin(source).map_err(|err| err.to_string())? else {
+            return Ok(());
         };
 
-        // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
+        // 2. 从内存注册表卸载：此后插件不再可执行。
+        //
+        //    条目与注册表两处状态无法原子更新——服务层拿不到存储锁（#141 I-1），
+        //    两步之间是同一个「装」路径已有的窗口（条目先写、注册表后插）：
+        //    此刻列表若正好读到「条目还在、注册表已卸」，会短暂显示
+        //    「插件 X 未加载」。删条目在前还有一层好处：条目删不掉时注册表
+        //    原样保留，两处状态不会走散。
         self.entries
             .write()
             .map_err(|_| REGISTRY_LOCK_POISONED.to_owned())?
             .remove(&entry.id);
-
-        // 2. 删配置条目。
-        store.delete_plugin(source).map_err(|err| err.to_string())?;
 
         // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
         remove_placed_dir(&self.paths.plugin_dir(&entry.id))

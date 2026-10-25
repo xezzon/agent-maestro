@@ -88,7 +88,8 @@ impl MemoryStore {
 
 impl ProviderSource for MemoryStore {
     fn projection_snapshot(&self) -> Result<ProjectionSnapshot, StoreError> {
-        // 禁用项不参与投影（与真存储同一条规则，见 #94）。
+        // 端口的契约：投影输入只含启用的 Provider（禁用项不参与，见 #94）——
+        // 替身实现的是这条契约，不是存储层的筛选函数。
         let providers = self
             .providers
             .iter()
@@ -126,23 +127,20 @@ impl PluginEntries for MemoryStore {
         if plugins.iter().any(|other| other.source == entry.source) {
             return Err(StoreError::duplicate_source(&entry.source));
         }
-        if let Some(other) = plugins
-            .iter()
-            .find(|other| other.source != entry.source && other.id == entry.id)
-        {
+        if let Some(other) = id_conflict(&plugins, &entry.source, &entry.id) {
             return Err(StoreError::duplicate_id(&entry.id, &other.source));
         }
         plugins.push(entry.clone());
         Ok(())
     }
 
-    fn delete_plugin(&self, source: &str) -> Result<PluginEntry, StoreError> {
+    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, StoreError> {
         let mut plugins = self.plugins.lock().unwrap();
         let index = plugins
             .iter()
             .position(|entry| entry.source == source)
             .ok_or_else(|| StoreError::missing_source(source))?;
-        Ok(plugins.remove(index))
+        Ok(Some(plugins.remove(index)))
     }
 
     fn set_plugin_enabled(
@@ -165,12 +163,17 @@ impl PluginEntries for MemoryStore {
 
     fn check_plugin_id_conflict(&self, source: &str, id: &str) -> Result<(), StoreError> {
         let plugins = self.plugins.lock().unwrap();
-        match plugins
-            .iter()
-            .find(|other| other.source != source && other.id == id)
-        {
+        match id_conflict(&plugins, source, id) {
             Some(other) => Err(StoreError::duplicate_id(id, &other.source)),
             None => Ok(()),
         }
     }
+}
+
+/// 同一 id 是否已被**其它**来源的条目持有（与真存储同一条规则，见 ADR 0006）：
+/// id 是来源到落位目录的唯一映射。
+fn id_conflict<'a>(plugins: &'a [PluginEntry], source: &str, id: &str) -> Option<&'a PluginEntry> {
+    plugins
+        .iter()
+        .find(|other| other.source != source && other.id == id)
 }
