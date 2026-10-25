@@ -18,11 +18,12 @@ pub(crate) use variables::{list_variables, set_variables};
 /// `context` 为 `None` 即无识别参数：成功行是「命令 ok」，失败行是「命令 failed:
 /// 原因」，两者都不带尾随的冒号与空格。
 fn log_outcome<T>(command: &str, context: Option<&str>, outcome: &Result<T, String>) {
-    match (outcome, context) {
-        (Ok(_), None) => log::info!("{command} ok"),
-        (Ok(_), Some(context)) => log::info!("{command} ok: {context}"),
-        (Err(reason), None) => log::error!("{command} failed: {reason}"),
-        (Err(reason), Some(context)) => log::error!("{command} failed: {context}: {reason}"),
+    // 识别参数收成一个后缀：有时是「: 识别参数」，无识别参数即空串——成功行
+    // 因此不留尾随的冒号与空格。
+    let suffix = context.map(|c| format!(": {c}")).unwrap_or_default();
+    match outcome {
+        Ok(_) => log::info!("{command} ok{suffix}"),
+        Err(reason) => log::error!("{command} failed{suffix}: {reason}"),
     }
 }
 

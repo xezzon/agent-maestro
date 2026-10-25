@@ -74,13 +74,13 @@ impl From<ProjectionStatus> for ApplyStatus {
 /// 逐插件投影报告（线格式）：状态、已写入文件、跳过的 Provider、失败原因。
 #[derive(Debug, Serialize)]
 pub(crate) struct PluginApplyReport {
-    pub(crate) id: String,
+    id: String,
     /// 投影状态（`applied` / `failed` / `skipped`）。
-    pub(crate) status: ApplyStatus,
+    status: ApplyStatus,
     /// 已写入文件的宿主绝对路径列表（插件返回相对 config_dir 的路径，由宿主拼接）。
     files: Vec<String>,
     skipped: Vec<SkippedProvider>,
-    pub(crate) reason: Option<String>,
+    reason: Option<String>,
 }
 
 impl From<PluginOutcome> for PluginApplyReport {
@@ -149,30 +149,20 @@ pub(crate) fn set_plugin_enabled(
 /// 修复后重新添加即可（见 ADR 0006）。
 #[tauri::command]
 pub(crate) async fn add_plugin(app: AppHandle, source: String) -> Result<(), String> {
-    // 安装类命令另加进入行：「有进入、无结果」正是定位卡住的证据（如 #46）。
-    log::info!("add_plugin start: source={source}");
-    // 识别参数在闭包 move 前格式化；payload 本身不进日志。
-    let context = format!("source={source}");
-    let outcome = on_install_pool(app, move |store, service| {
-        service.add_plugin(store, &source)
+    run_install("add_plugin", app, source, |store, service, source| {
+        service.add_plugin(store, source)
     })
-    .await;
-    log_outcome("add_plugin", Some(&context), &outcome);
-    outcome
+    .await
 }
 
 /// 重新加载插件：按配置中的来源重新获取 manifest 与 wasm，按「先 manifest、
 /// 后 wasm」逐文件覆盖落位产物（写失败可能留下混合态，见 ADR 0018）。
 #[tauri::command]
 pub(crate) async fn reload_plugin(app: AppHandle, source: String) -> Result<(), String> {
-    log::info!("reload_plugin start: source={source}");
-    let context = format!("source={source}");
-    let outcome = on_install_pool(app, move |store, service| {
-        service.reload_plugin(store, &source)
+    run_install("reload_plugin", app, source, |store, service, source| {
+        service.reload_plugin(store, source)
     })
-    .await;
-    log_outcome("reload_plugin", Some(&context), &outcome);
-    outcome
+    .await
 }
 
 /// 移除插件：删配置条目与落位目录（幂等），不联网。
@@ -217,16 +207,13 @@ pub(crate) async fn set_plugin_config(
     source: String,
     config: PluginConfig,
 ) -> Result<(), String> {
-    // 安装类命令另加进入行：「有进入、无结果」正是定位卡住的证据（如 #46）。
-    log::info!("set_plugin_config start: source={source}");
-    // 识别参数在闭包 move 前格式化；payload 本身不进日志。
-    let context = format!("source={source}");
-    let outcome = on_install_pool(app, move |store, service| {
-        service.set_config(store, &source, &config)
-    })
-    .await;
-    log_outcome("set_plugin_config", Some(&context), &outcome);
-    outcome
+    run_install(
+        "set_plugin_config",
+        app,
+        source,
+        move |store, service, source| service.set_config(store, source, &config),
+    )
+    .await
 }
 
 /// 应用到工具：调用所有已启用且加载成功的插件执行投影，
@@ -260,15 +247,36 @@ pub(crate) fn apply_providers(
     outcome
 }
 
+/// 安装类命令的共同外壳：进入行 → 阻塞线程池执行 → 结果行。
+///
+/// 三个安装类命令（添加 / 重新加载 / 写配置）只差服务层调用，故把外壳收在
+/// 一处：进入行与结果行的字面输出保持不变。
+async fn run_install<F>(
+    command: &str,
+    app: AppHandle,
+    source: String,
+    task: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&AppStore, &PluginService, &str) -> Result<(), PluginError> + Send + 'static,
+{
+    // 安装类命令另加进入行：「有进入、无结果」正是定位卡住的证据（如 #46）。
+    log::info!("{command} start: source={source}");
+    // 识别参数在闭包 move 前格式化；payload 本身不进日志。
+    let context = format!("source={source}");
+    let outcome = on_install_pool(app, move |store, service| task(store, service, &source)).await;
+    log_outcome(command, Some(&context), &outcome);
+    outcome
+}
+
 /// 在阻塞线程池执行含网络下载的安装类操作：下载可能持续数秒，
 /// 不得占用 IPC 线程。状态在阻塞任务内获取，避免跨线程持有引用。
 ///
 /// 配置存储的锁由插件服务按短临界区自行获取：这里绝不代为持锁，
 /// 下载、校验与落位全程不阻塞其它命令。
-async fn on_install_pool<T, F>(app: AppHandle, task: F) -> Result<T, String>
+async fn on_install_pool<F>(app: AppHandle, task: F) -> Result<(), String>
 where
-    T: Send + 'static,
-    F: FnOnce(&AppStore, &PluginService) -> Result<T, PluginError> + Send + 'static,
+    F: FnOnce(&AppStore, &PluginService) -> Result<(), PluginError> + Send + 'static,
 {
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<AppStore>();
