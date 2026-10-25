@@ -44,7 +44,7 @@ export function slugUniquenessRule({ providers }) {
   }
   return {
     validator: (_, value) =>
-      providers.some((p) => p.slug === value)
+      providers.some((provider) => provider.slug === value)
         ? Promise.reject(new Error(`slug ${value} 已被使用`))
         : Promise.resolve(),
   };

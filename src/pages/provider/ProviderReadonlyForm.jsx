@@ -35,8 +35,7 @@ export default function ProviderReadonlyForm({
   onEdit,
 }) {
   const [busy, run] = useAsyncAction();
-  const { useToken } = theme;
-  const { token } = useToken();
+  const { token } = theme.useToken();
 
   async function handleDelete() {
     await run(async () => {

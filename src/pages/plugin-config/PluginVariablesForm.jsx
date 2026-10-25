@@ -11,20 +11,22 @@ import usePluginConfigSave from "./usePluginConfigSave";
  * @param {import("@/api/plugins").PluginView} param0.plugin
  * @param {import("@/api/plugins").PluginConfig} param0.config
  * @param {import("@/api/variables").Variables} param0.variables
- * @param {(refresh: boolean) => void} param0.onFinish
+ * @param {() => void} param0.onSaved 保存成功后回调（由父组件刷新配置）
+ * @param {() => void} param0.onCancel 取消编辑
  */
 export default function PluginVariablesForm({
   plugin,
   config,
   variables,
-  onFinish,
+  onSaved,
+  onCancel,
 }) {
   const [form] = Form.useForm();
   const [saving, saveConfig] = usePluginConfigSave(plugin.source);
 
   // 命令成功即已落盘，由父组件刷新配置。
   async function handleSave(record) {
-    await saveConfig(config, { variables: record }, () => onFinish(true));
+    await saveConfig(config, { variables: record }, onSaved);
   }
 
   return (
@@ -52,7 +54,7 @@ export default function PluginVariablesForm({
       removeLabel="删除覆盖"
       saving={saving}
       onSave={handleSave}
-      onCancel={() => onFinish(false)}
+      onCancel={onCancel}
     />
   );
 }

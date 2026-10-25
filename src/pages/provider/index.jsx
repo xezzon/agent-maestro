@@ -40,12 +40,12 @@ export default function ProvidersPage({ plugins }) {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [providers, variables] = await Promise.all([
+      const [nextProviders, nextVariables] = await Promise.all([
         listProviders(),
         listVariables(),
       ]);
-      setProviders(providers);
-      setVariables(variables);
+      setProviders(nextProviders);
+      setVariables(nextVariables);
       setLoadError(null);
     } catch (err) {
       setLoadError(String(err));
@@ -66,6 +66,10 @@ export default function ProvidersPage({ plugins }) {
 
   function openCreate() {
     setCreating(true);
+  }
+
+  function closeReports() {
+    setReports(null);
   }
 
   if (loadError) {
@@ -107,11 +111,11 @@ export default function ProvidersPage({ plugins }) {
         title="应用到工具"
         open={reports !== null}
         footer={
-          <Button type="primary" onClick={() => setReports(null)}>
+          <Button type="primary" onClick={closeReports}>
             关闭
           </Button>
         }
-        onCancel={() => setReports(null)}
+        onCancel={closeReports}
       >
         <ApplyResultList reports={reports ?? []} />
       </Modal>

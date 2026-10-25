@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Button, Card, Typography } from "antd";
+import { Button, Card } from "antd";
+import VariableList from "@/components/VariableList";
 import PluginVariablesForm from "./PluginVariablesForm";
 
 /**
@@ -19,7 +20,6 @@ export default function PluginVariablesCard({
   onReload,
 }) {
   const [editing, setEditing] = useState(false);
-  const names = Object.keys(config.variables ?? {});
 
   return (
     <Card title="变量覆盖">
@@ -28,31 +28,18 @@ export default function PluginVariablesCard({
           plugin={plugin}
           config={config}
           variables={variables}
-          onFinish={(refresh) => {
+          onSaved={() => {
             setEditing(false);
-            if (refresh) {
-              onReload();
-            }
+            onReload();
           }}
+          onCancel={() => setEditing(false)}
         />
       ) : (
         <>
-          {names.length === 0 ? (
-            <Typography.Text type="secondary">
-              尚未覆盖任何变量。覆盖后投影该插件时，覆盖值替代全局变量表中的默认值
-            </Typography.Text>
-          ) : (
-            <ul className="variable-list">
-              {names.map((name) => (
-                <li key={name}>
-                  <Typography.Text code>{name}</Typography.Text>
-                  <Typography.Text className="variable-value">
-                    {config.variables[name]}
-                  </Typography.Text>
-                </li>
-              ))}
-            </ul>
-          )}
+          <VariableList
+            values={config.variables ?? {}}
+            emptyText="尚未覆盖任何变量。覆盖后投影该插件时，覆盖值替代全局变量表中的默认值"
+          />
           <div className="card-actions">
             <Button onClick={() => setEditing(true)}>编辑</Button>
           </div>

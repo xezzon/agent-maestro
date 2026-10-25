@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Button, Card, Form, Input, Typography } from "antd";
+import { Button, Card, Form, Input } from "antd";
 import { setVariables as saveVariables } from "@/api/variables";
 import useAsyncAction from "@/hooks/useAsyncAction";
+import VariableList from "./VariableList";
 import VariableRowsForm from "./VariableRowsForm";
 import { globalVariableRules } from "./variableRules";
 
@@ -15,39 +16,24 @@ import { globalVariableRules } from "./variableRules";
  */
 export default function VariablesCard({ variables, onReload }) {
   const [editing, setEditing] = useState(false);
-  const names = Object.keys(variables);
 
   return (
     <Card title="全局变量">
       {editing ? (
         <VariablesForm
           variables={variables}
-          onFinish={(refresh) => {
+          onSaved={() => {
             setEditing(false);
-            if (refresh) {
-              onReload();
-            }
+            onReload();
           }}
+          onCancel={() => setEditing(false)}
         />
       ) : (
         <>
-          {names.length === 0 ? (
-            <Typography.Text type="secondary">
-              尚未定义变量。可在配置值中用 {"${NAME}"}{" "}
-              引用变量，投影时替换为默认值
-            </Typography.Text>
-          ) : (
-            <ul className="variable-list">
-              {names.map((name) => (
-                <li key={name}>
-                  <Typography.Text code>{name}</Typography.Text>
-                  <Typography.Text className="variable-value">
-                    {variables[name]}
-                  </Typography.Text>
-                </li>
-              ))}
-            </ul>
-          )}
+          <VariableList
+            values={variables}
+            emptyText="尚未定义变量。可在配置值中用 ${NAME} 引用变量，投影时替换为默认值"
+          />
           <div className="card-actions">
             <Button onClick={() => setEditing(true)}>编辑</Button>
           </div>
@@ -62,9 +48,10 @@ export default function VariablesCard({ variables, onReload }) {
  * `[A-Za-z0-9_]+`，同表内唯一，大小写敏感）。保存即整包替换全局变量表。
  * @param {Object} param0
  * @param {import("@/api/variables").Variables} param0.variables
- * @param {(refresh: boolean) => void} param0.onFinish
+ * @param {() => void} param0.onSaved 保存成功后回调（由父组件刷新列表）
+ * @param {() => void} param0.onCancel 取消编辑
  */
-function VariablesForm({ variables, onFinish }) {
+function VariablesForm({ variables, onSaved, onCancel }) {
   const [form] = Form.useForm();
   const [saving, runSave] = useAsyncAction();
 
@@ -72,7 +59,7 @@ function VariablesForm({ variables, onFinish }) {
   async function handleSave(variableValues) {
     await runSave(async () => {
       await saveVariables(variableValues);
-      onFinish(true);
+      onSaved();
     });
   }
 
@@ -90,7 +77,7 @@ function VariablesForm({ variables, onFinish }) {
       removeLabel="删除变量"
       saving={saving}
       onSave={handleSave}
-      onCancel={() => onFinish(false)}
+      onCancel={onCancel}
     />
   );
 }

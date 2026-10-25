@@ -115,6 +115,45 @@ function compareByteOrder(a, b) {
 }
 
 /**
+ * header 行的排序口径：按名，字节序（与记录层 `BTreeMap` 的键序一致）。
+ * 读写两个方向共用这一条，故两边的顺序永远一致。
+ * @param {CustomHeader} a
+ * @param {CustomHeader} b
+ * @returns {number}
+ */
+function compareHeaderRows(a, b) {
+  return compareByteOrder(a.name, b.name);
+}
+
+/**
+ * 名→值映射展开成行列表（读路径）。
+ * @param {Record<string, string>|undefined} customHeader
+ * @returns {CustomHeader[]}
+ */
+function toHeaderRows(customHeader) {
+  return Object.entries(customHeader ?? {})
+    .map(([name, value]) => ({ name, value }))
+    .sort(compareHeaderRows);
+}
+
+/**
+ * 行列表还原成名→值映射（写路径）。
+ *
+ * 按名排序后再还原：映射本无序，落盘产物得是确定的（issue #58 决定 21）。
+ * 排序前先拷贝一份——行列表是调用方（表单）持有的数组，不能就地排序。
+ * @param {CustomHeader[]|undefined} rows
+ * @returns {Record<string, string>}
+ */
+function fromHeaderRows(rows) {
+  return Object.fromEntries(
+    (rows ?? [])
+      .slice()
+      .sort(compareHeaderRows)
+      .map(({ name, value }) => [name, value]),
+  );
+}
+
+/**
  * 把后端可能缺键的 `base_url` 补齐为两个槽位恒存在的形态，缺键补空串。
  * @param {Partial<Endpoints>|undefined} baseUrl
  * @returns {Endpoints}
@@ -187,12 +226,7 @@ export function toProviderPayload(provider) {
     provider.selected_protocol && base_url[provider.selected_protocol]
       ? provider.selected_protocol
       : null;
-  // 按字节序（compareByteOrder）与记录层 BTreeMap 的排序一致。
-  const custom_header = Object.fromEntries(
-    (provider.custom_header ?? [])
-      .map(({ name, value }) => [name, value])
-      .sort(([a], [b]) => compareByteOrder(a, b)),
-  );
+  const custom_header = fromHeaderRows(provider.custom_header);
   return {
     slug: provider.slug,
     enabled: provider.enabled,
@@ -240,9 +274,7 @@ export async function listProviders() {
       selected_protocol: provider.selected_protocol ?? null,
       // 记录层是 BTreeMap，但 JSON 传进 JS 对象后键序不保证（整数字样键还会前置），
       // 故显式按名排序展开成行列表，与表单的 Form.List 对齐。
-      custom_header: Object.entries(provider.custom_header ?? {})
-        .map(([name, value]) => ({ name, value }))
-        .sort((a, b) => compareByteOrder(a.name, b.name)),
+      custom_header: toHeaderRows(provider.custom_header),
       // 后端的「未设置」约定：未配置的凭证恒为空串（`ApiKey` 类型的序列化形态，
       // 见 src-tauri/src/provider.rs）。这一句是那条约定的唯一前端落点。
       api_key_set: !!provider.api_key,
