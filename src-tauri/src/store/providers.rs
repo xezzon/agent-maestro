@@ -6,11 +6,11 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    provider::{FieldError, Provider},
+    config::{Change, Config},
+    errors::{ProviderError, ProviderInterpolationError},
+    provider::Provider,
     variables::Variables,
 };
-
-use super::schema::{Change, Config, StoreError};
 
 /// 挑出参与投影的 Provider（#94）：`enabled == false` 者整体不参与——既不写入
 /// 插件，也不做占位符插值，因此其字段里的占位符错误不会牵连整个插件失败。
@@ -37,11 +37,11 @@ pub(super) fn create(
     config: &mut Config,
     slug: &str,
     provider: Provider,
-) -> Result<Change<()>, StoreError> {
+) -> Result<Change<()>, ProviderError> {
     if config.providers.contains_key(slug) {
-        return Err(StoreError::duplicate_slug(slug));
+        return Err(ProviderError::duplicate_slug(slug));
     }
-    validate_provider(slug, &provider, &config.variables)?;
+    validate_provider(slug, &provider, &config.variables).map_err(interpolation_error)?;
     config.providers.insert(slug.to_owned(), provider);
     Ok(Change::Changed(()))
 }
@@ -54,24 +54,24 @@ pub(super) fn update(
     config: &mut Config,
     slug: &str,
     provider: Provider,
-) -> Result<Change<Provider>, StoreError> {
+) -> Result<Change<Provider>, ProviderError> {
     let original = config
         .providers
         .get(slug)
         .cloned()
-        .ok_or_else(|| StoreError::missing_slug(slug))?;
-    validate_provider(slug, &provider, &config.variables)?;
+        .ok_or_else(|| ProviderError::missing_slug(slug))?;
+    validate_provider(slug, &provider, &config.variables).map_err(interpolation_error)?;
     config.providers.insert(slug.to_owned(), provider);
     Ok(Change::Changed(original))
 }
 
 /// 删除 Provider，其端点、模型与 API Key 随记录一并移除，不留孤儿数据。
 /// 返回被删除的记录。
-pub(super) fn delete(config: &mut Config, slug: &str) -> Result<Change<Provider>, StoreError> {
+pub(super) fn delete(config: &mut Config, slug: &str) -> Result<Change<Provider>, ProviderError> {
     let removed = config
         .providers
         .remove(slug)
-        .ok_or_else(|| StoreError::missing_slug(slug))?;
+        .ok_or_else(|| ProviderError::missing_slug(slug))?;
     Ok(Change::Changed(removed))
 }
 
@@ -84,11 +84,11 @@ pub(super) fn set_enabled(
     config: &mut Config,
     slug: &str,
     enabled: bool,
-) -> Result<Change<()>, StoreError> {
+) -> Result<Change<()>, ProviderError> {
     let provider = config
         .providers
         .get_mut(slug)
-        .ok_or_else(|| StoreError::missing_slug(slug))?;
+        .ok_or_else(|| ProviderError::missing_slug(slug))?;
     if provider.enabled == enabled {
         return Ok(Change::Unchanged(()));
     }
@@ -97,27 +97,26 @@ pub(super) fn set_enabled(
 }
 
 /// Provider 插值失败 → 存储错误：与投影时（`interpolate_providers`）同因同报、
-/// 同款文案，只是提前到落盘前。
-fn interpolation_error(slug: &str, error: FieldError) -> StoreError {
-    StoreError::Interpolation {
-        slug: slug.to_owned(),
-        field: error.field,
-        reason: error.reason,
-    }
+/// 同款文案，只是提前到落盘前——包裹领域层的同一个错误类型，句式只有一份。
+fn interpolation_error(error: ProviderInterpolationError) -> ProviderError {
+    ProviderError::Interpolation(error)
 }
 
 /// Provider 落盘前的插值校验（provider↔variables 一致性，ADR 0015）。
 ///
 /// 全部 Provider（含禁用者）都须对当前变量表可解析：落盘内容始终是自洽的，
 /// 禁用只是一种投影时的结构过滤，不改变存储不变式。
-/// 新增/更新/整表换变量共用这一条规则。
+/// 新增/更新/整表换变量共用这一条规则；包装成各仓储自己的错误类型由调用方完成。
 pub(super) fn validate_provider(
     slug: &str,
     provider: &Provider,
     variables: &Variables,
-) -> Result<(), StoreError> {
+) -> Result<(), ProviderInterpolationError> {
     provider
         .interpolate(variables)
-        .map_err(|error| interpolation_error(slug, error))?;
+        .map_err(|error| ProviderInterpolationError {
+            slug: slug.to_owned(),
+            error,
+        })?;
     Ok(())
 }

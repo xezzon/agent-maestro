@@ -56,7 +56,9 @@ impl From<ProviderRequest> for Provider {
 pub(crate) fn list_providers(
     store: State<'_, AppStore>,
 ) -> Result<BTreeMap<String, Provider>, String> {
-    let outcome = store.with_read(|s| s.providers_snapshot());
+    let outcome = store
+        .with_read(|s| s.providers_snapshot())
+        .map_err(|err| err.to_string());
     log_outcome("list_providers", None, &outcome);
     outcome
 }
@@ -68,7 +70,9 @@ pub(crate) fn create_provider(
 ) -> Result<(), String> {
     let slug = provider.slug.clone();
     let context = format!("slug={slug}");
-    let outcome = store.with_write(move |s| s.create_provider(&slug, provider.into()));
+    let outcome = store
+        .with_write(move |s| s.create_provider(&slug, provider.into()))
+        .map_err(|err| err.to_string());
     log_outcome("create_provider", Some(&context), &outcome);
     outcome
 }
@@ -80,14 +84,18 @@ pub(crate) fn update_provider(
 ) -> Result<(), String> {
     let slug = provider.slug.clone();
     let context = format!("slug={slug}");
-    let outcome = store.with_write(move |s| s.update_provider(&slug, provider.into()).map(|_| ()));
+    let outcome = store
+        .with_write(move |s| s.update_provider(&slug, provider.into()).map(|_| ()))
+        .map_err(|err| err.to_string());
     log_outcome("update_provider", Some(&context), &outcome);
     outcome
 }
 
 #[tauri::command]
 pub(crate) fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
-    let outcome = store.with_write(|s| s.delete_provider(&slug).map(|_| ()));
+    let outcome = store
+        .with_write(|s| s.delete_provider(&slug).map(|_| ()))
+        .map_err(|err| err.to_string());
     log_outcome("delete_provider", Some(&format!("slug={slug}")), &outcome);
     outcome
 }
@@ -100,7 +108,9 @@ pub(crate) fn set_provider_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let context = format!("slug={slug} enabled={enabled}");
-    let outcome = store.with_write(|s| s.set_provider_enabled(&slug, enabled));
+    let outcome = store
+        .with_write(|s| s.set_provider_enabled(&slug, enabled))
+        .map_err(|err| err.to_string());
     log_outcome("set_provider_enabled", Some(&context), &outcome);
     outcome
 }

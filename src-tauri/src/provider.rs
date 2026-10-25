@@ -5,7 +5,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::interpolate::interpolate_value;
+use crate::{
+    errors::{FieldError, ProviderInterpolationError},
+    interpolate::interpolate_value,
+    variables::Variables,
+};
 
 /// Provider 在各协议下的端点（每协议至多一个；见 ADR 0003）。
 ///
@@ -68,7 +72,7 @@ impl ModelEntry {
             .transpose()
             .map_err(|reason| FieldError {
                 field: "display_name".to_owned(),
-                reason,
+                reason: reason.to_string(),
             })?;
         Ok(ModelEntry {
             id: self.id.clone(),
@@ -272,21 +276,6 @@ impl Debug for Provider {
     }
 }
 
-/// 插值失败：字段名 + 原因。
-///
-/// 字段名指明插的是哪个字段（`base_url.openai-completions`、`models[1].display_name`），
-/// 原因取自库（只含变量名与位置，不含值与密钥）。
-///
-/// 用具名字段而非匿名元组：元组的两个位置写反了编译器不报错，解构点读到的
-/// 字段名与原因会悄悄对调。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FieldError {
-    /// 出错的字段名。
-    pub(crate) field: String,
-    /// 原因（库报错）。
-    pub(crate) reason: String,
-}
-
 impl Provider {
     /// 插值（docs/GLOSSARY.md「插值」/ ADR 0015）：把自身全部字符串值里的占位符
     /// 替换为变量实际值，返回字面值副本；失败返回（字段名, 库报错）。
@@ -307,8 +296,10 @@ impl Provider {
         let mut base_url = BTreeMap::new();
         for (protocol, url) in &self.base_url {
             let field = format!("base_url.{protocol}");
-            let value =
-                interpolate_value(url, variables).map_err(|reason| FieldError { field, reason })?;
+            let value = interpolate_value(url, variables).map_err(|reason| FieldError {
+                field,
+                reason: reason.to_string(),
+            })?;
             base_url.insert(*protocol, value);
         }
         // api_key 原样保留，不参与插值。
@@ -317,8 +308,10 @@ impl Provider {
         let mut custom_header = BTreeMap::new();
         for (name, value) in &self.custom_header {
             let field = format!("custom_header.{name}");
-            let value = interpolate_value(value, variables)
-                .map_err(|reason| FieldError { field, reason })?;
+            let value = interpolate_value(value, variables).map_err(|reason| FieldError {
+                field,
+                reason: reason.to_string(),
+            })?;
             custom_header.insert(name.clone(), value);
         }
         let mut models = Vec::with_capacity(self.models.len());
@@ -341,9 +334,60 @@ impl Provider {
     }
 }
 
+/// 对传入的每个 Provider 插值，返回替换后的字面值副本。
+///
+/// 作用域＝Provider 中除 `api_key`、模型 `id` 与 header **键**外的字符串值
+/// （ADR 0015；header 的值是配置值、参与插值）。
+/// 是否参与投影由调用方决定：本函数不感知 `enabled`，对传入的每一项都插值；
+/// 任一字段失败即整体失败，失败原因含 slug + 字段名 + 库报错
+/// （[`ProviderInterpolationError`] 自带面向用户的句式），不含值与密钥。
+///
+/// 与 [`Provider::interpolate`]/[`ModelEntry::interpolate`] 同住一处：本模块
+/// 持有「Provider 的插值作用域」的全部三层（逐字段、逐条目、跨 Provider 编排），
+/// `interpolate` 模块因此只余换库接缝（ADR 0014），不再反向引用领域类型。
+pub(crate) fn interpolate_providers(
+    providers: &BTreeMap<String, Provider>,
+    variables: &Variables,
+) -> Result<BTreeMap<String, Provider>, ProviderInterpolationError> {
+    let mut projected = BTreeMap::new();
+    for (slug, provider) in providers {
+        match provider.interpolate(variables) {
+            Ok(provider) => {
+                projected.insert(slug.clone(), provider);
+            }
+            Err(error) => {
+                return Err(ProviderInterpolationError {
+                    slug: slug.clone(),
+                    error,
+                });
+            }
+        }
+    }
+    Ok(projected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 插值失败句式逐字钉住：slug + 字段名 + 原因逐字入句。
+    /// 落盘前拦截（`ProviderError::Interpolation` 包裹本类型）与投影时拦截共用
+    /// 这一句式：同因同报、逐字一致（ADR 0015）。
+    #[test]
+    fn interpolation_failure_message_renders_slug_field_and_reason() {
+        let error = ProviderInterpolationError {
+            slug: "gateway".to_owned(),
+            error: FieldError {
+                field: "base_url.openai-completions".to_owned(),
+                reason: "No such variable: $HOST".to_owned(),
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "Provider「gateway」的 base_url.openai-completions 插值失败：No such variable: $HOST"
+        );
+    }
 
     #[test]
     fn endpoints_round_trip_explicit_empty_slots_verbatim() {
@@ -632,6 +676,12 @@ mod tests {
             .collect()
     }
 
+    fn error(template: &str, variables: &Variables) -> String {
+        interpolate_value(template, variables)
+            .unwrap_err()
+            .to_string()
+    }
+
     /// 插值（`Provider::interpolate`）输出全部字面值副本：除模型 ID、api_key 与
     /// header 键（原样保留）外逐字段替换，原值不动。
     #[test]
@@ -818,6 +868,63 @@ mod tests {
 
         assert_eq!(error.field, "base_url.openai-completions");
         assert!(error.reason.contains("UNDEFINED_VAR"), "{}", error.reason);
+    }
+
+    /// 投影时插值失败的文案逐字断言：slug、字段名、原因三者都在句子里，
+    /// 且与落盘前拦截（`ProviderError::Interpolation`）同一句式。
+    ///
+    /// 原因取自库（`interpolate_value` 的真实报错）而非写死：句式是展示层的
+    /// 契约（`ProviderInterpolationError` 独家产出），库的措辞由 ADR 0014 的
+    /// 换库哨兵盯着（换库即红，见 `interpolate` 模块的换库哨兵测试）。
+    #[test]
+    fn provider_interpolation_failure_message_is_verbatim() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "gateway".to_owned(),
+            Provider {
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${HOST}/v1".to_owned(),
+                )]),
+                ..Default::default()
+            },
+        );
+        let reason = error("https://${HOST}/v1", &vars(&[]));
+
+        let err = interpolate_providers(&providers, &vars(&[])).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!("Provider「gateway」的 base_url.openai-completions 插值失败：{reason}")
+        );
+    }
+
+    /// 任一字段失败即整体失败：结构化原因含 slug + 字段名 + 变量名，不含值与密钥。
+    #[test]
+    fn provider_interpolation_failure_reports_slug_field_and_variable_only() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "gateway".to_owned(),
+            Provider {
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${HOST}/v1".to_owned(),
+                )]),
+                api_key: ApiKey::new("sk-canary-do-not-leak".to_owned()),
+                ..Default::default()
+            },
+        );
+
+        let err = interpolate_providers(&providers, &vars(&[])).unwrap_err();
+
+        assert_eq!(err.slug, "gateway");
+        assert_eq!(err.error.field, "base_url.openai-completions");
+        assert!(err.error.reason.contains("HOST"), "{}", err.error.reason);
+        assert!(
+            !err.error.reason.contains("sk-canary-do-not-leak"),
+            "失败原因不得携带值与密钥：{}",
+            err.error.reason
+        );
     }
 
     /// custom_header 是记录的一部分且**恒落盘**：未设置时写出空映射，

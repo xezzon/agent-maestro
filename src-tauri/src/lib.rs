@@ -1,4 +1,6 @@
 mod command;
+mod config;
+mod errors;
 mod fs_util;
 mod interpolate;
 mod logging;
@@ -94,11 +96,11 @@ pub fn run() {
         // 添加插件对话框用它选择本机 manifest.json（file 来源）。
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            let store = Store::new();
+            let store = Store::new(paths.config_path());
             app.manage(AppStore {
                 store: RwLock::new(store),
             });
-            app.manage(PluginService::new());
+            app.manage(PluginService::new(paths));
 
             // logger 已随插件 setup attach：补报降级原因与非法级别值。
             if let Some(reason) = logging::degraded_reason() {
@@ -113,14 +115,16 @@ pub fn run() {
             // 校验通过，这里只消费；startup 自身的失败用 `?` 让启动退出。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
-            service.startup(&app_store)?;
+            service.startup(app_store.inner())?;
             match app_store.with_read(|guard| guard.config_snapshot()) {
                 Ok(config) => log::info!(
                     "startup complete: {} providers, {} plugins",
                     config.providers.len(),
                     config.plugins.len()
                 ),
-                Err(err) => log::error!("startup: config store unavailable: {err}"),
+                Err(err) => {
+                    log::error!("startup: config store unavailable: {err}")
+                }
             }
             Ok(())
         })

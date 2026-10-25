@@ -6,16 +6,18 @@
 //! 第三方来源（https 与 file）的获取、落位与生命周期见 ADR 0006。
 //!
 //! 本模块持有插件服务的共享词汇：四层类型（`PlacedPlugin` → `PluginMeta` →
-//! `LoadedPlugin` → `PluginState`）、落位目录约定，以及与配置存储、命令层共用的
-//! 条目 / 视图 / 配置类型。前几者是模块私有项——定义在模块根，子模块可直接使用
-//! （Rust 的私有项对后代模块可见），不向 crate 外暴露。
+//! `LoadedPlugin` → `PluginState`）、落位目录约定，以及插件配置类型。前几者是
+//! 模块私有项——定义在模块根，子模块可直接使用（Rust 的私有项对后代模块可见），
+//! 不向 crate 外暴露。插件条目不是本模块的词汇：它是配置文件的形状，住在
+//! crate 根的中立层 [`crate::config`]（见 [`ports`]）。
 //!
 //! 行为按职责拆在同级子模块：
 //! - [`install`]：获取、落位、启停、移除与重新加载；
 //! - [`projection`]：Provider 投影与文件路径拼接；
 //! - [`config`]：插件配置（`config.json`）读写；
 //! - [`source`]：插件来源与 https 地址的判定；
-//! - [`manifest`]：manifest 的解析、校验与 `config_dir` 声明语法。
+//! - [`manifest`]：manifest 的解析、校验与 `config_dir` 声明语法；
+//! - [`ports`]：服务层对配置存储的端口（它真正需要哪些能力）。
 
 mod builtin;
 mod config;
@@ -23,6 +25,7 @@ mod execution;
 mod fetch;
 mod install;
 mod manifest;
+pub(crate) mod ports;
 mod projection;
 mod source;
 
@@ -44,15 +47,17 @@ use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
 use crate::{
+    config::PluginEntry,
+    errors::PluginError,
     fs_util::{Durability, write_atomic},
     paths::Paths,
     plugin::builtin::BUILTINS,
-    store::{AppStore, PluginEntry},
     variables::Variables,
 };
-use execution::SkippedProvider;
+pub(crate) use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, parse_placed};
+use ports::PluginEntries;
 use source::PluginSource;
 
 /// 落位目录中的 manifest 文件名。
@@ -63,12 +68,6 @@ const PLACED_WASM: &str = "plugin.wasm";
 /// 落位目录中的插件配置文件名（ADR 0018）：与两个宿主产物混居，逐文件覆盖的
 /// 落位替换与重载完全不碰它。
 const PLACED_CONFIG: &str = "config.json";
-
-/// 插件注册表锁被毒化时对用户可见的原因（其它操作持锁期间 panic）。
-const REGISTRY_LOCK_POISONED: &str = "插件注册表不可用";
-
-/// 安装锁被毒化时对用户可见的原因（其它安装类操作持锁期间 panic）。
-const INSTALL_LOCK_POISONED: &str = "插件安装锁不可用";
 
 struct PlacedPlugin {
     plugin_dir: PathBuf,
@@ -103,14 +102,14 @@ impl PlacedPlugin {
         }
     }
 
-    fn from_plugin_dir(plugin_dir: &Path) -> Result<Self, String> {
+    fn from_plugin_dir(plugin_dir: &Path) -> Result<Self, PluginError> {
         let manifest_path = plugin_dir.join(PLACED_MANIFEST);
         let raw_manifest = fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("读取 {} 失败：{e}", manifest_path.display()))?;
+            .map_err(|e| PluginError::read_file(&manifest_path, e.to_string()))?;
 
         let wasm_path = plugin_dir.join(PLACED_WASM);
         let wasm =
-            fs::read(&wasm_path).map_err(|e| format!("读取 {} 失败：{e}", wasm_path.display()))?;
+            fs::read(&wasm_path).map_err(|e| PluginError::read_file(&wasm_path, e.to_string()))?;
 
         Ok(Self {
             plugin_dir: plugin_dir.to_path_buf(),
@@ -124,10 +123,12 @@ impl PlacedPlugin {
         &self.plugin_dir
     }
 
-    fn save(&self) -> Result<(), String> {
+    fn save(&self) -> Result<(), PluginError> {
         // 首次安装即建目录；已存在则逐文件覆盖，目录中宿主产物以外的文件
         // （如插件配置，见 ADR 0018）完全不受影响。
-        fs::create_dir_all(&self.plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
+        fs::create_dir_all(&self.plugin_dir).map_err(|e| PluginError::CreateDirectory {
+            detail: e.to_string(),
+        })?;
         // 先 manifest、后 wasm：写 wasm 失败会停在「新 manifest + 旧 wasm」的
         // 混合态，恢复手段是从来源重新加载（备份回滚的既有保证已取消，见 ADR 0018）。
         write_placed_file(
@@ -140,7 +141,7 @@ impl PlacedPlugin {
         Ok(())
     }
 
-    fn uninstall(&self) -> Result<(), String> {
+    fn uninstall(&self) -> Result<(), PluginError> {
         remove_placed_dir(&self.plugin_dir)
     }
 
@@ -148,9 +149,9 @@ impl PlacedPlugin {
     ///
     /// 装载是**显式**的一步：解析（反序列化）只产出声明、不碰文件系统，落位
     /// 目录重建时由此把声明解析成宿主绝对路径并建出目录（见 ADR 0022）。
-    fn load(self) -> Result<LoadedPlugin, String> {
+    fn load(self, paths: &Paths) -> Result<LoadedPlugin, PluginError> {
         let manifest = parse_placed(self.raw_manifest.as_str())?;
-        let config_dir = manifest.config_dir.resolve(&Paths::get())?;
+        let config_dir = manifest.config_dir.resolve(paths)?;
         Ok(LoadedPlugin::from_parts(manifest, config_dir, self))
     }
 }
@@ -185,43 +186,47 @@ impl LoadedPlugin {
 /// 原子写的实现收在 crate 级 [`crate::fs_util`]：宿主侧另有一处同样的
 /// 「tmp + rename」（配置存储），两份实现曾各自漂移过一次。耐久性策略在这里
 /// 显式声明——插件侧产物不 fsync（可从来源重新获取，见 [`Durability`]）。
-fn write_placed_file(dir: &Path, name: &str, contents: &[u8]) -> Result<(), String> {
-    write_atomic(&dir.join(name), contents, Durability::Unsynced).map_err(|e| e.to_string())
+fn write_placed_file(dir: &Path, name: &str, contents: &[u8]) -> Result<(), PluginError> {
+    write_atomic(&dir.join(name), contents, Durability::Unsynced)
+        .map_err(|e| PluginError::write_file(e.to_string()))
 }
 
 /// 删除落位目录；目录已不存在同样成功（幂等）。
-fn remove_placed_dir(plugin_dir: &Path) -> Result<(), String> {
+fn remove_placed_dir(plugin_dir: &Path) -> Result<(), PluginError> {
     match fs::remove_dir_all(plugin_dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("删除插件目录 {} 失败：{e}", plugin_dir.display())),
+        Err(e) => Err(PluginError::remove_directory(plugin_dir, e.to_string())),
     }
 }
 
-/// 插件列表视图（命令返回给前端的形态）。
-#[derive(Debug, Serialize)]
-pub(crate) struct PluginView {
-    source: String,
+/// 插件的注册表描述：服务层的内部形状。
+///
+/// 线格式契约在命令层（见 `crate::command::plugin` 的 `PluginView`）：服务层
+/// 只说「这个插件是什么」，怎么说给界面听是交付层的事（#141 待决策 A）。
+#[derive(Debug)]
+pub(crate) struct PluginRecord {
+    pub(crate) source: String,
     /// 来源以内置前缀标识；内置插件可禁用、不可移除。
-    builtin: bool,
-    enabled: bool,
-    id: String,
+    pub(crate) builtin: bool,
+    pub(crate) enabled: bool,
+    pub(crate) id: String,
     /// manifest 声明并解析出的配置目录（宿主绝对路径）。
-    config_dir: Option<String>,
-    /// manifest 内联的 settings_schema（ADR 0017），透传给前端渲染表单；
+    pub(crate) config_dir: Option<PathBuf>,
+    /// manifest 内联的 settings_schema（ADR 0017），界面据此渲染表单；
     /// 缺省即该插件无需用户填写。
-    settings_schema: Option<serde_json::Value>,
-    error: Option<String>,
+    pub(crate) settings_schema: Option<serde_json::Value>,
+    /// 装载失败的原因。
+    pub(crate) error: Option<String>,
 }
 
-/// 逐插件投影的状态：已写入 / 失败 / 未执行。
+/// 逐插件投影的状态：已写入 / 失败 / 未执行（服务层内部形状）。
 ///
-/// 合法值由类型固定（此前是一根 `&'static str`，合法值只写在注释里），
-/// 线格式为小写词（`applied` / `failed` / `skipped`），前端按同一组词渲染标签。
-/// 序列化形态与线格式由本模块的测试钉住：改词即前端标签静默失效。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ApplyStatus {
+/// 线格式词（`applied` / `failed` / `skipped`）由命令层产出——那是交付层的
+/// 契约。本枚举的英文词只服务 ADR 0008 的日志行；两者同形，由命令层的一条
+/// 测试钉住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectionStatus {
     /// 已写入：插件执行成功并写出了文件。
     Applied,
     /// 失败：插件执行了但返回错误（不写任何文件）。
@@ -230,43 +235,44 @@ pub(crate) enum ApplyStatus {
     Skipped,
 }
 
-impl Display for ApplyStatus {
-    /// 线格式词（与序列化形态一致）：日志摘要与序列化同源，不再各写一份。
+impl Display for ProjectionStatus {
+    /// 日志用的英文词（与线格式词同形，见类型文档）。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            ApplyStatus::Applied => "applied",
-            ApplyStatus::Failed => "failed",
-            ApplyStatus::Skipped => "skipped",
+            ProjectionStatus::Applied => "applied",
+            ProjectionStatus::Failed => "failed",
+            ProjectionStatus::Skipped => "skipped",
         })
     }
 }
 
-/// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
-#[derive(Debug, Serialize)]
-pub(crate) struct PluginApplyReport {
+/// 逐插件投影的结果：状态、已写入文件、跳过的 Provider、失败原因。
+///
+/// 服务层内部形状；命令层把它映射成线格式的 `PluginApplyReport`。
+#[derive(Debug)]
+pub(crate) struct PluginOutcome {
     pub(crate) id: String,
-    /// 投影状态（`applied` / `failed` / `skipped`）。
-    pub(crate) status: ApplyStatus,
+    pub(crate) status: ProjectionStatus,
     /// 已写入文件的宿主绝对路径列表（插件返回相对 config_dir 的路径，由宿主拼接）。
-    files: Vec<String>,
-    skipped: Vec<SkippedProvider>,
+    pub(crate) files: Vec<String>,
+    pub(crate) skipped: Vec<SkippedProvider>,
     pub(crate) reason: Option<String>,
 }
 
-/// 逐插件状态摘要（`id:status` 逐项，空格分隔）：命令层结果行的识别参数。
+/// 逐插件状态摘要（`id:status` 逐项，空格分隔）：结果行的识别参数。
 ///
 /// 结果行按 ADR 0008 携带逐插件状态摘要——某个插件投影失败时，日志里要能
 /// 看出是哪一个。摘要由本模块产出（命令层只负责把它交给 `log_outcome`，
 /// 不自己拼串）。没有插件时返回 `None`：成功行不带上下文，不留尾随的
 /// 冒号与空格。
-pub(crate) fn apply_summary(reports: &[PluginApplyReport]) -> Option<String> {
-    if reports.is_empty() {
+pub(crate) fn apply_summary(outcomes: &[PluginOutcome]) -> Option<String> {
+    if outcomes.is_empty() {
         return None;
     }
     Some(
-        reports
+        outcomes
             .iter()
-            .map(|report| format!("{}:{}", report.id, report.status))
+            .map(|outcome| format!("{}:{}", outcome.id, outcome.status))
             .collect::<Vec<_>>()
             .join(" "),
     )
@@ -301,6 +307,9 @@ pub(crate) struct PluginService {
     engine: Engine,
     /// https 拉取的注入点（生产为同步 reqwest 实现，测试为替身）。
     fetcher: Arc<dyn Fetcher>,
+    /// 宿主路径（构造时注入，#141 I-4）：落位目录与 `config_dir` 的平台变量
+    /// 解析都从它取值，不读进程级全局。
+    paths: Paths,
     /// 内存注册表：插件 id（配置条目的 `id`）→ 装载状态。
     /// 读多写少：`list` / `write_providers` 的快照读路径在锁内并发；
     /// 安装/启停/移除/重载写路径走 `entries.write()` 独占。
@@ -319,17 +328,18 @@ fn build_engine() -> Engine {
 }
 
 impl PluginService {
-    /// 构造：使用全局的 [`Paths`]，它在应用启动阶段完成初始化
-    /// （[`Paths::init_from_system`]，见 `lib.rs` 的 `run()`，早于 logger attach）。
-    pub(crate) fn new() -> Self {
-        Self::with_fetcher(Arc::new(HttpFetcher::new()))
+    /// 构造：注入宿主路径（`lib.rs` 在应用启动阶段完成初始化后传入，
+    /// 见 `run()` 的装配，早于 logger attach）。
+    pub(crate) fn new(paths: Paths) -> Self {
+        Self::with_fetcher(paths, Arc::new(HttpFetcher::new()))
     }
 
     /// 注入 fetcher：测试用替身。
-    fn with_fetcher(fetcher: Arc<dyn Fetcher>) -> Self {
+    fn with_fetcher(paths: Paths, fetcher: Arc<dyn Fetcher>) -> Self {
         Self {
             engine: build_engine(),
             fetcher,
+            paths,
             entries: RwLock::new(HashMap::new()),
             install_lock: Mutex::new(()),
         }
@@ -338,11 +348,13 @@ impl PluginService {
     /// 应用启动：从配置条目装载插件注册表（装载失败进错误态，离线可用），
     /// 并补装配置中缺失的内置插件——与其余来源同一安装管线（落位 + 写条目）。
     ///
-    /// 全局路径由应用 setup 阶段初始化（见 `lib.rs`），本方法只读不初始化。
-    /// 配置存储不可用则降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
-    pub(crate) fn startup(&self, store: &AppStore) -> Result<(), String> {
+    /// 宿主路径由构造时注入（见 [`PluginService::new`]）。配置存储不可用则
+    /// 降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
+    ///
+    /// 配置存储经端口访问（见 [`ports`]）：服务层拿不到它的锁与落盘时机。
+    pub(crate) fn startup(&self, store: &impl PluginEntries) -> Result<(), PluginError> {
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
-        let plugin_entries = match store.with_read(|s| s.list_plugins()) {
+        let plugin_entries = match store.list_plugins() {
             Ok(plugin_entries) => plugin_entries,
             Err(reason) => {
                 log::error!(
@@ -355,15 +367,15 @@ impl PluginService {
         let mut plugins = HashMap::with_capacity(plugin_entries.len());
         for entry in &plugin_entries {
             let plugin_id = entry.id.clone();
-            let plugin_dir = Paths::get().plugin_dir(&plugin_id);
+            let plugin_dir = self.paths.plugin_dir(&plugin_id);
             let placed_plugin = match PlacedPlugin::from_plugin_dir(&plugin_dir) {
                 Ok(placed_plugin) => placed_plugin,
                 Err(err) => {
-                    plugins.insert(plugin_id, PluginState::Error(err));
+                    plugins.insert(plugin_id, PluginState::Error(err.to_string()));
                     continue;
                 }
             };
-            let plugin_state = match placed_plugin.load() {
+            let plugin_state = match placed_plugin.load(&self.paths) {
                 Ok(loaded_plugin) => {
                     if entry.enabled {
                         PluginState::Loaded(Arc::new(loaded_plugin))
@@ -371,7 +383,7 @@ impl PluginService {
                         PluginState::Disabled(loaded_plugin.meta)
                     }
                 }
-                Err(err) => PluginState::Error(err),
+                Err(err) => PluginState::Error(err.to_string()),
             };
             plugins.insert(plugin_id, plugin_state);
         }
@@ -397,13 +409,19 @@ impl PluginService {
     }
 
     /// 当前注册表视图。
-    pub(crate) fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
+    pub(crate) fn list(
+        &self,
+        store: &impl PluginEntries,
+    ) -> Result<Vec<PluginRecord>, PluginError> {
         // 配置损坏时把原因原样带出去（哪个文件坏了、坏在哪）——「配置文件损坏」
         // 这四个字会让用户去猜是哪个文件。
-        let plugin_entries = store.with_read(|s| s.list_plugins())?;
-        let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
-        let plugin_view =
-            |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginView {
+        let plugin_entries = store.list_plugins().map_err(PluginError::from)?;
+        let plugins = self
+            .entries
+            .read()
+            .map_err(|_| PluginError::RegistryUnavailable)?;
+        let plugin_record =
+            |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginRecord {
                 source: entry.source.clone(),
                 builtin: matches!(
                     PluginSource::parse(&entry.source),
@@ -411,7 +429,7 @@ impl PluginService {
                 ),
                 enabled: entry.enabled,
                 id: entry.id.clone(),
-                config_dir: meta.map(|m| m.config_dir.display().to_string()),
+                config_dir: meta.map(|m| m.config_dir.clone()),
                 settings_schema: meta.and_then(|m| m.manifest.settings_schema.clone()),
                 error,
             };
@@ -422,12 +440,12 @@ impl PluginService {
                 match plugin {
                     Some(plugin) => match plugin {
                         PluginState::Loaded(loaded_plugin) => {
-                            plugin_view(entry, Some(&loaded_plugin.meta), None)
+                            plugin_record(entry, Some(&loaded_plugin.meta), None)
                         }
-                        PluginState::Disabled(meta) => plugin_view(entry, Some(meta), None),
-                        PluginState::Error(err) => plugin_view(entry, None, Some(err.to_owned())),
+                        PluginState::Disabled(meta) => plugin_record(entry, Some(meta), None),
+                        PluginState::Error(err) => plugin_record(entry, None, Some(err.to_owned())),
                     },
-                    None => plugin_view(entry, None, Some(format!("插件 {} 未加载", entry.id))),
+                    None => plugin_record(entry, None, Some(format!("插件 {} 未加载", entry.id))),
                 }
             })
             .collect())

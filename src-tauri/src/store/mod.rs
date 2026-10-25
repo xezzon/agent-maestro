@@ -1,22 +1,21 @@
 //! 配置存储：启动时从磁盘加载进内存，变更后原子写回。
 //!
 //! 模块按职责拆开：
-//! - [`schema`]：配置的形状（顶层文档、插件条目、存储错误、变更标记）；
 //! - [`protected`]：保护态（配置文件损坏时拒绝一切读写）；
 //! - [`persist`]：原子落盘（临时文件 + rename，写法见 crate 级 `fs_util`）；
 //! - [`providers`]：Provider 仓储（新增/更新/删除/启停 + 落盘前的一致性校验）；
 //! - [`plugins`]：插件条目仓储（新增/删除/启停）；
 //! - [`variable_table`]：变量表（整包替换 + 名合法性）。
 //!
-//! 本模块（`Store`）是它们之间的编排：读路径给语义化查询，写路径统一经由
-//! [`Store::mutate`]（取当前配置 → clone → 交仓储改 → 落盘 → 换状态）；
-//! [`AppStore`] 则在其外加一把读写锁，把「短临界区」的纪律固定在类型上。
+//! 配置文档的**形状**（顶层文档、插件条目）住在 crate 根的
+//! [`crate::config`]：存储层与插件服务两侧都消费它，故它不属于任何一侧；
+//! 错误类型住在 [`crate::errors`]，同样两侧共享。
 
 mod persist;
 mod plugins;
+mod ports;
 mod protected;
 mod providers;
-mod schema;
 mod variable_table;
 
 #[cfg(test)]
@@ -29,16 +28,14 @@ use std::{
     sync::RwLock,
 };
 
-use crate::{paths::Paths, provider::Provider, variables::Variables};
-
-pub(crate) use schema::{Config, PluginEntry, StoreError};
+use crate::{
+    config::{CONFIG_VERSION, Change, Config, PluginEntry},
+    errors::{ConfigError, LockPoisoned, PluginEntryError, ProviderError, VariableError},
+    provider::Provider,
+    variables::Variables,
+};
 
 use protected::ProtectedState;
-use schema::{CONFIG_VERSION, Change};
-
-/// 配置存储的锁被毒化（其它命令持锁期间 panic）时对用户可见的原因。
-/// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
-const STORE_LOCK_POISONED: &str = "配置存储不可用";
 
 /// 配置存储：启动时从磁盘加载进内存，变更后原子写回。
 ///
@@ -50,17 +47,16 @@ pub(crate) struct Store {
 }
 
 impl Store {
-    /// 从全局 [`Paths`] 取配置路径并加载配置。文件不存在视为首次使用（空配置）；
+    /// 从给定路径加载配置。文件不存在视为首次使用（空配置）；
     /// 损坏则进入保护状态。
-    pub(crate) fn new() -> Self {
-        let config_path = Paths::get().config_path();
+    ///
+    /// 路径由构造方（`lib.rs` 的装配、测试夹具）显式传入：构造函数不再自己去
+    /// 取全局环境，依赖在签名上可见，测试也能指向任意配置文件（#141 I-4）。
+    pub(crate) fn new(config_path: PathBuf) -> Self {
         let state = match fs::read_to_string(&config_path) {
             Ok(text) => Self::parse(&config_path, &text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(StoreError::Io {
-                path: config_path.clone(),
-                detail: e.to_string(),
-            }),
+            Err(e) => Err(ConfigError::io(&config_path, e.to_string())),
         };
         Self {
             config_path,
@@ -71,15 +67,14 @@ impl Store {
         }
     }
 
-    fn parse(path: &Path, text: &str) -> Result<Config, StoreError> {
-        let config: Config = serde_json::from_str(text).map_err(|e| StoreError::Corrupt {
-            path: path.to_owned(),
-            detail: e.to_string(),
-        })?;
+    fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
+        let config: Config =
+            serde_json::from_str(text).map_err(|e| ConfigError::corrupt(path, e.to_string()))?;
         if config.version != CONFIG_VERSION {
-            return Err(StoreError::UnsupportedVersion {
+            return Err(ConfigError::UnsupportedVersion {
                 path: path.to_owned(),
                 found: config.version,
+                supported: CONFIG_VERSION,
             });
         }
         Ok(config)
@@ -92,31 +87,31 @@ impl Store {
     /// 外部只经由语义化查询（`providers_snapshot` / `enabled_providers` /
     /// `variables_snapshot` / `list_plugins` / `config_snapshot`）读取配置，
     /// 不直接触碰 `Config` 的字段布局。
-    fn get(&self) -> Result<&Config, StoreError> {
+    fn get(&self) -> Result<&Config, ConfigError> {
         self.state.config()
     }
 
     /// 整份配置快照（自有值）：给「要整份配置」的调用方（启动摘要、测试夹具）。
     ///
     /// 只需要其中一段的调用方走语义化查询，不必克隆整份配置。
-    pub(crate) fn config_snapshot(&self) -> Result<Config, StoreError> {
+    pub(crate) fn config_snapshot(&self) -> Result<Config, ConfigError> {
         Ok(self.get()?.clone())
     }
 
     /// Provider 表快照（按 slug 键序）。
-    pub(crate) fn providers_snapshot(&self) -> Result<BTreeMap<String, Provider>, StoreError> {
+    pub(crate) fn providers_snapshot(&self) -> Result<BTreeMap<String, Provider>, ConfigError> {
         Ok(self.get()?.providers.clone())
     }
 
     /// 参与投影的 Provider 表快照（#94）：`enabled == false` 者整体不参与——
     /// 既不写入插件，也不做占位符插值，因此其字段里的占位符错误不会牵连整个
     /// 插件失败。筛选与快照合并为一次克隆，且只克隆启用项。
-    pub(crate) fn enabled_providers(&self) -> Result<BTreeMap<String, Provider>, StoreError> {
+    pub(crate) fn enabled_providers(&self) -> Result<BTreeMap<String, Provider>, ConfigError> {
         Ok(providers::select_enabled_providers(&self.get()?.providers))
     }
 
     /// 全局变量表快照（ADR 0015）。
-    pub(crate) fn variables_snapshot(&self) -> Result<Variables, StoreError> {
+    pub(crate) fn variables_snapshot(&self) -> Result<Variables, ConfigError> {
         Ok(self.get()?.variables.clone())
     }
 
@@ -126,15 +121,15 @@ impl Store {
     /// （`Change::Unchanged` 即无变化：不写盘、不换状态）。
     /// 任何失败——保护态、校验不通过、目标不存在、落盘 IO 错误——都不改状态：
     /// 草稿随之丢弃，状态保持原样。
-    fn mutate<T>(
-        &mut self,
-        f: impl FnOnce(&mut Config) -> Result<Change<T>, StoreError>,
-    ) -> Result<T, StoreError> {
-        let mut next = self.get()?.clone();
+    fn mutate<T, E>(&mut self, f: impl FnOnce(&mut Config) -> Result<Change<T>, E>) -> Result<T, E>
+    where
+        E: From<ConfigError>,
+    {
+        let mut next = self.get().map_err(E::from)?.clone();
         match f(&mut next)? {
             Change::Unchanged(value) => Ok(value),
             Change::Changed(value) => {
-                self.persist(&next)?;
+                self.persist(&next).map_err(E::from)?;
                 self.state = ProtectedState::Ready(next);
                 Ok(value)
             }
@@ -142,7 +137,7 @@ impl Store {
     }
 
     /// 原子写入：先写同目录临时文件并落盘，再 rename 覆盖目标，避免半截文件。
-    fn persist(&self, config: &Config) -> Result<(), StoreError> {
+    fn persist(&self, config: &Config) -> Result<(), ConfigError> {
         persist::persist(&self.config_path, config)
     }
 
@@ -154,7 +149,7 @@ impl Store {
         &mut self,
         slug: &str,
         provider: Provider,
-    ) -> Result<(), StoreError> {
+    ) -> Result<(), ProviderError> {
         self.mutate(|config| providers::create(config, slug, provider))
     }
 
@@ -166,13 +161,13 @@ impl Store {
         &mut self,
         slug: &str,
         provider: Provider,
-    ) -> Result<Provider, StoreError> {
+    ) -> Result<Provider, ProviderError> {
         self.mutate(|config| providers::update(config, slug, provider))
     }
 
     /// 删除 Provider，其端点、模型与 API Key 随记录一并移除，不留孤儿数据。
     /// 返回被删除的记录。
-    pub(crate) fn delete_provider(&mut self, slug: &str) -> Result<Provider, StoreError> {
+    pub(crate) fn delete_provider(&mut self, slug: &str) -> Result<Provider, ProviderError> {
         self.mutate(|config| providers::delete(config, slug))
     }
 
@@ -185,7 +180,7 @@ impl Store {
         &mut self,
         slug: &str,
         enabled: bool,
-    ) -> Result<(), StoreError> {
+    ) -> Result<(), ProviderError> {
         self.mutate(|config| providers::set_enabled(config, slug, enabled))
     }
 
@@ -194,7 +189,7 @@ impl Store {
     /// 用新表对全部存量 Provider（含禁用者）插值一次：删除导致任一 Provider 的
     /// 引用无法解析时整表拒绝（provider↔variables 一致性）。空默认值合法
     /// （`${EMPTY}`）。
-    pub(crate) fn set_variables(&mut self, variables: Variables) -> Result<(), StoreError> {
+    pub(crate) fn set_variables(&mut self, variables: Variables) -> Result<(), VariableError> {
         // 名校验必须先于存储状态：`mutate` 第一句是 `get()?`，保护态会抢先报
         // `Corrupt`。非法名整表拒绝，与当前配置是否可读无关（见
         // `variable_table::validate_names`）。
@@ -209,27 +204,30 @@ impl Store {
     ///
     /// 同一临界区内复检来源与 id 冲突：插件服务的预检（`check_id_conflict`）与
     /// 此处写入分属两次加锁，两次锁之间另一来源可能已占用同一 id。
-    pub(crate) fn add_plugin(&mut self, plugin_entry: &PluginEntry) -> Result<(), StoreError> {
+    pub(crate) fn add_plugin(
+        &mut self,
+        plugin_entry: &PluginEntry,
+    ) -> Result<(), PluginEntryError> {
         self.mutate(|config| plugins::add(config, plugin_entry))
     }
 
     /// 删除插件条目，返回被删除的条目（调用方据此删除落位目录）。
-    pub(crate) fn delete_plugin(&mut self, source: &str) -> Result<PluginEntry, StoreError> {
+    pub(crate) fn delete_plugin(&mut self, source: &str) -> Result<PluginEntry, PluginEntryError> {
         self.mutate(|config| plugins::delete(config, source))
     }
 
-    pub(crate) fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
+    pub(crate) fn list_plugins(&self) -> Result<Vec<PluginEntry>, ConfigError> {
         Ok(self.get()?.plugins.clone())
     }
 
     /// 按来源取插件条目（`source` 即条目唯一身份）。
-    pub(crate) fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
+    pub(crate) fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, PluginEntryError> {
         self.get()?
             .plugins
             .iter()
             .find(|plugin| plugin.source == source)
             .cloned()
-            .ok_or_else(|| StoreError::missing_source(source))
+            .ok_or_else(|| PluginEntryError::missing_source(source))
     }
 
     /// 启用/禁用插件条目。
@@ -237,19 +235,19 @@ impl Store {
         &mut self,
         source: &str,
         enabled: bool,
-    ) -> Result<(), StoreError> {
+    ) -> Result<(), PluginEntryError> {
         self.mutate(|config| plugins::set_enabled(config, source, enabled))
     }
 
     /// 插件 id 冲突预检：同一 id 不得被**其它**来源的条目持有。
     ///
     /// 安装流程在落位前问一次、写入时再问一次（两次加锁之间可能被抢占）——
-    /// 两处问的是同一句规则，故错误类型也统一为 [`StoreError::DuplicateId`]。
+    /// 两处问的是同一句规则，故错误类型也统一为 [`PluginEntryError::DuplicateId`]。
     pub(crate) fn check_plugin_id_conflict(
         &self,
         source: &str,
         id: &str,
-    ) -> Result<(), StoreError> {
+    ) -> Result<(), PluginEntryError> {
         plugins::check_id_conflict(self.get()?, source, id)
     }
 }
@@ -265,45 +263,36 @@ pub(crate) struct AppStore {
 impl AppStore {
     /// 在读锁内执行闭包：闭包的返回值即脱离锁的那份自有值。
     ///
-    /// 锁守卫不出作用域——「不得持锁做 IO」这条纪律因此由类型保证，而不是靠
-    /// 注释提醒（此前散在 4 处注释里）。读多写少：list_plugins、
-    /// plugin_by_source、provider 列表等只读路径在同一 Store 上并发；写操作
-    /// 走 [`AppStore::with_write`] 独占。
+    /// 锁守卫不出作用域——调用方拿不到守卫，自己的 IO 便不会落在锁内。
+    /// 插件服务够不到这一层：它经 [`crate::plugin::ports`] 的端口访问配置
+    /// 存储，锁与落盘时机都在适配器一侧（#141 I-1）。
     ///
-    /// 闭包报出的错误按 `Into<String>` 归一：存储错误（`StoreError`）转成
-    /// 面向用户的原因，闭包自己造的文案原样带出。
-    pub(crate) fn with_read<T, E>(
-        &self,
-        f: impl FnOnce(&Store) -> Result<T, E>,
-    ) -> Result<T, String>
+    /// 锁边界不擦除错误类型（#141 I-3）：闭包的错误类型 `E` 原样透传——存储
+    /// 错误（[`ConfigError`] / [`ProviderError`] / [`PluginEntryError`] /
+    /// [`VariableError`]）由命令层经其 `Display` 归一为面向用户的文案；
+    /// 锁毒化经 [`LockPoisoned`] 折进 `E`（各错误类型各一段 `From` 实现）。
+    pub(crate) fn with_read<T, E>(&self, f: impl FnOnce(&Store) -> Result<T, E>) -> Result<T, E>
     where
-        E: Into<String>,
+        E: From<LockPoisoned>,
     {
-        let guard = self
-            .store
-            .read()
-            .map_err(|_| STORE_LOCK_POISONED.to_owned())?;
-        f(&guard).map_err(Into::into)
+        let guard = self.store.read().map_err(|_| LockPoisoned)?;
+        f(&guard)
     }
 
     /// 在写锁内执行闭包：独占期间所有读守卫与其它写守卫均需等待。
     ///
-    /// 锁被毒化同样报错。闭包只应做「改内存里的配置」这一件事——**不要在
-    /// 闭包里做 IO**：写路径的原子落盘由 [`Store`] 在闭包返回后完成（见
-    /// [`Store::mutate`]），但那一步仍在这把锁内——落盘期间持锁是既有取舍
-    /// （写路径要「改内存 + 落盘」原子完成），本方法保证的是**调用方**的
-    /// 锁守卫出不了作用域，故调用方自己的 IO 不会落在锁内。
+    /// 锁被毒化同样报错（经 [`LockPoisoned`] 折进闭包的错误类型）。写路径的
+    /// 原子落盘由 [`Store`] 在闭包返回后完成（见 [`Store::mutate`]），但那一步
+    /// 仍在这把锁内——落盘期间持锁是既有取舍（写路径要「改内存 + 落盘」原子
+    /// 完成）。锁守卫不出作用域，故调用方自己的 IO 不会落在锁内。
     pub(crate) fn with_write<T, E>(
         &self,
         f: impl FnOnce(&mut Store) -> Result<T, E>,
-    ) -> Result<T, String>
+    ) -> Result<T, E>
     where
-        E: Into<String>,
+        E: From<LockPoisoned>,
     {
-        let mut guard = self
-            .store
-            .write()
-            .map_err(|_| STORE_LOCK_POISONED.to_owned())?;
-        f(&mut guard).map_err(Into::into)
+        let mut guard = self.store.write().map_err(|_| LockPoisoned)?;
+        f(&mut guard)
     }
 }

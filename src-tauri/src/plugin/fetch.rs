@@ -5,10 +5,12 @@
 use reqwest::blocking::Client;
 use std::{io::Read, time::Duration};
 
+use crate::errors::FetchError;
+
 /// 拉取插件来源的字节。
 pub(crate) trait Fetcher: Send + Sync {
     /// 下载 `url` 指向的字节；失败以人类可读原因传播。
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, String>;
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, FetchError>;
 }
 
 /// 单次响应的体积上限：wasm 产物可达数十 MB，超出即视为异常来源而非静默截断。
@@ -30,7 +32,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) struct HttpFetcher {
     /// 客户端初始化失败（TLS 后端不可用）时保留原因：失败只落在本次拉取上，
     /// 不必让整个应用起不来。
-    client: Result<Client, String>,
+    client: Result<Client, FetchError>,
 }
 
 impl HttpFetcher {
@@ -41,7 +43,7 @@ impl HttpFetcher {
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(READ_TIMEOUT)
             .build()
-            .map_err(|e| format!("初始化 https 客户端失败：{e}"));
+            .map_err(|e| FetchError::client_init(e.to_string()));
         Self { client }
     }
 }
@@ -53,27 +55,24 @@ impl Default for HttpFetcher {
 }
 
 impl Fetcher for HttpFetcher {
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let client = self.client.as_ref().map_err(Clone::clone)?;
         // 4xx/5xx 不是 reqwest 的默认错误，必须显式转错误：
         // 否则 404 页面会被当作 manifest 去解析，报出误导性的校验错误。
         let response = client
             .get(url)
             .send()
-            .map_err(|e| format!("请求 {url} 失败：{e}"))?
+            .map_err(|e| FetchError::request(url, e.to_string()))?
             .error_for_status()
-            .map_err(|e| format!("请求 {url} 失败：{e}"))?;
+            .map_err(|e| FetchError::request(url, e.to_string()))?;
 
         let mut body = Vec::new();
         response
             .take(BODY_LIMIT + 1)
             .read_to_end(&mut body)
-            .map_err(|e| format!("读取 {url} 的响应失败：{e}"))?;
+            .map_err(|e| FetchError::read_response(url, e.to_string()))?;
         if body.len() as u64 > BODY_LIMIT {
-            return Err(format!(
-                "{url} 的响应超过 {} MiB 上限",
-                BODY_LIMIT / (1024 * 1024)
-            ));
+            return Err(FetchError::too_large(url, BODY_LIMIT / (1024 * 1024)));
         }
         Ok(body)
     }
@@ -87,13 +86,13 @@ pub(crate) mod testutil {
     };
 
     use super::Fetcher;
-    use crate::store::AppStore;
+    use crate::{errors::FetchError, store::AppStore};
 
     /// 测试替身：按 URL 返回预置响应；未预置的 URL 即失败——
     /// 测试因此绝不会发起真实网络请求。
     #[derive(Default)]
     pub(crate) struct StubFetcher {
-        responses: Mutex<BTreeMap<String, Result<Vec<u8>, String>>>,
+        responses: Mutex<BTreeMap<String, Result<Vec<u8>, FetchError>>>,
     }
 
     impl StubFetcher {
@@ -114,18 +113,18 @@ pub(crate) mod testutil {
             self.responses
                 .lock()
                 .unwrap()
-                .insert(url.to_owned(), Err(reason.to_owned()));
+                .insert(url.to_owned(), Err(FetchError::request(url, reason)));
         }
     }
 
     impl Fetcher for StubFetcher {
-        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        fn fetch(&self, url: &str) -> Result<Vec<u8>, FetchError> {
             self.responses
                 .lock()
                 .unwrap()
                 .get(url)
                 .cloned()
-                .unwrap_or_else(|| Err(format!("未预置的 URL：{url}")))
+                .unwrap_or_else(|| Err(FetchError::request(url, format!("未预置的 URL：{url}"))))
         }
     }
 
@@ -143,7 +142,7 @@ pub(crate) mod testutil {
     }
 
     impl Fetcher for LockProbeFetcher {
-        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        fn fetch(&self, url: &str) -> Result<Vec<u8>, FetchError> {
             assert!(
                 self.store.store.try_write().is_ok(),
                 "拉取 {url} 期间不得持有配置存储锁"

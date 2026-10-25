@@ -16,6 +16,8 @@ use wasmtime::{
 };
 use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
 
+use crate::errors::PluginError;
+
 use super::LoadedPlugin;
 
 /// 单次插件调用的执行预算（fuel）：投影任务的量级远小于该值，
@@ -68,11 +70,13 @@ impl WasiView for HostState {
 impl HostState {
     /// 预开放指定配置目录为写入面，配套资源限制，并在实例化之前就位插件配置的
     /// `form` 段（ADR 0018：组件 init 即可经 `get-config` import 读取）；用于实投影阶段。
-    fn new(tool_dir: &Path, plugin_id: String, form: Option<String>) -> Result<Self, String> {
+    fn new(tool_dir: &Path, plugin_id: String, form: Option<String>) -> Result<Self, PluginError> {
         let mut builder = WasiCtxBuilder::new();
         builder
             .preopened_dir(tool_dir, "/", FsPerms::ReadWrite)
-            .map_err(|e| format!("无法开放插件配置目录：{e}"))?;
+            .map_err(|e| PluginError::OpenConfigDir {
+                detail: e.to_string(),
+            })?;
         Ok(Self {
             table: ResourceTable::new(),
             ctx: builder.build(),
@@ -88,11 +92,15 @@ impl HostState {
 /// `log` 恒定提供（见 ADR 0013）：组件不引用该 import 即不受影响；但 WIT 包
 /// 版本升级后宿主只注册当前版本，按旧版合同编译的组件仍需重编译。
 /// 校验期与实投影期共用同一份配置，避免两条路径的 import 集合漂移。
-fn build_linker(engine: &Engine) -> Result<Linker<HostState>, String> {
+fn build_linker(engine: &Engine) -> Result<Linker<HostState>, PluginError> {
     let mut linker: Linker<HostState> = Linker::new(engine);
-    p2::add_to_linker_sync(&mut linker).map_err(|e| format!("初始化 WASI 宿主环境失败：{e}"))?;
+    p2::add_to_linker_sync(&mut linker).map_err(|e| PluginError::WasiInit {
+        detail: e.to_string(),
+    })?;
     bindings::PluginWorld::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |state| state)
-        .map_err(|e| format!("初始化插件 import 失败：{e}"))?;
+        .map_err(|e| PluginError::PluginImportInit {
+            detail: e.to_string(),
+        })?;
     Ok(linker)
 }
 
@@ -109,9 +117,11 @@ impl LoadedPlugin {
         &self,
         engine: &Engine,
         form: Option<String>,
-    ) -> Result<InstantiatedPlugin, String> {
+    ) -> Result<InstantiatedPlugin, PluginError> {
         let component =
-            Component::new(engine, &self.wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
+            Component::new(engine, &self.wasm).map_err(|e| PluginError::InvalidComponent {
+                detail: e.to_string(),
+            })?;
         // 预开放的写入面是装载时解析出的宿主绝对路径（见 `DeclaredConfigDir::resolve`）。
         let tool_path = self.meta.config_dir.clone();
         let mut store = wasmtime::Store::new(
@@ -121,10 +131,16 @@ impl LoadedPlugin {
         store.limiter(|s| &mut s.limits);
         store
             .set_fuel(FUEL_BUDGET)
-            .map_err(|e| format!("设置插件执行预算失败：{e}"))?;
+            .map_err(|e| PluginError::SetFuel {
+                detail: e.to_string(),
+            })?;
         let linker = build_linker(engine)?;
-        let world = bindings::PluginWorld::instantiate(&mut store, &component, &linker)
-            .map_err(|e| format!("插件接口不兼容：{e}"))?;
+        let world =
+            bindings::PluginWorld::instantiate(&mut store, &component, &linker).map_err(|e| {
+                PluginError::IncompatibleInterface {
+                    detail: e.to_string(),
+                }
+            })?;
         Ok(InstantiatedPlugin { store, world })
     }
 }
@@ -135,15 +151,22 @@ impl LoadedPlugin {
 /// 校验的对象是 **wasm 字节**，与「插件是否已装载」无关——故它不挂在已装载的
 /// 插件上，而是个独立入口：装配方要在解析配置目录（会建目录）之前问一句
 /// 「这份 wasm 是不是合法组件」，不必先建出目录来（见 ADR 0022）。
-pub(super) fn validate_component(engine: &Engine, wasm: &[u8], id: &str) -> Result<(), String> {
-    let component =
-        Component::new(engine, wasm).map_err(|e| format!("不是有效的 WASM 组件：{e}"))?;
+pub(super) fn validate_component(
+    engine: &Engine,
+    wasm: &[u8],
+    id: &str,
+) -> Result<(), PluginError> {
+    let component = Component::new(engine, wasm).map_err(|e| PluginError::InvalidComponent {
+        detail: e.to_string(),
+    })?;
     let linker = build_linker(engine)?;
     // 组件模型的 instantiate_pre 不接收 Store：返回 Pre<()> 表示类型检查通过，
     // 不触发组件 init、不调用 host 函数。这正是安装期校验所需的最小集合。
     linker
         .instantiate_pre(&component)
-        .map_err(|e| format!("插件接口不兼容：{e}"))?;
+        .map_err(|e| PluginError::IncompatibleInterface {
+            detail: e.to_string(),
+        })?;
     log::debug!("plugin validated: id={id}");
     Ok(())
 }
@@ -158,12 +181,13 @@ mod testutil {
 
     /// 已装载的插件：走真实装载路径（`PlacedPlugin::load` 解析 `config_dir`）。
     /// manifest 声明 `$HOME/.pi`，平台基准目录全部指向传入的临时目录，解析结果
-    /// 随插件一并返回——断言对着它写，路径不必硬编码两次。
+    /// 随插件一并返回——断言对着它写，路径不必硬编码两次。装载接收 [`Paths`]
+    /// 值、不读进程级全局（#141 I-4）。
     pub(crate) fn loaded_plugin(root: &Path, wasm: &[u8]) -> (LoadedPlugin, PathBuf) {
-        Paths::init_test(Paths::from_root(root));
+        let paths = Paths::from_root(root);
         let manifest = testutil::manifest_json("pi", "$HOME/.pi", "plugin.wasm");
         let loaded = PlacedPlugin::new(&root.join("placed"), manifest, wasm)
-            .load()
+            .load(&paths)
             .unwrap();
         let config_dir = loaded.meta.config_dir.clone();
         (loaded, config_dir)
