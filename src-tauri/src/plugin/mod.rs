@@ -44,7 +44,6 @@ use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
 use crate::{
-    errors::user_message,
     fs_util::{Durability, write_atomic},
     paths::Paths,
     plugin::builtin::BUILTINS,
@@ -351,8 +350,7 @@ impl PluginService {
             Ok(plugin_entries) => plugin_entries,
             Err(reason) => {
                 log::error!(
-                    "failed to read plugin entries from store during plugin startup: {}",
-                    user_message(reason)
+                    "failed to read plugin entries from store during plugin startup: {reason}"
                 );
                 return Ok(());
             }
@@ -406,7 +404,9 @@ impl PluginService {
     pub(crate) fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
         // 配置损坏时把原因原样带出去（哪个文件坏了、坏在哪）——「配置文件损坏」
         // 这四个字会让用户去猜是哪个文件。
-        let plugin_entries = store.with_read(|s| s.list_plugins()).map_err(user_message)?;
+        let plugin_entries = store
+            .with_read(|s| s.list_plugins())
+            .map_err(|err| err.to_string())?;
         let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
         let plugin_view =
             |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginView {

@@ -4,11 +4,14 @@
 //! [`providers`]（Provider 仓储）、[`plugins`]（插件条目仓储）、
 //! [`variable_table`]（变量表）与 [`persist`]（原子落盘）。
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, fmt::Display, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{provider::Provider, variables::Variables};
+use crate::{
+    provider::{Provider, ProviderInterpolationError},
+    variables::Variables,
+};
 
 /// 配置文件 schema 版本（见 ADR 0001）。
 pub(crate) const CONFIG_VERSION: u32 = 1;
@@ -60,7 +63,8 @@ fn default_true() -> bool {
     true
 }
 
-/// 配置存储的错误；结构化携带原因，面向用户的句式由 `crate::errors` 统一排版。
+/// 配置存储的错误；结构化携带原因，面向用户的句式由本类型的 [`Display`]
+/// 一处产出（消费方各自把它格式化成字符串——IPC 错误通道只收字符串）。
 #[derive(Debug, Clone)]
 pub(crate) enum StoreError {
     /// 配置文件存在但无法解析。
@@ -86,13 +90,9 @@ pub(crate) enum StoreError {
     DuplicateId { id: String, source: String },
     /// Provider 对（变更后的）全局变量表插值失败：变量未定义或占位符语法
     /// 错误。与投影时的插值失败同因同报，只是提前到落盘前拦截
-    /// （provider↔variables 一致性，ADR 0015）。句式由 `crate::errors` 一处
-    /// 产出，与投影时逐字一致。
-    Interpolation {
-        slug: String,
-        field: String,
-        reason: String,
-    },
+    /// （provider↔variables 一致性，ADR 0015）。包裹领域层的同一个错误类型，
+    /// 句式由它排版（见 [`ProviderInterpolationError`]），两条路径逐字一致。
+    Interpolation(ProviderInterpolationError),
     /// 变量名不合法：占位符无法引用（变量名语法见 ADR 0014）。
     InvalidVariableName { name: String },
     /// 配置存储的锁不可用（其它命令持锁期间 panic 毒化了锁）。
@@ -148,6 +148,49 @@ impl StoreError {
     }
 }
 
+impl Display for StoreError {
+    /// 面向最终用户的一句话：把结构化原因排版成可读文案。
+    ///
+    /// 句式由本实现一处产出——命令层与插件服务各自把本错误格式化成字符串
+    /// （IPC 错误通道只收字符串），同因同报、逐字一致。插值失败一句转给
+    /// 领域层的 [`ProviderInterpolationError`]（同一句式只有那一份实现）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Corrupt { path, detail } => write!(
+                f,
+                "配置文件已损坏：{}\n原因：{detail}\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
+                path.display()
+            ),
+            StoreError::UnsupportedVersion { path, found } => write!(
+                f,
+                "配置文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用仅支持 {CONFIG_VERSION}。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
+                path.display()
+            ),
+            StoreError::Io { path, detail } => {
+                write!(f, "读写配置文件失败：{}\n原因：{detail}", path.display())
+            }
+            StoreError::Serialize { detail } => {
+                write!(f, "序列化配置文件失败\n原因：{detail}")
+            }
+            StoreError::DuplicateSlug { slug } => write!(f, "已存在同名 Provider：{slug}"),
+            StoreError::MissingSlug { slug } => write!(f, "Provider 不存在：{slug}"),
+            StoreError::MissingSource { source } => write!(f, "插件条目不存在：{source}"),
+            StoreError::DuplicateSource { source } => {
+                write!(f, "已存在同一来源的插件条目：{source}")
+            }
+            StoreError::DuplicateId { id, source } => {
+                write!(f, "插件 id「{id}」已被来源 {source} 占用")
+            }
+            StoreError::Interpolation(error) => write!(f, "{error}"),
+            StoreError::InvalidVariableName { name } => write!(
+                f,
+                "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
+            ),
+            StoreError::Unavailable => write!(f, "{}", super::STORE_LOCK_POISONED),
+        }
+    }
+}
+
 /// 一次配置变更的结果：要不要落盘，以及要带回给调用方的领域值。
 ///
 /// `Changed` 落盘并替换内存状态；`Unchanged` 什么都不做（幂等路径：
@@ -157,4 +200,142 @@ pub(super) enum Change<T> {
     Changed(T),
     /// 无变化：不写盘、不动内存状态。
     Unchanged(T),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::provider::FieldError;
+
+    /// 落盘前拦截的插值失败文案逐字断言：slug、字段名、原因三者都在句子里，
+    /// 且与投影时拦截同一句式（ADR 0015「报错与投影时同因同报」；句式由
+    /// [`ProviderInterpolationError`] 独家产出）。
+    #[test]
+    fn interpolation_store_error_message_is_verbatim() {
+        let err = StoreError::Interpolation(ProviderInterpolationError {
+            slug: "gateway".to_owned(),
+            error: FieldError {
+                field: "base_url.openai-completions".to_owned(),
+                reason: "No such variable: $HOST".to_owned(),
+            },
+        });
+
+        assert_eq!(
+            err.to_string(),
+            "Provider「gateway」的 base_url.openai-completions 插值失败：No such variable: $HOST"
+        );
+    }
+
+    /// 保护态文案逐字钉住：路径、原因与修复指引三段排版都在。
+    #[test]
+    fn corrupt_error_message_is_verbatim() {
+        let err = StoreError::Corrupt {
+            path: PathBuf::from("/home/u/.maestro/config.json"),
+            detail: "expected value at line 1 column 1".to_owned(),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "配置文件已损坏：/home/u/.maestro/config.json\n原因：expected value at line 1 column 1\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。"
+        );
+    }
+
+    #[test]
+    fn unsupported_version_error_message_is_verbatim() {
+        let err = StoreError::UnsupportedVersion {
+            path: PathBuf::from("/home/u/.maestro/config.json"),
+            found: 99,
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "配置文件版本不受支持：/home/u/.maestro/config.json\n文件中的 version 为 99，当前应用仅支持 1。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。"
+        );
+    }
+
+    #[test]
+    fn io_error_message_is_verbatim() {
+        let err = StoreError::Io {
+            path: PathBuf::from("/home/u/.maestro/config.json"),
+            detail: "Permission denied (os error 13)".to_owned(),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "读写配置文件失败：/home/u/.maestro/config.json\n原因：Permission denied (os error 13)"
+        );
+    }
+
+    #[test]
+    fn serialize_error_message_is_verbatim() {
+        let err = StoreError::Serialize {
+            detail: "serializer error".to_owned(),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "序列化配置文件失败\n原因：serializer error"
+        );
+    }
+
+    #[test]
+    fn slug_and_source_error_messages_are_verbatim() {
+        assert_eq!(
+            StoreError::DuplicateSlug {
+                slug: "foo".to_owned()
+            }
+            .to_string(),
+            "已存在同名 Provider：foo"
+        );
+        assert_eq!(
+            StoreError::MissingSlug {
+                slug: "ghost".to_owned()
+            }
+            .to_string(),
+            "Provider 不存在：ghost"
+        );
+        assert_eq!(
+            StoreError::MissingSource {
+                source: "builtin:pi".to_owned()
+            }
+            .to_string(),
+            "插件条目不存在：builtin:pi"
+        );
+        assert_eq!(
+            StoreError::DuplicateSource {
+                source: "https://example.com/manifest.json".to_owned()
+            }
+            .to_string(),
+            "已存在同一来源的插件条目：https://example.com/manifest.json"
+        );
+        assert_eq!(
+            StoreError::DuplicateId {
+                id: "pi".to_owned(),
+                source: "builtin:pi".to_owned()
+            }
+            .to_string(),
+            "插件 id「pi」已被来源 builtin:pi 占用"
+        );
+    }
+
+    #[test]
+    fn invalid_variable_name_error_message_is_verbatim() {
+        let err = StoreError::InvalidVariableName {
+            name: "a-b".to_owned(),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "变量名不合法：「a-b」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
+        );
+    }
+
+    /// 锁毒化与 `String` 错误域同句：两条加锁路径对用户是同一件事。
+    #[test]
+    fn lock_poisoned_folds_into_the_same_reason_for_both_error_domains() {
+        assert_eq!(String::from(crate::store::LockPoisoned), "配置存储不可用");
+        assert_eq!(StoreError::Unavailable.to_string(), "配置存储不可用");
+    }
 }

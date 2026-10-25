@@ -6,7 +6,6 @@ use tauri::State;
 use super::log_outcome;
 use crate::{
     AppStore,
-    errors::user_message,
     provider::{ApiKey, Endpoints, ModelEntry, Protocol, Provider},
 };
 
@@ -57,7 +56,9 @@ impl From<ProviderRequest> for Provider {
 pub(crate) fn list_providers(
     store: State<'_, AppStore>,
 ) -> Result<BTreeMap<String, Provider>, String> {
-    let outcome = store.with_read(|s| s.providers_snapshot()).map_err(user_message);
+    let outcome = store
+        .with_read(|s| s.providers_snapshot())
+        .map_err(|err| err.to_string());
     log_outcome("list_providers", None, &outcome);
     outcome
 }
@@ -71,7 +72,7 @@ pub(crate) fn create_provider(
     let context = format!("slug={slug}");
     let outcome = store
         .with_write(move |s| s.create_provider(&slug, provider.into()))
-        .map_err(user_message);
+        .map_err(|err| err.to_string());
     log_outcome("create_provider", Some(&context), &outcome);
     outcome
 }
@@ -85,7 +86,7 @@ pub(crate) fn update_provider(
     let context = format!("slug={slug}");
     let outcome = store
         .with_write(move |s| s.update_provider(&slug, provider.into()).map(|_| ()))
-        .map_err(user_message);
+        .map_err(|err| err.to_string());
     log_outcome("update_provider", Some(&context), &outcome);
     outcome
 }
@@ -94,7 +95,7 @@ pub(crate) fn update_provider(
 pub(crate) fn delete_provider(store: State<'_, AppStore>, slug: String) -> Result<(), String> {
     let outcome = store
         .with_write(|s| s.delete_provider(&slug).map(|_| ()))
-        .map_err(user_message);
+        .map_err(|err| err.to_string());
     log_outcome("delete_provider", Some(&format!("slug={slug}")), &outcome);
     outcome
 }
@@ -109,7 +110,7 @@ pub(crate) fn set_provider_enabled(
     let context = format!("slug={slug} enabled={enabled}");
     let outcome = store
         .with_write(|s| s.set_provider_enabled(&slug, enabled))
-        .map_err(user_message);
+        .map_err(|err| err.to_string());
     log_outcome("set_provider_enabled", Some(&context), &outcome);
     outcome
 }

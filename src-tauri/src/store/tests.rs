@@ -1,7 +1,6 @@
 //! 配置存储的单元测试：读写、落盘往返、校验与保护态。
 
 use super::*;
-use crate::errors::user_message;
 use crate::paths::Paths;
 use crate::provider::{ApiKey, ModelEntry, Protocol};
 
@@ -170,12 +169,9 @@ fn update_provider_missing_slug_is_rejected_without_upsert() {
         )
         .unwrap_err();
     assert!(matches!(err, StoreError::MissingSlug { .. }));
-    assert!(user_message(err).contains("ghost"));
+    assert!(err.to_string().contains("ghost"));
     assert!(store.get().unwrap().providers.is_empty());
-    assert!(
-        !paths.config_path().exists(),
-        "报错路径不得静默写入文件"
-    );
+    assert!(!paths.config_path().exists(), "报错路径不得静默写入文件");
 }
 
 #[test]
@@ -300,7 +296,7 @@ fn delete_provider_missing_slug_is_rejected() {
     let err = store.delete_provider("ghost").unwrap_err();
 
     assert!(matches!(err, StoreError::MissingSlug { .. }));
-    assert!(user_message(err).contains("ghost"));
+    assert!(err.to_string().contains("ghost"));
 }
 
 #[test]
@@ -521,7 +517,10 @@ fn corrupt_file_reports_error_with_path_and_refuses_writes() {
 
     let err = store.get().unwrap_err();
     assert!(matches!(err, StoreError::Corrupt { .. }));
-    assert!(user_message(err).contains(paths.config_path().to_str().unwrap()));
+    assert!(
+        err.to_string()
+            .contains(paths.config_path().to_str().unwrap())
+    );
 
     assert!(
         store
@@ -537,28 +536,24 @@ fn corrupt_file_reports_error_with_path_and_refuses_writes() {
             )
             .is_err()
     );
-    assert_eq!(
-        fs::read_to_string(paths.config_path()).unwrap(),
-        original
-    );
+    assert_eq!(fs::read_to_string(paths.config_path()).unwrap(), original);
 }
 
 #[test]
 fn unsupported_version_reports_error_with_path_and_refuses_writes() {
     let (_home, paths) = temp_paths();
     fs::create_dir_all(paths.maestro_dir()).unwrap();
-    fs::write(
-        paths.config_path(),
-        r#"{"version":99,"providers":{}}"#,
-    )
-    .unwrap();
+    fs::write(paths.config_path(), r#"{"version":99,"providers":{}}"#).unwrap();
     let original = fs::read_to_string(paths.config_path()).unwrap();
 
     let mut store = Store::new(paths.config_path());
 
     let err = store.get().unwrap_err();
     assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
-    assert!(user_message(err).contains(paths.config_path().to_str().unwrap()));
+    assert!(
+        err.to_string()
+            .contains(paths.config_path().to_str().unwrap())
+    );
 
     assert!(
         store
@@ -574,10 +569,7 @@ fn unsupported_version_reports_error_with_path_and_refuses_writes() {
             )
             .is_err()
     );
-    assert_eq!(
-        fs::read_to_string(paths.config_path()).unwrap(),
-        original
-    );
+    assert_eq!(fs::read_to_string(paths.config_path()).unwrap(), original);
 }
 
 #[test]
@@ -801,11 +793,7 @@ fn store_does_not_validate_model_ids() {
 fn plugins_section_defaults_to_empty_for_legacy_config_files() {
     let (_home, paths) = temp_paths();
     fs::create_dir_all(paths.maestro_dir()).unwrap();
-    fs::write(
-        paths.config_path(),
-        r#"{"version":1,"providers":{}}"#,
-    )
-    .unwrap();
+    fs::write(paths.config_path(), r#"{"version":1,"providers":{}}"#).unwrap();
 
     let store = Store::new(paths.config_path());
 
@@ -821,11 +809,7 @@ fn plugins_section_defaults_to_empty_for_legacy_config_files() {
 fn variables_default_to_empty_and_serialize_as_an_empty_object() {
     let (_home, paths) = temp_paths();
     fs::create_dir_all(paths.maestro_dir()).unwrap();
-    fs::write(
-        paths.config_path(),
-        r#"{"version":1,"providers":{}}"#,
-    )
-    .unwrap();
+    fs::write(paths.config_path(), r#"{"version":1,"providers":{}}"#).unwrap();
 
     let store = Store::new(paths.config_path());
 
@@ -991,21 +975,18 @@ fn create_provider_rejects_references_to_undefined_variables() {
         )
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation { .. }));
-    let message = user_message(err);
+    assert!(matches!(err, StoreError::Interpolation(_)));
+    let message = err.to_string();
     assert!(message.contains("HOST"), "{message}");
     assert!(message.contains("base_url.openai-completions"), "{message}");
     assert!(store.get().unwrap().providers.is_empty());
-    assert!(
-        !paths.config_path().exists(),
-        "报错路径不得静默写入文件"
-    );
+    assert!(!paths.config_path().exists(), "报错路径不得静默写入文件");
 }
 
 /// 落盘前拦截与投影时拦截逐字同报：同一份配置、同一个原因，两条路径给出
 /// 完全相同的一句文案（ADR 0015「报错与投影时同因同报」；共享构造函数见
-/// issue #128）。逐字断言本体住在 `crate::errors`（句式的家），这里钉的是
-/// **两条路径汇入同一句式**。
+/// issue #128）。逐字断言本体住在 `provider::ProviderInterpolationError`
+/// （句式的家），这里钉的是 **两条路径汇入同一句式**。
 #[test]
 fn store_and_projection_report_interpolation_failures_identically() {
     let (_home, paths) = temp_paths();
@@ -1017,16 +998,13 @@ fn store_and_projection_report_interpolation_failures_identically() {
     let mut providers = BTreeMap::new();
     providers.insert("gateway".to_owned(), provider.clone());
 
-    let stored = user_message(store.create_provider("gateway", provider).unwrap_err());
+    let stored = store
+        .create_provider("gateway", provider)
+        .unwrap_err()
+        .to_string();
     let projected = crate::provider::interpolate_providers(&providers, &Variables::new())
-        .map_err(|error| {
-            crate::errors::interpolation_failure_message(
-                &error.slug,
-                &error.error.field,
-                &error.error.reason,
-            )
-        })
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
 
     assert_eq!(
         stored, projected,
@@ -1102,7 +1080,7 @@ fn update_provider_rejects_undefined_variables_and_keeps_the_original() {
         )
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation { .. }));
+    assert!(matches!(err, StoreError::Interpolation(_)));
     let reopened = Store::new(paths.config_path());
     assert_eq!(
         reopened.get().unwrap().providers["gateway"]
@@ -1142,8 +1120,8 @@ fn set_variables_rejects_removing_a_variable_in_use() {
         .set_variables(BTreeMap::from([("UNUSED".to_owned(), "x".to_owned())]))
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation { .. }));
-    let message = user_message(err);
+    assert!(matches!(err, StoreError::Interpolation(_)));
+    let message = err.to_string();
     assert!(message.contains("HOST"), "{message}");
     assert!(message.contains("gateway"), "{message}");
     let reopened = Store::new(paths.config_path());
@@ -1235,8 +1213,8 @@ fn create_provider_rejects_malformed_placeholders() {
         )
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation { .. }));
-    assert!(user_message(err).contains("base_url.openai-completions"));
+    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(err.to_string().contains("base_url.openai-completions"));
     assert!(store.get().unwrap().providers.is_empty());
 }
 
@@ -1271,7 +1249,7 @@ fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
         )]))
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation { .. }));
+    assert!(matches!(err, StoreError::Interpolation(_)));
     assert_eq!(
         fs::read_to_string(paths.config_path()).unwrap(),
         original,
@@ -1563,7 +1541,7 @@ fn disabled_provider_is_still_subject_to_interpolation_checks() {
             },
         )
         .unwrap_err();
-    assert!(matches!(err, StoreError::Interpolation { .. }));
+    assert!(matches!(err, StoreError::Interpolation(_)));
 
     // 先建一个引用 HOST 的启用 Provider，再禁用。
     store
@@ -1588,7 +1566,7 @@ fn disabled_provider_is_still_subject_to_interpolation_checks() {
 
     // 禁用项引用的变量同样不能删除：禁用者仍算「在使用中」。
     let err = store.set_variables(BTreeMap::new()).unwrap_err();
-    assert!(matches!(err, StoreError::Interpolation { .. }));
+    assert!(matches!(err, StoreError::Interpolation(_)));
     assert!(
         store.get().unwrap().variables.contains_key("HOST"),
         "被拒的删变量不改配置"
@@ -1617,7 +1595,7 @@ fn update_provider_to_disabled_still_checks_interpolation() {
             },
         )
         .unwrap_err();
-    assert!(matches!(err, StoreError::Interpolation { .. }));
+    assert!(matches!(err, StoreError::Interpolation(_)));
 
     let provider = &store.get().unwrap().providers["gateway"];
     assert!(provider.enabled, "被拒的更新不改配置");

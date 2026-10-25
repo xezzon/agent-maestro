@@ -6,10 +6,7 @@
 
 use std::{fs, path::Path, sync::Arc};
 
-use crate::{
-    errors::user_message,
-    store::{AppStore, PluginEntry, StoreError},
-};
+use crate::store::{AppStore, PluginEntry, StoreError};
 
 use super::{
     INSTALL_LOCK_POISONED, LoadedPlugin, PlacedPlugin, PluginService, PluginState,
@@ -47,13 +44,14 @@ impl PluginService {
         // 1. 来源即条目唯一身份：重复添加在发起下载之前拒绝。
         let duplicate = store
             .with_read(|s| s.list_plugins())
-            .map_err(user_message)?
+            .map_err(|err| err.to_string())?
             .iter()
             .any(|plugin| plugin.source == source_text);
         if duplicate {
-            return Err(user_message(StoreError::DuplicateSource {
+            return Err(StoreError::DuplicateSource {
                 source: source_text,
-            }));
+            }
+            .to_string());
         }
 
         // 2. 获取 manifest 与 wasm、校验并落位；获取与校验全程不持配置存储锁。
@@ -62,7 +60,7 @@ impl PluginService {
         // id 冲突预检：与写入时的复检问同一句规则（见 `Store::check_plugin_id_conflict`）。
         store
             .with_read(|s| s.check_plugin_id_conflict(&source_text, &manifest.id))
-            .map_err(user_message)?;
+            .map_err(|err| err.to_string())?;
         // 链接期校验先于解析配置目录与落位：wasm 不是组件或接口不兼容时不建
         // 目录、不落位、不写条目。仅做字节反序列化与类型检查，不触发组件 init、
         // 不预开放真实配置目录；避免未授权的 init 代码在安装失败时仍写入
@@ -85,13 +83,11 @@ impl PluginService {
             // 清理失败时把残留路径一并回报：避免注释承诺与实际行为偏离。
             if let Err(uninstall_err) = loaded.plugin.uninstall() {
                 return Err(format!(
-                    "{}；落位目录清理失败：{}（残留路径：{}）",
-                    user_message(e.clone()),
-                    uninstall_err,
+                    "{e}；落位目录清理失败：{uninstall_err}（残留路径：{}）",
                     loaded.plugin.path().display()
                 ));
             }
-            return Err(user_message(e));
+            return Err(e.to_string());
         }
         self.entries
             .write()
@@ -209,7 +205,7 @@ impl PluginService {
 
         let entry = store
             .with_read(|s| s.plugin_by_source(source))
-            .map_err(user_message)?;
+            .map_err(|err| err.to_string())?;
         if entry.enabled == enabled {
             return Ok(());
         }
@@ -237,7 +233,7 @@ impl PluginService {
                 guard.set_plugin_enabled(source, enabled)?;
                 Ok(Some(entry))
             })
-            .map_err(user_message)?;
+            .map_err(|err| err.to_string())?;
         let Some(entry) = entry else {
             return Ok(());
         };
@@ -287,7 +283,7 @@ impl PluginService {
                 Ok(entry) => entry,
                 // 条目已不存在：上一次移除已连同落位目录一并删除，幂等成功。
                 Err(StoreError::MissingSource { .. }) => return Ok(None),
-                Err(e) => return Err(user_message(e)),
+                Err(e) => return Err(e.to_string()),
             };
 
             // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
@@ -297,7 +293,7 @@ impl PluginService {
                 .remove(&entry.id);
 
             // 2. 删配置条目（锁内读-改-写，与读条目同处一个临界区）。
-            guard.delete_plugin(source).map_err(user_message)?;
+            guard.delete_plugin(source).map_err(|err| err.to_string())?;
             Ok(Some(entry))
         })?;
         let Some(entry) = entry else {
@@ -327,7 +323,7 @@ impl PluginService {
         // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
         let entry = store
             .with_read(|s| s.plugin_by_source(source))
-            .map_err(user_message)?;
+            .map_err(|err| err.to_string())?;
 
         // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。
         //    manifest 只解析这一次，解析结果直接交给后面的校验与装配。

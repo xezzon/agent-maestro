@@ -343,9 +343,9 @@ impl Provider {
 
 /// 跨 Provider 插值失败：出错的条目（slug）与其字段级失败。
 ///
-/// 只携带结构化原因，不产出句式——面向用户的文案（slug + 字段名 + 原因入句）
-/// 由展示层（`crate::errors`）一处排版：落盘前拦截（`StoreError::Interpolation`）
-/// 与投影时拦截（调用方对本类型的排版）据此同因同报、逐字一致。
+/// 面向用户的句式由本类型独家产出（见 [`Display`]）：slug + 字段名 + 原因入句。
+/// 落盘前拦截（`StoreError::Interpolation` 包裹本类型）与投影时拦截（调用方直接
+/// 格式化本类型）据此同因同报、逐字一致——同一句式只有这一处实现。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderInterpolationError {
     /// 出错的 Provider（slug）。
@@ -354,13 +354,24 @@ pub(crate) struct ProviderInterpolationError {
     pub(crate) error: FieldError,
 }
 
+impl Display for ProviderInterpolationError {
+    /// 插值失败的面向用户文案：slug + 字段名 + 原因逐字入句。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Provider「{}」的 {} 插值失败：{}",
+            self.slug, self.error.field, self.error.reason
+        )
+    }
+}
+
 /// 对传入的每个 Provider 插值，返回替换后的字面值副本。
 ///
 /// 作用域＝Provider 中除 `api_key`、模型 `id` 与 header **键**外的字符串值
 /// （ADR 0015；header 的值是配置值、参与插值）。
 /// 是否参与投影由调用方决定：本函数不感知 `enabled`，对传入的每一项都插值；
-/// 任一字段失败即整体失败，失败原因含 slug + 字段名 + 库报错（由调用方排版），
-/// 不含值与密钥。
+/// 任一字段失败即整体失败，失败原因含 slug + 字段名 + 库报错
+/// （[`ProviderInterpolationError`] 自带面向用户的句式），不含值与密钥。
 ///
 /// 与 [`Provider::interpolate`]/[`ModelEntry::interpolate`] 同住一处：本模块
 /// 持有「Provider 的插值作用域」的全部三层（逐字段、逐条目、跨 Provider 编排），
@@ -389,6 +400,25 @@ pub(crate) fn interpolate_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 插值失败句式逐字钉住：slug + 字段名 + 原因逐字入句。
+    /// 落盘前拦截（`StoreError::Interpolation` 包裹本类型）与投影时拦截共用
+    /// 这一句式：同因同报、逐字一致（ADR 0015）。
+    #[test]
+    fn interpolation_failure_message_renders_slug_field_and_reason() {
+        let error = ProviderInterpolationError {
+            slug: "gateway".to_owned(),
+            error: FieldError {
+                field: "base_url.openai-completions".to_owned(),
+                reason: "No such variable: $HOST".to_owned(),
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "Provider「gateway」的 base_url.openai-completions 插值失败：No such variable: $HOST"
+        );
+    }
 
     #[test]
     fn endpoints_round_trip_explicit_empty_slots_verbatim() {
@@ -873,8 +903,8 @@ mod tests {
     /// 且与落盘前拦截（`store::StoreError::Interpolation`）同一句式。
     ///
     /// 原因取自库（`interpolate_value` 的真实报错）而非写死：句式是展示层的
-    /// 契约（`crate::errors` 一处产出），库的措辞由 ADR 0014 的换库哨兵盯着
-    /// （换库即红，见 `interpolate` 模块的换库哨兵测试）。
+    /// 契约（`ProviderInterpolationError` 独家产出），库的措辞由 ADR 0014 的
+    /// 换库哨兵盯着（换库即红，见 `interpolate` 模块的换库哨兵测试）。
     #[test]
     fn provider_interpolation_failure_message_is_verbatim() {
         let mut providers = BTreeMap::new();
@@ -893,11 +923,7 @@ mod tests {
         let err = interpolate_providers(&providers, &vars(&[])).unwrap_err();
 
         assert_eq!(
-            crate::errors::interpolation_failure_message(
-                &err.slug,
-                &err.error.field,
-                &err.error.reason
-            ),
+            err.to_string(),
             format!("Provider「gateway」的 base_url.openai-completions 插值失败：{reason}")
         );
     }

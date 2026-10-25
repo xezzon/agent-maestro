@@ -9,8 +9,9 @@
 //! 结构知识在各自的配置类型（`Provider::interpolate`／`ModelEntry::interpolate`），
 //! 跨 Provider 的编排在 `provider::interpolate_providers`。
 //!
-//! 插值失败的面向用户句式由 `crate::errors` 一处产出：落盘前拦截
-//! （`StoreError::Interpolation`）与投影时拦截共用它，同因同报、逐字一致。
+//! 插值失败的面向用户句式由 `provider::ProviderInterpolationError` 一处产出：
+//! 落盘前拦截（`StoreError::Interpolation` 包裹它）与投影时拦截共用它，
+//! 同因同报、逐字一致。
 
 use crate::variables::Variables;
 

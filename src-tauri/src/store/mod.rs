@@ -295,13 +295,10 @@ impl AppStore {
     /// 走 [`AppStore::with_write`] 独占。
     ///
     /// 锁边界不擦除错误类型（#141 I-3）：闭包的错误类型 `E` 原样透传——存储
-    /// 错误（[`StoreError`]）由命令层经 `crate::errors::user_message` 归一为
-    /// 面向用户的文案；锁毒化经 [`LockPoisoned`] 折进 `E`（两个错误域各一段
-    /// `From` 实现，见 [`LockPoisoned`]）。
-    pub(crate) fn with_read<T, E>(
-        &self,
-        f: impl FnOnce(&Store) -> Result<T, E>,
-    ) -> Result<T, E>
+    /// 错误（[`StoreError`]）由命令层经其 `Display` 归一为面向用户的文案；
+    /// 锁毒化经 [`LockPoisoned`] 折进 `E`（两个错误域各一段 `From` 实现，见
+    /// [`LockPoisoned`]）。
+    pub(crate) fn with_read<T, E>(&self, f: impl FnOnce(&Store) -> Result<T, E>) -> Result<T, E>
     where
         E: From<LockPoisoned>,
     {

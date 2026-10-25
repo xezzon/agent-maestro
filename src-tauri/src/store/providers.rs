@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    provider::{FieldError, Provider},
+    provider::{FieldError, Provider, ProviderInterpolationError},
     variables::Variables,
 };
 
@@ -97,13 +97,12 @@ pub(super) fn set_enabled(
 }
 
 /// Provider 插值失败 → 存储错误：与投影时（`interpolate_providers`）同因同报、
-/// 同款文案，只是提前到落盘前。
+/// 同款文案，只是提前到落盘前——包裹领域层的同一个错误类型，句式只有一份。
 fn interpolation_error(slug: &str, error: FieldError) -> StoreError {
-    StoreError::Interpolation {
+    StoreError::Interpolation(ProviderInterpolationError {
         slug: slug.to_owned(),
-        field: error.field,
-        reason: error.reason,
-    }
+        error,
+    })
 }
 
 /// Provider 落盘前的插值校验（provider↔variables 一致性，ADR 0015）。

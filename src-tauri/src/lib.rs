@@ -1,5 +1,4 @@
 mod command;
-mod errors;
 mod fs_util;
 mod interpolate;
 mod logging;
@@ -18,7 +17,6 @@ use command::{
     list_providers, list_variables, reload_plugin, remove_plugin, set_plugin_config,
     set_plugin_enabled, set_provider_enabled, set_variables, update_provider,
 };
-use errors::user_message;
 use plugin::PluginService;
 use std::sync::RwLock;
 use store::{AppStore, Store};
@@ -123,7 +121,7 @@ pub fn run() {
                     config.plugins.len()
                 ),
                 Err(err) => {
-                    log::error!("startup: config store unavailable: {}", user_message(err))
+                    log::error!("startup: config store unavailable: {err}")
                 }
             }
             Ok(())
