@@ -48,12 +48,6 @@ impl HttpFetcher {
     }
 }
 
-impl Default for HttpFetcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Fetcher for HttpFetcher {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let client = self.client.as_ref().map_err(Clone::clone)?;

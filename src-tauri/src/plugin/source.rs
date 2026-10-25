@@ -71,6 +71,13 @@ pub(crate) fn is_https_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https" && parsed.has_host())
 }
 
+/// 来源是否指向内置插件（`builtin:<id>` 前缀）。
+///
+/// 「是不是内置」此前在列表与移除两处各判一次，两处问的是同一句规则。
+pub(crate) fn is_builtin_source(source: &str) -> bool {
+    matches!(PluginSource::parse(source), Some(PluginSource::Builtin(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -37,10 +37,7 @@ impl PluginService {
         source: &str,
         plugin_config: &PluginConfig,
     ) -> Result<(), PluginError> {
-        let _install_guard = self
-            .install_lock
-            .lock()
-            .map_err(|_| PluginError::InstallLockUnavailable)?;
+        let _install_guard = self.lock_install()?;
 
         // 条目与变量表同取一次读锁：校验用的变量表与落位用的条目来自同一份配置，
         // 中间不插入 `set_variables`（见 `PluginStore::plugin_entry_with_variables`）。

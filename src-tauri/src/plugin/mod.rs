@@ -40,7 +40,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,7 @@ pub(crate) use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, parse_placed};
 use ports::PluginEntries;
-use source::PluginSource;
+use source::is_builtin_source;
 
 /// 落位目录中的 manifest 文件名。
 const PLACED_MANIFEST: &str = "manifest.json";
@@ -111,11 +111,7 @@ impl PlacedPlugin {
         let wasm =
             fs::read(&wasm_path).map_err(|e| PluginError::read_file(&wasm_path, e.to_string()))?;
 
-        Ok(Self {
-            plugin_dir: plugin_dir.to_path_buf(),
-            raw_manifest,
-            wasm: Arc::from(wasm),
-        })
+        Ok(Self::new(plugin_dir, raw_manifest, wasm.as_slice()))
     }
 
     /// 落位目录的绝对路径（暴露给错误信息，便于用户手动清理）。
@@ -345,6 +341,16 @@ impl PluginService {
         }
     }
 
+    /// 取得安装锁：安装类流程（添加/启停/移除/重载/写配置）共用同一把独占锁。
+    ///
+    /// 锁序 `install_lock` → store → entries：端口的每次读写各占一把短临界区，
+    /// 注册表锁在其外。
+    fn lock_install(&self) -> Result<MutexGuard<'_, ()>, PluginError> {
+        self.install_lock
+            .lock()
+            .map_err(|_| PluginError::InstallLockUnavailable)
+    }
+
     /// 应用启动：从配置条目装载插件注册表（装载失败进错误态，离线可用），
     /// 并补装配置中缺失的内置插件——与其余来源同一安装管线（落位 + 写条目）。
     ///
@@ -423,10 +429,7 @@ impl PluginService {
         let plugin_record =
             |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginRecord {
                 source: entry.source.clone(),
-                builtin: matches!(
-                    PluginSource::parse(&entry.source),
-                    Some(PluginSource::Builtin(_))
-                ),
+                builtin: is_builtin_source(&entry.source),
                 enabled: entry.enabled,
                 id: entry.id.clone(),
                 config_dir: meta.map(|m| m.config_dir.clone()),
@@ -435,18 +438,13 @@ impl PluginService {
             };
         Ok(plugin_entries
             .iter()
-            .map(|entry| {
-                let plugin = plugins.get(&entry.id);
-                match plugin {
-                    Some(plugin) => match plugin {
-                        PluginState::Loaded(loaded_plugin) => {
-                            plugin_record(entry, Some(&loaded_plugin.meta), None)
-                        }
-                        PluginState::Disabled(meta) => plugin_record(entry, Some(meta), None),
-                        PluginState::Error(err) => plugin_record(entry, None, Some(err.to_owned())),
-                    },
-                    None => plugin_record(entry, None, Some(format!("插件 {} 未加载", entry.id))),
+            .map(|entry| match plugins.get(&entry.id) {
+                Some(PluginState::Loaded(loaded_plugin)) => {
+                    plugin_record(entry, Some(&loaded_plugin.meta), None)
                 }
+                Some(PluginState::Disabled(meta)) => plugin_record(entry, Some(meta), None),
+                Some(PluginState::Error(err)) => plugin_record(entry, None, Some(err.to_owned())),
+                None => plugin_record(entry, None, Some(format!("插件 {} 未加载", entry.id))),
             })
             .collect())
     }

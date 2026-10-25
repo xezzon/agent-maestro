@@ -17,7 +17,7 @@ use super::{
     manifest::{Manifest, parse_manifest},
     ports::PluginEntries,
     remove_placed_dir,
-    source::{PluginSource, is_https_url},
+    source::{PluginSource, is_builtin_source, is_https_url},
 };
 
 impl PluginService {
@@ -38,10 +38,7 @@ impl PluginService {
         store: &impl PluginEntries,
         source: &str,
     ) -> Result<(), PluginError> {
-        let _install_guard = self
-            .install_lock
-            .lock()
-            .map_err(|_| PluginError::InstallLockUnavailable)?;
+        let _install_guard = self.lock_install()?;
 
         // 来源形态在发起获取之前判定：无法识别的来源直接拒绝。判定一次即成
         // 为值（`PluginSource`），后续流程只 match，不再重新解析同一串文本。
@@ -55,7 +52,7 @@ impl PluginService {
             .iter()
             .any(|plugin| plugin.source == source_text);
         if duplicate {
-            return Err(PluginError::StoreEntry(PluginEntryError::duplicate_source(
+            return Err(PluginError::from(PluginEntryError::duplicate_source(
                 &source_text,
             )));
         }
@@ -65,22 +62,16 @@ impl PluginService {
         let (placed, manifest) = self.fetch_placed(&parsed)?;
         // id 冲突预检：与写入时的复检问同一句规则（见 `Store::check_plugin_id_conflict`）。
         store.check_plugin_id_conflict(&source_text, &manifest.id)?;
-        // 链接期校验先于解析配置目录与落位：wasm 不是组件或接口不兼容时不建
-        // 目录、不落位、不写条目。仅做字节反序列化与类型检查，不触发组件 init、
-        // 不预开放真实配置目录；避免未授权的 init 代码在安装失败时仍写入
-        // plugin config_dir。
-        validate_component(&self.engine, &placed.wasm, &manifest.id)?;
-        // 解析配置目录：显式的一步（建目录在此发生），在链接期校验之后、落位之前。
-        let config_dir = manifest.config_dir.resolve(&self.paths)?;
-        let loaded = LoadedPlugin::from_parts(manifest, config_dir, placed);
-        loaded.plugin.save()?;
+        // 落位失败即中止：不写条目、不留落位残留（流水线见 `place_loaded`）。
+        let loaded = self.place_loaded(placed, manifest)?;
 
         // 3. 安装成功后写入条目：`id` 是来源到落位目录的唯一映射（见 ADR 0006）。
         //    写入临界区内复检 id 冲突：预检与写入之间，另一来源可能已占用同一 id。
+        let id = loaded.id().to_owned();
         let entry = PluginEntry {
             source: source_text,
             enabled: true,
-            id: loaded.id().to_owned(),
+            id: id.clone(),
         };
         if let Err(e) = store.add_plugin(&entry) {
             // 条目写不进去，就不能留下注册表看不见的落位目录。
@@ -97,11 +88,29 @@ impl PluginService {
         self.entries
             .write()
             .map_err(|_| PluginError::RegistryUnavailable)?
-            .insert(
-                loaded.id().to_owned(),
-                PluginState::Loaded(Arc::new(loaded)),
-            );
+            .insert(id, PluginState::Loaded(Arc::new(loaded)));
         Ok(())
+    }
+
+    /// 校验 → 解析配置目录 → 落位：安装与重新加载共用的同一段流水线。
+    ///
+    /// 顺序不可换：链接期校验先于解析配置目录——wasm 不是组件或接口不兼容时
+    /// 不建目录、不落位；校验只做字节反序列化与类型检查，不触发组件 init、
+    /// 不预开放真实配置目录，避免未授权的 init 代码在安装失败时仍写入
+    /// plugin config_dir。解析配置目录是显式的一步（建目录在此发生），在链接期
+    /// 校验之后、落位之前。
+    ///
+    /// 落位逐文件覆盖：不触碰目录中宿主产物以外的文件（见 ADR 0018）。
+    fn place_loaded(
+        &self,
+        placed: PlacedPlugin,
+        manifest: Manifest,
+    ) -> Result<LoadedPlugin, PluginError> {
+        validate_component(&self.engine, &placed.wasm, &manifest.id)?;
+        let config_dir = manifest.config_dir.resolve(&self.paths)?;
+        let loaded = LoadedPlugin::from_parts(manifest, config_dir, placed);
+        loaded.plugin.save()?;
+        Ok(loaded)
     }
 
     /// 从来源处获取 manifest 与 wasm，构造待落位的插件。
@@ -223,18 +232,14 @@ impl PluginService {
     /// 否则移除可能插进「写配置条目」与「同步注册表」之间，留下条目与落位文件
     /// 都已不在、注册表却仍记着已装载的僵尸项；重新加载则可能读走过期的
     /// `enabled` 并按它覆盖注册表，与刚落盘的配置对不上。
-    /// 锁序 `install_lock` → store → entries：端口的每次读写各占一把短临界区，
-    /// 注册表锁在其外；本流程只读本机文件、不联网，临界区比含下载的流程短。
+    /// 本流程只读本机文件、不联网，临界区比含下载的流程短。
     fn set_enabled(
         &self,
         store: &impl PluginEntries,
         source: &str,
         enabled: bool,
     ) -> Result<(), PluginError> {
-        let _install_guard = self
-            .install_lock
-            .lock()
-            .map_err(|_| PluginError::InstallLockUnavailable)?;
+        let _install_guard = self.lock_install()?;
 
         let entry = store.plugin_by_source(source)?;
         if entry.enabled == enabled {
@@ -260,18 +265,15 @@ impl PluginService {
             return Ok(());
         };
 
+        let mut entries = self
+            .entries
+            .write()
+            .map_err(|_| PluginError::RegistryUnavailable)?;
         match loaded {
             Some(loaded) => {
-                self.entries
-                    .write()
-                    .map_err(|_| PluginError::RegistryUnavailable)?
-                    .insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
+                entries.insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
             }
             None => {
-                let mut entries = self
-                    .entries
-                    .write()
-                    .map_err(|_| PluginError::RegistryUnavailable)?;
                 if let Some(state) = entries.get_mut(&entry.id)
                     && let PluginState::Loaded(loaded) = state
                 {
@@ -295,13 +297,10 @@ impl PluginService {
         store: &impl PluginEntries,
         source: &str,
     ) -> Result<(), PluginError> {
-        let _install_guard = self
-            .install_lock
-            .lock()
-            .map_err(|_| PluginError::InstallLockUnavailable)?;
+        let _install_guard = self.lock_install()?;
 
         // 内置插件随应用分发，不可移除（见 ADR 0004）。
-        if matches!(PluginSource::parse(source), Some(PluginSource::Builtin(_))) {
+        if is_builtin_source(source) {
             return Err(PluginError::BuiltinNotRemovable {
                 source: source.to_owned(),
             });
@@ -344,10 +343,7 @@ impl PluginService {
         store: &impl PluginEntries,
         source: &str,
     ) -> Result<(), PluginError> {
-        let _install_guard = self
-            .install_lock
-            .lock()
-            .map_err(|_| PluginError::InstallLockUnavailable)?;
+        let _install_guard = self.lock_install()?;
 
         // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
         let entry = store.plugin_by_source(source)?;
@@ -363,15 +359,8 @@ impl PluginService {
                 next: manifest.id,
             });
         }
-        // 链接期校验先于解析配置目录与落位：wasm 不是组件或接口不兼容时不建
-        // 目录、不落位、注册表保持旧状态。不触发组件 init、不预开放真实配置
-        // 目录，避免未授权写入。
-        validate_component(&self.engine, &placed.wasm, &manifest.id)?;
-        // 解析配置目录：显式的一步（建目录在此发生），在链接期校验之后、落位之前。
-        let config_dir = manifest.config_dir.resolve(&self.paths)?;
-        let loaded = LoadedPlugin::from_parts(manifest, config_dir, placed);
-        // 逐文件覆盖落位产物：不触碰目录中宿主产物以外的文件（见 ADR 0018）。
-        loaded.plugin.save()?;
+        // 落位失败即中止：注册表保持旧状态（流水线见 `place_loaded`）。
+        let loaded = self.place_loaded(placed, manifest)?;
 
         // 条目（id 与 enabled）不变，仅把内存注册表同步为新装载的版本。
         let state = if entry.enabled {

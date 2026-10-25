@@ -123,10 +123,9 @@ impl LoadedPlugin {
                 detail: e.to_string(),
             })?;
         // 预开放的写入面是装载时解析出的宿主绝对路径（见 `DeclaredConfigDir::resolve`）。
-        let tool_path = self.meta.config_dir.clone();
         let mut store = wasmtime::Store::new(
             engine,
-            HostState::new(&tool_path, self.id().to_owned(), form)?,
+            HostState::new(&self.meta.config_dir, self.id().to_owned(), form)?,
         );
         store.limiter(|s| &mut s.limits);
         store
