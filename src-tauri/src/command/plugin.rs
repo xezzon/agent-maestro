@@ -330,20 +330,39 @@ mod tests {
         assert_eq!(view.config_dir.as_deref(), Some("/home/u/.pi"));
     }
 
-    /// 映射：投影结果 → 线格式（状态词逐字对应）。
+    /// 映射：投影结果 → 线格式。三组状态逐一钉住序列化值——只喂一组时，
+    /// 把 `Applied` 错映射成 `Failed` 仍会全绿，界面却把每次成功显示成失败。
     #[test]
     fn plugin_apply_report_maps_the_internal_outcome_to_the_wire_shape() {
-        let outcome = PluginOutcome {
+        for (status, wire) in [
+            (ProjectionStatus::Applied, "applied"),
+            (ProjectionStatus::Failed, "failed"),
+            (ProjectionStatus::Skipped, "skipped"),
+        ] {
+            let outcome = PluginOutcome {
+                id: "pi".to_owned(),
+                status,
+                files: Vec::new(),
+                skipped: Vec::new(),
+                reason: None,
+            };
+
+            let report = PluginApplyReport::from(outcome);
+
+            assert_eq!(
+                serde_json::to_value(report.status).unwrap(),
+                serde_json::json!(wire),
+                "映射后的线格式词逐字对应"
+            );
+        }
+
+        let report = PluginApplyReport::from(PluginOutcome {
             id: "pi".to_owned(),
             status: ProjectionStatus::Failed,
             files: Vec::new(),
             skipped: Vec::new(),
             reason: Some("原因".to_owned()),
-        };
-
-        let report = PluginApplyReport::from(outcome);
-
-        assert_eq!(report.status, ApplyStatus::Failed);
+        });
         assert_eq!(report.reason.as_deref(), Some("原因"));
     }
 }

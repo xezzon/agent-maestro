@@ -42,14 +42,14 @@ impl PluginService {
             .lock()
             .map_err(|_| PluginError::InstallLockUnavailable)?;
 
-        // 条目读取与校验：声明的真相源就是当前全局变量表。
-        let variables = store.variables_snapshot().map_err(PluginError::from)?;
+        // 条目与变量表同取一次读锁：校验用的变量表与落位用的条目来自同一份配置，
+        // 中间不插入 `set_variables`（见 `PluginStore::plugin_entry_with_variables`）。
+        let (entry, variables) = store.plugin_entry_with_variables(source)?;
         for name in plugin_config.variables.keys() {
             if !variables.contains_key(name) {
                 return Err(PluginError::UndeclaredVariable { name: name.clone() });
             }
         }
-        let entry = store.plugin_by_source(source)?;
 
         let plugin_dir = self.paths.plugin_dir(&entry.id);
         fs::create_dir_all(&plugin_dir).map_err(|e| PluginError::CreateDirectory {

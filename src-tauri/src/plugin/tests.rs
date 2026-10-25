@@ -1668,6 +1668,32 @@ fn apply_providers_projects_from_an_in_memory_store_without_writing_the_config_f
     );
 }
 
+/// 替身遵守它实现的那份端口契约（#141 R3）：条目不存在时 `delete_plugin`
+/// 返回 `Ok(None)`，与 `AppStore` 的适配一致；服务层据此把二次移除当幂等成功。
+#[test]
+fn memory_store_delete_plugin_is_idempotent_like_the_port_contract() {
+    use super::ports::PluginEntries;
+
+    let store = MemoryStore::new();
+    let entry = PluginEntry {
+        source: MANIFEST_URL.to_owned(),
+        enabled: true,
+        id: "pi2".to_owned(),
+    };
+    store.add_plugin(&entry).unwrap();
+
+    assert_eq!(
+        store.delete_plugin(MANIFEST_URL).unwrap(),
+        Some(entry),
+        "首次删除返回被删的那一条"
+    );
+    assert_eq!(
+        store.delete_plugin(MANIFEST_URL).unwrap(),
+        None,
+        "条目已不存在即 None（幂等），不得折成错误"
+    );
+}
+
 /// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有
 /// 插件时不带上下文——成功行因此不留尾随的冒号与空格。
 #[test]

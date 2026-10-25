@@ -74,6 +74,7 @@ impl Store {
             return Err(ConfigError::UnsupportedVersion {
                 path: path.to_owned(),
                 found: config.version,
+                supported: CONFIG_VERSION,
             });
         }
         Ok(config)

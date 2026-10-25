@@ -35,8 +35,6 @@ pub(crate) struct ProjectionSnapshot {
 pub(crate) trait ProviderSource {
     /// 投影输入的快照（Provider 表与变量表同源）。
     fn projection_snapshot(&self) -> Result<ProjectionSnapshot, ConfigError>;
-    /// 全局变量表：写插件配置时校验覆盖项用（不必连带 Provider 表）。
-    fn variables_snapshot(&self) -> Result<Variables, ConfigError>;
 }
 
 /// 插件条目端口：条目是配置文件的形状，服务层按来源读写它们。
@@ -67,8 +65,15 @@ pub(crate) trait PluginEntries {
 /// 组合端口：既要条目又要变量表的入口（如写插件配置）收它。
 ///
 /// 两条能力各自独立成 trait 是为了「窄」：投影只拿 [`ProviderSource`]，
-/// 装卸只拿 [`PluginEntries`]；这个组合 trait 只是让「两条都要」的入口不必
-/// 收两个参数。
-pub(crate) trait PluginStore: ProviderSource + PluginEntries {}
-
-impl<T: ProviderSource + PluginEntries> PluginStore for T {}
+/// 装卸只拿 [`PluginEntries`]；这个组合 trait 让「两条都要」的入口不必收
+/// 两个参数，并多声明一条「同一次读锁内取齐两者」的快照能力。
+pub(crate) trait PluginStore: ProviderSource + PluginEntries {
+    /// 写插件配置的输入快照：条目与全局变量表取自**同一次**读锁。
+    ///
+    /// 分两次取会留下窗口：变量校验通过后、条目读取前若变量表被改，可能写入
+    /// 一个已从全局表删除的覆盖键。与 [`ProjectionSnapshot`] 同一理由。
+    fn plugin_entry_with_variables(
+        &self,
+        source: &str,
+    ) -> Result<(PluginEntry, Variables), PluginEntryError>;
+}

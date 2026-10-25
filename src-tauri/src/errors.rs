@@ -1,8 +1,9 @@
 //! 错误类型：按领域拆分，每个类型自己排版面向用户的文案（[`Display`]）。
 //!
-//! 错误类型住在 crate 根而非某一层：配置存储与插件服务两侧都消费其中一部分
+//! 错误类型大多住在 crate 根而非某一层：配置存储与插件服务两侧都消费其中一部分
 //! （插件服务经端口收存储错误，命令层把两侧的错误都转成字符串交给 IPC），
-//! 放在中立层才不会让两侧互相依赖成环。
+//! 放在中立层才不会让两侧互相依赖成环。路径解析失败（`paths::PathError`）例外：
+//! 它只有一个消费者，随 [`crate::paths`] 住，`paths` 因此不反向依赖本模块。
 //!
 //! 存储错误按仓储职责拆开：[`ConfigError`]（配置文档读写）、[`ProviderError`]、
 //! [`PluginEntryError`] 与 [`VariableError`]。各自把持久化失败包在 `Storage`
@@ -14,8 +15,6 @@ use std::{
     fmt::{self, Display},
     path::PathBuf,
 };
-
-use crate::config::CONFIG_VERSION;
 
 /// 配置存储的锁被毒化（其它命令持锁期间 panic）。
 ///
@@ -33,7 +32,13 @@ pub(crate) enum ConfigError {
     /// 配置文件存在但无法解析。
     Corrupt { path: PathBuf, detail: String },
     /// 配置文件版本不被当前应用支持。
-    UnsupportedVersion { path: PathBuf, found: u32 },
+    UnsupportedVersion {
+        path: PathBuf,
+        found: u32,
+        /// 当前应用支持的版本。由存储层在比较时填入——错误类型不反向依赖
+        /// [`crate::config`]（#141 无环约束）。
+        supported: u32,
+    },
     /// 读写配置文件时发生 IO 错误。
     Io { path: PathBuf, detail: String },
     /// 配置读得出来，却写不出合法的 JSON（序列化失败）。
@@ -68,7 +73,7 @@ impl ConfigError {
 }
 
 impl From<LockPoisoned> for ConfigError {
-    fn from(LockPoisoned: LockPoisoned) -> Self {
+    fn from(_: LockPoisoned) -> Self {
         Self::Unavailable
     }
 }
@@ -81,9 +86,13 @@ impl Display for ConfigError {
                 "配置文件已损坏：{}\n原因：{detail}\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
                 path.display()
             ),
-            ConfigError::UnsupportedVersion { path, found } => write!(
+            ConfigError::UnsupportedVersion {
+                path,
+                found,
+                supported,
+            } => write!(
                 f,
-                "配置文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用仅支持 {CONFIG_VERSION}。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
+                "配置文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用仅支持 {supported}。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
                 path.display()
             ),
             ConfigError::Io { path, detail } => {
@@ -135,7 +144,7 @@ impl From<ConfigError> for ProviderError {
 }
 
 impl From<LockPoisoned> for ProviderError {
-    fn from(LockPoisoned: LockPoisoned) -> Self {
+    fn from(_: LockPoisoned) -> Self {
         Self::Storage(ConfigError::Unavailable)
     }
 }
@@ -194,7 +203,7 @@ impl From<ConfigError> for PluginEntryError {
 }
 
 impl From<LockPoisoned> for PluginEntryError {
-    fn from(LockPoisoned: LockPoisoned) -> Self {
+    fn from(_: LockPoisoned) -> Self {
         Self::Storage(ConfigError::Unavailable)
     }
 }
@@ -242,7 +251,7 @@ impl From<ConfigError> for VariableError {
 }
 
 impl From<LockPoisoned> for VariableError {
-    fn from(LockPoisoned: LockPoisoned) -> Self {
+    fn from(_: LockPoisoned) -> Self {
         Self::Storage(ConfigError::Unavailable)
     }
 }
@@ -324,27 +333,6 @@ impl Display for ProviderInterpolationError {
 }
 
 impl std::error::Error for ProviderInterpolationError {}
-
-/// 宿主路径解析失败：主目录或平台基准目录不可用。
-#[derive(Debug, Clone)]
-pub(crate) struct PathError {
-    what: &'static str,
-}
-
-impl PathError {
-    #[cfg(not(test))]
-    pub(crate) fn unavailable(what: &'static str) -> Self {
-        Self { what }
-    }
-}
-
-impl Display for PathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "无法解析平台目录：{}不可用", self.what)
-    }
-}
-
-impl std::error::Error for PathError {}
 
 /// 日志文件目标的写探测失败；调用方据此降级为只装 Stdout。
 #[derive(Debug, Clone)]
@@ -866,6 +854,7 @@ mod tests {
         let err = ConfigError::UnsupportedVersion {
             path: PathBuf::from("/home/u/.maestro/config.json"),
             found: 99,
+            supported: 1,
         };
 
         assert_eq!(

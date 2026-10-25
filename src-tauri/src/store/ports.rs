@@ -10,7 +10,7 @@
 use crate::{
     config::PluginEntry,
     errors::{ConfigError, PluginEntryError},
-    plugin::ports::{PluginEntries, ProjectionSnapshot, ProviderSource},
+    plugin::ports::{PluginEntries, PluginStore, ProjectionSnapshot, ProviderSource},
     variables::Variables,
 };
 
@@ -25,10 +25,6 @@ impl ProviderSource for AppStore {
                 variables: store.variables_snapshot()?,
             })
         })
-    }
-
-    fn variables_snapshot(&self) -> Result<Variables, ConfigError> {
-        self.with_read(|store| store.variables_snapshot())
     }
 }
 
@@ -73,5 +69,19 @@ impl PluginEntries for AppStore {
 
     fn check_plugin_id_conflict(&self, source: &str, id: &str) -> Result<(), PluginEntryError> {
         self.with_read(|store| store.check_plugin_id_conflict(source, id))
+    }
+}
+
+impl PluginStore for AppStore {
+    fn plugin_entry_with_variables(
+        &self,
+        source: &str,
+    ) -> Result<(PluginEntry, Variables), PluginEntryError> {
+        // 条目与变量表同取一次读锁：写插件配置的两样输入来自同一份配置。
+        self.with_read(|store| {
+            let entry = store.plugin_by_source(source)?;
+            let variables = store.variables_snapshot()?;
+            Ok((entry, variables))
+        })
     }
 }

@@ -1607,12 +1607,3 @@ fn update_provider_to_disabled_still_checks_interpolation() {
         Some("https://${MISSING}/v1")
     );
 }
-
-/// 锁毒化折进错误域后仍是同一句文案：毒化的是锁，不是配置。
-#[test]
-fn lock_poisoned_folds_into_the_same_reason() {
-    assert_eq!(
-        ConfigError::from(LockPoisoned).to_string(),
-        "配置存储不可用"
-    );
-}

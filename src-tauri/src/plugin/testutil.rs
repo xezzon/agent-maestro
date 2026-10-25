@@ -11,7 +11,7 @@ pub(super) use super::manifest::testutil::manifest_json;
 use super::{
     PluginService,
     fetch::Fetcher,
-    ports::{PluginEntries, ProjectionSnapshot, ProviderSource},
+    ports::{PluginEntries, PluginStore, ProjectionSnapshot, ProviderSource},
 };
 use crate::{
     config::{Config, PluginEntry},
@@ -102,10 +102,6 @@ impl ProviderSource for MemoryStore {
             variables: self.variables.clone(),
         })
     }
-
-    fn variables_snapshot(&self) -> Result<Variables, ConfigError> {
-        Ok(self.variables.clone())
-    }
 }
 
 impl PluginEntries for MemoryStore {
@@ -137,11 +133,11 @@ impl PluginEntries for MemoryStore {
 
     fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, PluginEntryError> {
         let mut plugins = self.plugins.lock().unwrap();
-        let index = plugins
+        // 条目不存在即 `Ok(None)`：与端口契约和 `AppStore` 的适配一致（幂等）。
+        Ok(plugins
             .iter()
             .position(|entry| entry.source == source)
-            .ok_or_else(|| PluginEntryError::missing_source(source))?;
-        Ok(Some(plugins.remove(index)))
+            .map(|index| plugins.remove(index)))
     }
 
     fn set_plugin_enabled(
@@ -168,6 +164,15 @@ impl PluginEntries for MemoryStore {
             Some(other) => Err(PluginEntryError::duplicate_id(id, &other.source)),
             None => Ok(()),
         }
+    }
+}
+
+impl PluginStore for MemoryStore {
+    fn plugin_entry_with_variables(
+        &self,
+        source: &str,
+    ) -> Result<(PluginEntry, Variables), PluginEntryError> {
+        Ok((self.plugin_by_source(source)?, self.variables.clone()))
     }
 }
 

@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{errors::PathError, test_global::Global};
+use crate::test_global::Global;
 
 #[cfg(test)]
 use crate::test_global::TestGuard;
@@ -178,6 +178,30 @@ impl Paths {
         }
     }
 }
+
+/// 宿主路径解析失败：主目录或平台基准目录不可用。
+///
+/// 只有一个消费者（本模块的 [`Paths::init_from_system`]），故随路径解析住在这里，
+/// 不再让 `errors` 与 `paths` 互相依赖（#141）。
+#[derive(Debug, Clone)]
+pub(crate) struct PathError {
+    what: &'static str,
+}
+
+impl PathError {
+    #[cfg(not(test))]
+    pub(crate) fn unavailable(what: &'static str) -> Self {
+        Self { what }
+    }
+}
+
+impl std::fmt::Display for PathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "无法解析平台目录：{}不可用", self.what)
+    }
+}
+
+impl std::error::Error for PathError {}
 
 #[cfg(test)]
 mod tests {
