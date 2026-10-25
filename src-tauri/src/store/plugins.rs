@@ -19,11 +19,14 @@ pub(super) fn add(
     config: &mut Config,
     plugin_entry: &PluginEntry,
 ) -> Result<Change<()>, PluginEntryError> {
-    let source = plugin_entry.source.clone();
-    if config.plugins.iter().any(|plugin| plugin.source == source) {
-        return Err(PluginEntryError::duplicate_source(&source));
+    if config
+        .plugins
+        .iter()
+        .any(|plugin| plugin.source == plugin_entry.source)
+    {
+        return Err(PluginEntryError::duplicate_source(&plugin_entry.source));
     }
-    check_id_conflict(config, &source, &plugin_entry.id)?;
+    check_id_conflict(config, &plugin_entry.source, &plugin_entry.id)?;
     config.plugins.push(plugin_entry.clone());
     Ok(Change::Changed(()))
 }

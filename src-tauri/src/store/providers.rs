@@ -41,7 +41,7 @@ pub(super) fn create(
     if config.providers.contains_key(slug) {
         return Err(ProviderError::duplicate_slug(slug));
     }
-    validate_provider(slug, &provider, &config.variables).map_err(interpolation_error)?;
+    validate_provider(slug, &provider, &config.variables).map_err(ProviderError::Interpolation)?;
     config.providers.insert(slug.to_owned(), provider);
     Ok(Change::Changed(()))
 }
@@ -60,7 +60,7 @@ pub(super) fn update(
         .get(slug)
         .cloned()
         .ok_or_else(|| ProviderError::missing_slug(slug))?;
-    validate_provider(slug, &provider, &config.variables).map_err(interpolation_error)?;
+    validate_provider(slug, &provider, &config.variables).map_err(ProviderError::Interpolation)?;
     config.providers.insert(slug.to_owned(), provider);
     Ok(Change::Changed(original))
 }
@@ -96,17 +96,15 @@ pub(super) fn set_enabled(
     Ok(Change::Changed(()))
 }
 
-/// Provider 插值失败 → 存储错误：与投影时（`interpolate_providers`）同因同报、
-/// 同款文案，只是提前到落盘前——包裹领域层的同一个错误类型，句式只有一份。
-fn interpolation_error(error: ProviderInterpolationError) -> ProviderError {
-    ProviderError::Interpolation(error)
-}
-
 /// Provider 落盘前的插值校验（provider↔variables 一致性，ADR 0015）。
 ///
 /// 全部 Provider（含禁用者）都须对当前变量表可解析：落盘内容始终是自洽的，
 /// 禁用只是一种投影时的结构过滤，不改变存储不变式。
-/// 新增/更新/整表换变量共用这一条规则；包装成各仓储自己的错误类型由调用方完成。
+/// 新增/更新/整表换变量共用这一条规则。
+///
+/// 校验失败由调用方包成各仓储自己的错误类型（[`ProviderError::Interpolation`] /
+/// `VariableError::Interpolation`）：与投影时（`interpolate_providers`）同因同报、
+/// 同款文案，只是提前到落盘前——包裹领域层的同一个错误类型，句式只有一份。
 pub(super) fn validate_provider(
     slug: &str,
     provider: &Provider,

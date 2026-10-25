@@ -12,7 +12,7 @@ use crate::{
 use super::providers::validate_provider;
 
 /// 变量名合法性（ADR 0014）：`[A-Za-z0-9_]+`，与占位符语法一致。
-pub(super) fn is_valid_name(name: &str) -> bool {
+fn is_valid_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
