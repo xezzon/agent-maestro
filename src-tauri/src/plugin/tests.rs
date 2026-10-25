@@ -8,8 +8,8 @@ use std::{
 };
 
 use super::{
-    ApplyStatus, PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginApplyReport,
-    PluginConfig, PluginState, PluginView, apply_summary, builtin,
+    PLACED_CONFIG, PLACED_MANIFEST, PLACED_WASM, PlacedPlugin, PluginConfig, PluginOutcome,
+    PluginRecord, PluginState, ProjectionStatus, builtin,
     manifest::parse_count,
     projection::project_files,
     source::is_https_url,
@@ -37,17 +37,17 @@ fn plugin_entry<'a>(plugins: &'a [PluginEntry], id: &str) -> &'a PluginEntry {
         .unwrap_or_else(|| panic!("配置条目「{id}」不存在"))
 }
 
-fn plugin_view<'a>(views: &'a [PluginView], id: &str) -> &'a PluginView {
-    views
+fn plugin_record<'a>(records: &'a [PluginRecord], id: &str) -> &'a PluginRecord {
+    records
         .iter()
-        .find(|view| view.id == id)
+        .find(|record| record.id == id)
         .unwrap_or_else(|| panic!("插件「{id}」不在列表中"))
 }
 
-fn plugin_report<'a>(reports: &'a [PluginApplyReport], id: &str) -> &'a PluginApplyReport {
-    reports
+fn plugin_outcome<'a>(outcomes: &'a [PluginOutcome], id: &str) -> &'a PluginOutcome {
+    outcomes
         .iter()
-        .find(|report| report.id == id)
+        .find(|outcome| outcome.id == id)
         .unwrap_or_else(|| panic!("插件「{id}」没有投影报告"))
 }
 
@@ -108,10 +108,11 @@ fn add_https_plugin_writes_entry_places_files_and_loads() {
     assert_eq!(views[0].error, None, "{:?}", views[0].error);
     assert_eq!(views[0].id, "pi2");
     assert!(!views[0].builtin, "https 来源可重新加载、可移除");
-    let config_dir = views[0].config_dir.as_deref().unwrap();
+    let config_dir = views[0].config_dir.as_ref().unwrap();
     assert!(
-        Path::new(config_dir).is_absolute() && config_dir.ends_with(".pi2"),
-        "config_dir 已解析为宿主内的绝对路径：{config_dir}"
+        config_dir.is_absolute() && config_dir.ends_with(".pi2"),
+        "config_dir 已解析为宿主内的绝对路径：{}",
+        config_dir.display()
     );
 }
 
@@ -476,7 +477,7 @@ fn set_enabled_disables_and_re_enables_the_plugin() {
     assert_eq!(view.error, None);
     assert_eq!(view.id, "pi2");
     assert!(
-        view.config_dir.as_deref().unwrap().ends_with(".pi2"),
+        view.config_dir.as_ref().unwrap().ends_with(".pi2"),
         "禁用保留 manifest 供展示：{:?}",
         view.config_dir
     );
@@ -638,7 +639,7 @@ fn reload_plugin_refetches_and_replaces_the_placed_version() {
     assert_eq!(view.error, None);
     assert_eq!(view.id, "pi2");
     assert!(
-        view.config_dir.as_deref().unwrap().ends_with(".pi3"),
+        view.config_dir.as_ref().unwrap().ends_with(".pi3"),
         "注册表同步新 manifest：{:?}",
         view.config_dir
     );
@@ -704,7 +705,7 @@ fn reload_plugin_write_failure_leaves_a_mixed_placed_state() {
     assert_eq!(view.error, None);
     assert_eq!(view.id, "pi2");
     assert!(
-        view.config_dir.as_deref().unwrap().ends_with(".pi2"),
+        view.config_dir.as_ref().unwrap().ends_with(".pi2"),
         "注册表保持旧状态：{:?}",
         view.config_dir
     );
@@ -773,7 +774,7 @@ fn reload_plugin_keeps_the_disabled_state_with_a_fresh_manifest() {
     assert_eq!(view.error, None);
     assert_eq!(view.id, "pi2");
     assert!(
-        view.config_dir.as_deref().unwrap().ends_with(".pi3"),
+        view.config_dir.as_ref().unwrap().ends_with(".pi3"),
         "禁用态仍以新 manifest 供展示：{:?}",
         view.config_dir
     );
@@ -819,7 +820,7 @@ fn reload_builtin_plugin_restores_a_corrupted_placed_copy() {
         "宿主副本已按内嵌字节恢复"
     );
     let views = service.list(&store).unwrap();
-    let view = plugin_view(&views, builtin::BUILTIN_PI_ID);
+    let view = plugin_record(&views, builtin::BUILTIN_PI_ID);
     assert_eq!(view.error, None);
     assert!(
         plugin_entry(&snapshot(&store).plugins, builtin::BUILTIN_PI_ID).enabled,
@@ -857,7 +858,7 @@ fn startup_installs_missing_builtin_plugin_like_any_other_source() {
 
     let views = service.list(&store).unwrap();
     assert_eq!(views.len(), builtin::BUILTINS.len());
-    let view = plugin_view(&views, builtin::BUILTIN_PI_ID);
+    let view = plugin_record(&views, builtin::BUILTIN_PI_ID);
     assert!(view.builtin);
     assert_eq!(view.error, None, "{:?}", view.error);
 
@@ -869,7 +870,7 @@ fn startup_installs_missing_builtin_plugin_like_any_other_source() {
         "重复启动不产生重复条目"
     );
     let views = service.list(&store).unwrap();
-    assert_eq!(plugin_view(&views, builtin::BUILTIN_PI_ID).error, None);
+    assert_eq!(plugin_record(&views, builtin::BUILTIN_PI_ID).error, None);
 }
 
 /// 内置来源按 source 精确分派（issue #56）：此前任何 `builtin:` 来源都返回 pi 的
@@ -972,13 +973,13 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    let by_id: HashMap<&str, &PluginApplyReport> = reports
+    let by_id: HashMap<&str, &PluginOutcome> = reports
         .iter()
         .map(|report| (report.id.as_str(), report))
         .collect();
     assert_eq!(reports.len(), 4, "每个注册表条目一份报告");
     let applied = by_id.get("pi2").unwrap();
-    assert_eq!(applied.status, ApplyStatus::Applied);
+    assert_eq!(applied.status, ProjectionStatus::Applied);
     assert_eq!(applied.files.len(), 1);
     let reported = Path::new(&applied.files[0]);
     assert!(
@@ -987,7 +988,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
         applied.files
     );
     let failed = by_id.get("pibad").unwrap();
-    assert_eq!(failed.status, ApplyStatus::Failed);
+    assert_eq!(failed.status, ProjectionStatus::Failed);
     assert!(
         failed
             .reason
@@ -999,7 +1000,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
     );
     assert_eq!(
         by_id.get("pi3").unwrap().status,
-        ApplyStatus::Skipped,
+        ProjectionStatus::Skipped,
         "禁用态跳过"
     );
     assert_eq!(
@@ -1008,7 +1009,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
     );
     assert_eq!(
         by_id.get("pierr").unwrap().status,
-        ApplyStatus::Skipped,
+        ProjectionStatus::Skipped,
         "错误态跳过"
     );
     assert_eq!(
@@ -1049,7 +1050,7 @@ fn projection_path_never_logs_the_api_key() {
 
     assert_eq!(
         reports[0].status,
-        ApplyStatus::Applied,
+        ProjectionStatus::Applied,
         "{:?}",
         reports[0].reason
     );
@@ -1098,7 +1099,7 @@ fn projection_path_never_logs_custom_header_values() {
 
     assert_eq!(
         reports[0].status,
-        ApplyStatus::Applied,
+        ProjectionStatus::Applied,
         "{:?}",
         reports[0].reason
     );
@@ -1143,7 +1144,7 @@ fn write_providers_interpolates_placeholders_before_projection() {
 
     assert_eq!(
         reports[0].status,
-        ApplyStatus::Applied,
+        ProjectionStatus::Applied,
         "{:?}",
         reports[0].reason
     );
@@ -1204,19 +1205,19 @@ fn write_providers_merges_plugin_variable_overrides_per_plugin() {
 
     let reports = service.write_providers(&providers, &variables).unwrap();
 
-    let by_id: HashMap<&str, &PluginApplyReport> = reports
+    let by_id: HashMap<&str, &PluginOutcome> = reports
         .iter()
         .map(|report| (report.id.as_str(), report))
         .collect();
     assert_eq!(
         by_id.get("pi").unwrap().status,
-        ApplyStatus::Applied,
+        ProjectionStatus::Applied,
         "{:?}",
         reports
     );
     assert_eq!(
         by_id.get("pi2").unwrap().status,
-        ApplyStatus::Applied,
+        ProjectionStatus::Applied,
         "{:?}",
         reports
     );
@@ -1265,7 +1266,7 @@ fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_er
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    assert_eq!(reports[0].status, ApplyStatus::Failed);
+    assert_eq!(reports[0].status, ProjectionStatus::Failed);
     let reason = reports[0].reason.as_deref().unwrap();
     assert!(reason.contains("gateway"), "{reason}");
     assert!(reason.contains("base_url.openai-completions"), "{reason}");
@@ -1312,8 +1313,8 @@ fn write_providers_fails_the_whole_plugin_when_its_plugin_config_is_corrupt() {
         .write_providers(&providers, &BTreeMap::new())
         .unwrap();
 
-    let report = plugin_report(&reports, "pi");
-    assert_eq!(report.status, ApplyStatus::Failed);
+    let report = plugin_outcome(&reports, "pi");
+    assert_eq!(report.status, ProjectionStatus::Failed);
     let reason = report.reason.as_deref().unwrap();
     assert!(reason.contains("插件配置已损坏"), "{reason}");
     assert!(
@@ -1356,7 +1357,7 @@ fn endpoint_that_interpolates_to_empty_counts_as_unconfigured() {
 
     assert_eq!(
         reports[0].status,
-        ApplyStatus::Applied,
+        ProjectionStatus::Applied,
         "{:?}",
         reports[0].reason
     );
@@ -1539,7 +1540,7 @@ fn apply_providers_logs_each_failed_plugin_with_its_reason() {
         .iter()
         .find(|report| report.id == "pi")
         .expect("内置 pi 插件的报告");
-    assert_eq!(pi.status, ApplyStatus::Failed);
+    assert_eq!(pi.status, ProjectionStatus::Failed);
     let logs = window.lines();
     assert!(
         logs.iter()
@@ -1592,8 +1593,8 @@ fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
 
     let models_path = home.path().join(".pi").join("agent").join("models.json");
     let first = service.apply_providers(&store).unwrap();
-    let pi = plugin_report(&first, "pi");
-    assert_eq!(pi.status, ApplyStatus::Applied, "{:?}", pi.reason);
+    let pi = plugin_outcome(&first, "pi");
+    assert_eq!(pi.status, ProjectionStatus::Applied, "{:?}", pi.reason);
     let written: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
     assert_eq!(
@@ -1605,8 +1606,8 @@ fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
         .with_write(|s| s.set_provider_enabled("offline", false))
         .unwrap();
     let second = service.apply_providers(&store).unwrap();
-    let pi = plugin_report(&second, "pi");
-    assert_eq!(pi.status, ApplyStatus::Applied, "{:?}", pi.reason);
+    let pi = plugin_outcome(&second, "pi");
+    assert_eq!(pi.status, ProjectionStatus::Applied, "{:?}", pi.reason);
     let raw = fs::read_to_string(&models_path).unwrap();
     let written: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(
@@ -1652,8 +1653,8 @@ fn apply_providers_projects_from_an_in_memory_store_without_writing_the_config_f
     service.add_plugin(&store, MANIFEST_URL).unwrap();
     let reports = service.apply_providers(&store).unwrap();
 
-    let pi2 = plugin_report(&reports, "pi2");
-    assert_eq!(pi2.status, ApplyStatus::Applied, "{:?}", pi2.reason);
+    let pi2 = plugin_outcome(&reports, "pi2");
+    assert_eq!(pi2.status, ProjectionStatus::Applied, "{:?}", pi2.reason);
     let models_path = home.path().join(".pi2").join("agent").join("models.json");
     let written: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
@@ -1664,30 +1665,6 @@ fn apply_providers_projects_from_an_in_memory_store_without_writing_the_config_f
     assert!(
         !home.path().join(".maestro").join("config.json").exists(),
         "配置存储不该落盘：内存替身全程没碰文件系统"
-    );
-}
-
-/// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有
-/// 插件时不带上下文——成功行因此不留尾随的冒号与空格。
-#[test]
-fn apply_summary_lists_each_plugin_status() {
-    assert_eq!(apply_summary(&[]), None, "没有插件即没有上下文");
-
-    let report = |id: &str, status: ApplyStatus| PluginApplyReport {
-        id: id.to_owned(),
-        status,
-        files: Vec::new(),
-        skipped: Vec::new(),
-        reason: None,
-    };
-    let reports = vec![
-        report("pi", ApplyStatus::Applied),
-        report("claude-code", ApplyStatus::Failed),
-    ];
-
-    assert_eq!(
-        apply_summary(&reports).as_deref(),
-        Some("pi:applied claude-code:failed")
     );
 }
 
@@ -1710,25 +1687,5 @@ fn project_files_rejects_paths_outside_the_config_dir() {
     ] {
         let err = project_files(&config_dir, vec![file.to_owned()]).unwrap_err();
         assert!(err.contains(file), "{file} 应被拒绝：{err}");
-    }
-}
-
-/// 投影状态的线格式钉死：序列化与 `Display` 同为 `applied` / `failed` /
-/// `skipped` 三个小写词。前端按同一组词渲染标签（见
-/// `src/pages/provider/applyStatus.js`），改词即前端标签静默失效——
-/// 故这三条断言是跨端契约的护栏。
-#[test]
-fn apply_status_wire_values_are_pinned() {
-    for (status, wire) in [
-        (ApplyStatus::Applied, "applied"),
-        (ApplyStatus::Failed, "failed"),
-        (ApplyStatus::Skipped, "skipped"),
-    ] {
-        assert_eq!(
-            serde_json::to_value(status).unwrap(),
-            serde_json::json!(wire),
-            "序列化形态与线格式词一致"
-        );
-        assert_eq!(status.to_string(), wire, "Display 与线格式词一致");
     }
 }

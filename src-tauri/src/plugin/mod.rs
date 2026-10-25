@@ -53,7 +53,7 @@ use crate::{
     plugin::builtin::BUILTINS,
     variables::Variables,
 };
-use execution::SkippedProvider;
+pub(crate) use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, parse_placed};
 use ports::PluginEntries;
@@ -202,30 +202,33 @@ fn remove_placed_dir(plugin_dir: &Path) -> Result<(), String> {
     }
 }
 
-/// 插件列表视图（命令返回给前端的形态）。
-#[derive(Debug, Serialize)]
-pub(crate) struct PluginView {
-    source: String,
+/// 插件的注册表描述：服务层的内部形状。
+///
+/// 线格式契约在命令层（见 `crate::command::plugin` 的 `PluginView`）：服务层
+/// 只说「这个插件是什么」，怎么说给界面听是交付层的事（#141 待决策 A）。
+#[derive(Debug)]
+pub(crate) struct PluginRecord {
+    pub(crate) source: String,
     /// 来源以内置前缀标识；内置插件可禁用、不可移除。
-    builtin: bool,
-    enabled: bool,
-    id: String,
+    pub(crate) builtin: bool,
+    pub(crate) enabled: bool,
+    pub(crate) id: String,
     /// manifest 声明并解析出的配置目录（宿主绝对路径）。
-    config_dir: Option<String>,
-    /// manifest 内联的 settings_schema（ADR 0017），透传给前端渲染表单；
+    pub(crate) config_dir: Option<PathBuf>,
+    /// manifest 内联的 settings_schema（ADR 0017），界面据此渲染表单；
     /// 缺省即该插件无需用户填写。
-    settings_schema: Option<serde_json::Value>,
-    error: Option<String>,
+    pub(crate) settings_schema: Option<serde_json::Value>,
+    /// 装载失败的原因。
+    pub(crate) error: Option<String>,
 }
 
-/// 逐插件投影的状态：已写入 / 失败 / 未执行。
+/// 逐插件投影的状态：已写入 / 失败 / 未执行（服务层内部形状）。
 ///
-/// 合法值由类型固定（此前是一根 `&'static str`，合法值只写在注释里），
-/// 线格式为小写词（`applied` / `failed` / `skipped`），前端按同一组词渲染标签。
-/// 序列化形态与线格式由本模块的测试钉住：改词即前端标签静默失效。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ApplyStatus {
+/// 线格式词（`applied` / `failed` / `skipped`）由命令层产出——那是交付层的
+/// 契约。本枚举的英文词只服务 ADR 0008 的日志行；两者同形，由命令层的一条
+/// 测试钉住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectionStatus {
     /// 已写入：插件执行成功并写出了文件。
     Applied,
     /// 失败：插件执行了但返回错误（不写任何文件）。
@@ -234,46 +237,28 @@ pub(crate) enum ApplyStatus {
     Skipped,
 }
 
-impl Display for ApplyStatus {
-    /// 线格式词（与序列化形态一致）：日志摘要与序列化同源，不再各写一份。
+impl Display for ProjectionStatus {
+    /// 日志用的英文词（与线格式词同形，见类型文档）。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            ApplyStatus::Applied => "applied",
-            ApplyStatus::Failed => "failed",
-            ApplyStatus::Skipped => "skipped",
+            ProjectionStatus::Applied => "applied",
+            ProjectionStatus::Failed => "failed",
+            ProjectionStatus::Skipped => "skipped",
         })
     }
 }
 
-/// 逐插件投影报告：状态、已写入文件、跳过的 Provider、失败原因。
-#[derive(Debug, Serialize)]
-pub(crate) struct PluginApplyReport {
-    pub(crate) id: String,
-    /// 投影状态（`applied` / `failed` / `skipped`）。
-    pub(crate) status: ApplyStatus,
-    /// 已写入文件的宿主绝对路径列表（插件返回相对 config_dir 的路径，由宿主拼接）。
-    files: Vec<String>,
-    skipped: Vec<SkippedProvider>,
-    pub(crate) reason: Option<String>,
-}
-
-/// 逐插件状态摘要（`id:status` 逐项，空格分隔）：命令层结果行的识别参数。
+/// 逐插件投影的结果：状态、已写入文件、跳过的 Provider、失败原因。
 ///
-/// 结果行按 ADR 0008 携带逐插件状态摘要——某个插件投影失败时，日志里要能
-/// 看出是哪一个。摘要由本模块产出（命令层只负责把它交给 `log_outcome`，
-/// 不自己拼串）。没有插件时返回 `None`：成功行不带上下文，不留尾随的
-/// 冒号与空格。
-pub(crate) fn apply_summary(reports: &[PluginApplyReport]) -> Option<String> {
-    if reports.is_empty() {
-        return None;
-    }
-    Some(
-        reports
-            .iter()
-            .map(|report| format!("{}:{}", report.id, report.status))
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+/// 服务层内部形状；命令层把它映射成线格式的 `PluginApplyReport`。
+#[derive(Debug)]
+pub(crate) struct PluginOutcome {
+    pub(crate) id: String,
+    pub(crate) status: ProjectionStatus,
+    /// 已写入文件的宿主绝对路径列表（插件返回相对 config_dir 的路径，由宿主拼接）。
+    pub(crate) files: Vec<String>,
+    pub(crate) skipped: Vec<SkippedProvider>,
+    pub(crate) reason: Option<String>,
 }
 
 /// 插件配置（落位目录 `<id>/config.json`，ADR 0018）：该插件对全局变量的覆盖
@@ -407,13 +392,13 @@ impl PluginService {
     }
 
     /// 当前注册表视图。
-    pub(crate) fn list(&self, store: &impl PluginEntries) -> Result<Vec<PluginView>, String> {
+    pub(crate) fn list(&self, store: &impl PluginEntries) -> Result<Vec<PluginRecord>, String> {
         // 配置损坏时把原因原样带出去（哪个文件坏了、坏在哪）——「配置文件损坏」
         // 这四个字会让用户去猜是哪个文件。
         let plugin_entries = store.list_plugins().map_err(|err| err.to_string())?;
         let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
-        let plugin_view =
-            |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginView {
+        let plugin_record =
+            |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginRecord {
                 source: entry.source.clone(),
                 builtin: matches!(
                     PluginSource::parse(&entry.source),
@@ -421,7 +406,7 @@ impl PluginService {
                 ),
                 enabled: entry.enabled,
                 id: entry.id.clone(),
-                config_dir: meta.map(|m| m.config_dir.display().to_string()),
+                config_dir: meta.map(|m| m.config_dir.clone()),
                 settings_schema: meta.and_then(|m| m.manifest.settings_schema.clone()),
                 error,
             };
@@ -432,12 +417,12 @@ impl PluginService {
                 match plugin {
                     Some(plugin) => match plugin {
                         PluginState::Loaded(loaded_plugin) => {
-                            plugin_view(entry, Some(&loaded_plugin.meta), None)
+                            plugin_record(entry, Some(&loaded_plugin.meta), None)
                         }
-                        PluginState::Disabled(meta) => plugin_view(entry, Some(meta), None),
-                        PluginState::Error(err) => plugin_view(entry, None, Some(err.to_owned())),
+                        PluginState::Disabled(meta) => plugin_record(entry, Some(meta), None),
+                        PluginState::Error(err) => plugin_record(entry, None, Some(err.to_owned())),
                     },
-                    None => plugin_view(entry, None, Some(format!("插件 {} 未加载", entry.id))),
+                    None => plugin_record(entry, None, Some(format!("插件 {} 未加载", entry.id))),
                 }
             })
             .collect())

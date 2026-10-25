@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    ApplyStatus, LoadedPlugin, PluginApplyReport, PluginService, PluginState,
+    LoadedPlugin, PluginOutcome, PluginService, PluginState, ProjectionStatus,
     REGISTRY_LOCK_POISONED, config::read_plugin_config, execution::SkippedProvider,
     ports::ProviderSource,
 };
@@ -27,7 +27,7 @@ impl PluginService {
     pub(crate) fn apply_providers(
         &self,
         store: &impl ProviderSource,
-    ) -> Result<Vec<PluginApplyReport>, String> {
+    ) -> Result<Vec<PluginOutcome>, String> {
         let snapshot = store.projection_snapshot().map_err(|err| err.to_string())?;
         let (providers, variables) = (snapshot.providers, snapshot.variables);
         let reports = self.write_providers(&providers, &variables)?;
@@ -35,7 +35,7 @@ impl PluginService {
         // 在此按插件各记一条（ADR 0008：服务层的投影步骤打 DEBUG，默认级别
         // 下不落盘；命令层的结果行按插件携带状态摘要）。
         for report in &reports {
-            if report.status != ApplyStatus::Applied {
+            if report.status != ProjectionStatus::Applied {
                 log::debug!(
                     "plugin projection {status}: id={id} reason={reason}",
                     status = report.status,
@@ -61,7 +61,7 @@ impl PluginService {
         &self,
         providers: &BTreeMap<String, Provider>,
         variables: &Variables,
-    ) -> Result<Vec<PluginApplyReport>, String> {
+    ) -> Result<Vec<PluginOutcome>, String> {
         let (mut reports, loaded) = {
             let entries = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
             let mut reports = Vec::with_capacity(entries.len());
@@ -140,18 +140,18 @@ impl PluginService {
 fn build_report(
     id: String,
     projected: Result<(Vec<String>, Vec<SkippedProvider>), String>,
-) -> PluginApplyReport {
+) -> PluginOutcome {
     match projected {
-        Ok((files, skipped)) => PluginApplyReport {
+        Ok((files, skipped)) => PluginOutcome {
             id,
-            status: ApplyStatus::Applied,
+            status: ProjectionStatus::Applied,
             files,
             skipped,
             reason: None,
         },
-        Err(reason) => PluginApplyReport {
+        Err(reason) => PluginOutcome {
             id,
-            status: ApplyStatus::Failed,
+            status: ProjectionStatus::Failed,
             files: Vec::new(),
             skipped: Vec::new(),
             reason: Some(reason),
@@ -160,10 +160,10 @@ fn build_report(
 }
 
 /// 未执行投影的插件报告（禁用或装载失败）：状态为 `skipped`，只携带原因。
-fn skipped_report(id: String, reason: String) -> PluginApplyReport {
-    PluginApplyReport {
+fn skipped_report(id: String, reason: String) -> PluginOutcome {
+    PluginOutcome {
         id,
-        status: ApplyStatus::Skipped,
+        status: ProjectionStatus::Skipped,
         files: Vec::new(),
         skipped: Vec::new(),
         reason: Some(reason),

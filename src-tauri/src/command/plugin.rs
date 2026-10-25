@@ -1,10 +1,128 @@
+use std::fmt::Display;
+
+use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use super::log_outcome;
 use crate::{
     AppStore,
-    plugin::{PluginApplyReport, PluginConfig, PluginService, PluginView, apply_summary},
+    plugin::{
+        PluginConfig, PluginOutcome, PluginRecord, PluginService, ProjectionStatus, SkippedProvider,
+    },
 };
+
+/// 插件列表视图（命令返回给前端的形态）：**线格式契约**。
+///
+/// 插件注册表的形状（`config_dir` / `settings_schema` / `error`）本来就是给
+/// 界面看的，硬塞回领域反而更假——故它住在交付层，与 `ProviderRequest` 同层。
+/// 服务层只给内部形状（[`PluginRecord`]），映射在下方（#141 待决策 A）。
+#[derive(Debug, Serialize)]
+pub(crate) struct PluginView {
+    source: String,
+    /// 来源以内置前缀标识；内置插件可禁用、不可移除。
+    builtin: bool,
+    enabled: bool,
+    id: String,
+    /// manifest 声明并解析出的配置目录（宿主绝对路径）。
+    config_dir: Option<String>,
+    /// manifest 内联的 settings_schema（ADR 0017），透传给前端渲染表单；
+    /// 缺省即该插件无需用户填写。
+    settings_schema: Option<serde_json::Value>,
+    error: Option<String>,
+}
+
+impl From<PluginRecord> for PluginView {
+    fn from(record: PluginRecord) -> Self {
+        Self {
+            source: record.source,
+            builtin: record.builtin,
+            enabled: record.enabled,
+            id: record.id,
+            config_dir: record.config_dir.map(|dir| dir.display().to_string()),
+            settings_schema: record.settings_schema,
+            error: record.error,
+        }
+    }
+}
+
+/// 逐插件投影的状态（线格式）：已写入 / 失败 / 未执行。
+///
+/// 合法值由类型固定，线格式为小写词（`applied` / `failed` / `skipped`），
+/// 前端按同一组词渲染标签。序列化形态与线格式由本模块的测试钉住：改词即
+/// 前端标签静默失效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ApplyStatus {
+    /// 已写入：插件执行成功并写出了文件。
+    Applied,
+    /// 失败：插件执行了但返回错误（不写任何文件）。
+    Failed,
+    /// 未执行投影：插件已禁用或装载失败。
+    Skipped,
+}
+
+impl Display for ApplyStatus {
+    /// 线格式词（与序列化形态一致）：日志摘要与序列化同源，不再各写一份。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ApplyStatus::Applied => "applied",
+            ApplyStatus::Failed => "failed",
+            ApplyStatus::Skipped => "skipped",
+        })
+    }
+}
+
+impl From<ProjectionStatus> for ApplyStatus {
+    fn from(status: ProjectionStatus) -> Self {
+        match status {
+            ProjectionStatus::Applied => ApplyStatus::Applied,
+            ProjectionStatus::Failed => ApplyStatus::Failed,
+            ProjectionStatus::Skipped => ApplyStatus::Skipped,
+        }
+    }
+}
+
+/// 逐插件投影报告（线格式）：状态、已写入文件、跳过的 Provider、失败原因。
+#[derive(Debug, Serialize)]
+pub(crate) struct PluginApplyReport {
+    pub(crate) id: String,
+    /// 投影状态（`applied` / `failed` / `skipped`）。
+    pub(crate) status: ApplyStatus,
+    /// 已写入文件的宿主绝对路径列表（插件返回相对 config_dir 的路径，由宿主拼接）。
+    files: Vec<String>,
+    skipped: Vec<SkippedProvider>,
+    pub(crate) reason: Option<String>,
+}
+
+impl From<PluginOutcome> for PluginApplyReport {
+    fn from(outcome: PluginOutcome) -> Self {
+        Self {
+            id: outcome.id,
+            status: outcome.status.into(),
+            files: outcome.files,
+            skipped: outcome.skipped,
+            reason: outcome.reason,
+        }
+    }
+}
+
+/// 逐插件状态摘要（`id:status` 逐项，空格分隔）：命令层结果行的识别参数。
+///
+/// 结果行按 ADR 0008 携带逐插件状态摘要——某个插件投影失败时，日志里要能
+/// 看出是哪一个。没有插件时返回 `None`：成功行不带上下文，不留尾随的
+/// 冒号与空格。
+fn apply_summary(reports: &[PluginApplyReport]) -> Option<String> {
+    if reports.is_empty() {
+        return None;
+    }
+    Some(
+        reports
+            .iter()
+            .map(|report| format!("{}:{}", report.id, report.status))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
 
 /// 列出插件注册表（metadata 与加载状态）。
 /// store 处于保护状态时报错，而非静默返回空列表误导用户；
@@ -15,7 +133,12 @@ pub(crate) fn list_plugins(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
-    let outcome = service.list(store.inner());
+    let outcome = service.list(store.inner()).map(|records| {
+        records
+            .into_iter()
+            .map(PluginView::from)
+            .collect::<Vec<_>>()
+    });
     log_outcome("list_plugins", None, &outcome);
     outcome
 }
@@ -139,7 +262,12 @@ pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
-    let outcome = service.apply_providers(store.inner());
+    let outcome = service.apply_providers(store.inner()).map(|outcomes| {
+        outcomes
+            .into_iter()
+            .map(PluginApplyReport::from)
+            .collect::<Vec<_>>()
+    });
     let context = outcome
         .as_ref()
         .ok()
@@ -165,4 +293,111 @@ where
     })
     .await
     .map_err(|e| format!("插件安装任务执行失败：{e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{ApplyStatus, PluginApplyReport, PluginView, apply_summary};
+    use crate::plugin::{PluginOutcome, PluginRecord, ProjectionStatus};
+
+    /// 投影状态的线格式钉死：序列化与 `Display` 同为 `applied` / `failed` /
+    /// `skipped` 三个小写词。前端按同一组词渲染标签（见
+    /// `src/pages/provider/applyStatus.js`），改词即前端标签静默失效——
+    /// 故这三条断言是跨端契约的护栏。
+    #[test]
+    fn apply_status_wire_values_are_pinned() {
+        for (status, wire) in [
+            (ApplyStatus::Applied, "applied"),
+            (ApplyStatus::Failed, "failed"),
+            (ApplyStatus::Skipped, "skipped"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire),
+                "序列化形态与线格式词一致"
+            );
+            assert_eq!(status.to_string(), wire, "Display 与线格式词一致");
+        }
+    }
+
+    /// 线格式词与服务层的内部状态词同形：日志行（ADR 0008）与 IPC 载荷说的是
+    /// 同一件事，两处一旦漂移，日志与界面就会各说各话。
+    #[test]
+    fn wire_status_words_match_the_service_side_words() {
+        for (internal, wire) in [
+            (ProjectionStatus::Applied, ApplyStatus::Applied),
+            (ProjectionStatus::Failed, ApplyStatus::Failed),
+            (ProjectionStatus::Skipped, ApplyStatus::Skipped),
+        ] {
+            assert_eq!(
+                internal.to_string(),
+                wire.to_string(),
+                "日志词与线格式词同形"
+            );
+        }
+    }
+
+    /// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有
+    /// 插件时不带上下文——成功行因此不留尾随的冒号与空格。
+    #[test]
+    fn apply_summary_lists_each_plugin_status() {
+        assert_eq!(apply_summary(&[]), None, "没有插件即没有上下文");
+
+        let report = |id: &str, status: ApplyStatus| PluginApplyReport {
+            id: id.to_owned(),
+            status,
+            files: Vec::new(),
+            skipped: Vec::new(),
+            reason: None,
+        };
+        let reports = vec![
+            report("pi", ApplyStatus::Applied),
+            report("claude-code", ApplyStatus::Failed),
+        ];
+
+        assert_eq!(
+            apply_summary(&reports).as_deref(),
+            Some("pi:applied claude-code:failed")
+        );
+    }
+
+    /// 映射：服务层的注册表描述 → 线格式。配置目录在交付层才转成字符串——
+    /// 服务层给的是路径，路径怎么显示给界面是交付层的事。
+    #[test]
+    fn plugin_view_maps_the_internal_record_to_the_wire_shape() {
+        let record = PluginRecord {
+            source: "builtin:pi".to_owned(),
+            builtin: true,
+            enabled: true,
+            id: "pi".to_owned(),
+            config_dir: Some(PathBuf::from("/home/u/.pi")),
+            settings_schema: None,
+            error: None,
+        };
+
+        let view = PluginView::from(record);
+
+        assert_eq!(view.id, "pi");
+        assert!(view.builtin);
+        assert_eq!(view.config_dir.as_deref(), Some("/home/u/.pi"));
+    }
+
+    /// 映射：投影结果 → 线格式（状态词逐字对应）。
+    #[test]
+    fn plugin_apply_report_maps_the_internal_outcome_to_the_wire_shape() {
+        let outcome = PluginOutcome {
+            id: "pi".to_owned(),
+            status: ProjectionStatus::Failed,
+            files: Vec::new(),
+            skipped: Vec::new(),
+            reason: Some("原因".to_owned()),
+        };
+
+        let report = PluginApplyReport::from(outcome);
+
+        assert_eq!(report.status, ApplyStatus::Failed);
+        assert_eq!(report.reason.as_deref(), Some("原因"));
+    }
 }
