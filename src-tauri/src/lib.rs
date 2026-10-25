@@ -1,4 +1,5 @@
 mod command;
+mod config;
 mod fs_util;
 mod interpolate;
 mod logging;
@@ -113,7 +114,7 @@ pub fn run() {
             // 校验通过，这里只消费；startup 自身的失败用 `?` 让启动退出。
             let service = app.state::<PluginService>();
             let app_store = app.state::<AppStore>();
-            service.startup(&app_store)?;
+            service.startup(app_store.inner())?;
             match app_store.with_read(|guard| guard.config_snapshot()) {
                 Ok(config) => log::info!(
                     "startup complete: {} providers, {} plugins",

@@ -4,9 +4,11 @@
 
 use std::{fs, io::ErrorKind, path::Path};
 
-use crate::store::{AppStore, PluginEntry};
-
-use super::{INSTALL_LOCK_POISONED, PLACED_CONFIG, PluginConfig, PluginService, write_placed_file};
+use super::{
+    INSTALL_LOCK_POISONED, PLACED_CONFIG, PluginConfig, PluginService,
+    ports::{PluginEntries, PluginStore},
+    write_placed_file,
+};
 
 impl PluginService {
     /// 读取插件配置（ADR 0018）：返回该插件对全局变量的覆盖与私有表单数据。
@@ -14,11 +16,11 @@ impl PluginService {
     /// 报错并给出可读原因，绝不静默降级为空配置。
     pub(crate) fn get_config(
         &self,
-        store: &AppStore,
+        store: &impl PluginEntries,
         source: &str,
     ) -> Result<PluginConfig, String> {
         let entry = store
-            .with_read(|s| s.plugin_by_source(source))
+            .plugin_by_source(source)
             .map_err(|err| err.to_string())?;
         read_plugin_config(&self.paths.plugin_dir(&entry.id))
     }
@@ -31,7 +33,7 @@ impl PluginService {
     /// （ADR 0008），日志只带 id。
     pub(crate) fn set_config(
         &self,
-        store: &AppStore,
+        store: &impl PluginStore,
         source: &str,
         plugin_config: &PluginConfig,
     ) -> Result<(), String> {
@@ -40,18 +42,18 @@ impl PluginService {
             .lock()
             .map_err(|_| INSTALL_LOCK_POISONED)?;
 
-        // 短锁内完成条目读取与校验：声明的真相源就是当前全局变量表。
-        let entry = store.with_read(|guard| -> Result<PluginEntry, String> {
-            let variables = guard.variables_snapshot().map_err(|err| err.to_string())?;
-            for name in plugin_config.variables.keys() {
-                if !variables.contains_key(name) {
-                    return Err(format!(
-                        "变量「{name}」未在全局变量表中声明，不能写入插件配置的覆盖项；请先在全局变量中声明。"
-                    ));
-                }
+        // 条目读取与校验：声明的真相源就是当前全局变量表。
+        let variables = store.variables_snapshot().map_err(|err| err.to_string())?;
+        for name in plugin_config.variables.keys() {
+            if !variables.contains_key(name) {
+                return Err(format!(
+                    "变量「{name}」未在全局变量表中声明，不能写入插件配置的覆盖项；请先在全局变量中声明。"
+                ));
             }
-            guard.plugin_by_source(source).map_err(|err| err.to_string())
-        })?;
+        }
+        let entry = store
+            .plugin_by_source(source)
+            .map_err(|err| err.to_string())?;
 
         let plugin_dir = self.paths.plugin_dir(&entry.id);
         fs::create_dir_all(&plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;

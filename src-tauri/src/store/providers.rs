@@ -10,7 +10,7 @@ use crate::{
     variables::Variables,
 };
 
-use super::schema::{Change, Config, StoreError};
+use crate::config::{Change, Config, StoreError};
 
 /// 挑出参与投影的 Provider（#94）：`enabled == false` 者整体不参与——既不写入
 /// 插件，也不做占位符插值，因此其字段里的占位符错误不会牵连整个插件失败。

@@ -6,13 +6,14 @@
 
 use std::{fs, path::Path, sync::Arc};
 
-use crate::store::{AppStore, PluginEntry, StoreError};
+use crate::config::{PluginEntry, StoreError};
 
 use super::{
     INSTALL_LOCK_POISONED, LoadedPlugin, PlacedPlugin, PluginService, PluginState,
     REGISTRY_LOCK_POISONED, builtin,
     execution::validate_component,
     manifest::{Manifest, parse_manifest},
+    ports::PluginEntries,
     remove_placed_dir,
     source::{PluginSource, is_https_url},
 };
@@ -30,7 +31,11 @@ impl PluginService {
     /// 整个流程在 `install_lock` 内独占：避免两个并发 install 各自落位后又被对方
     /// 的清理逻辑误删赢家的产物。配置存储只在短读/短写处加锁：获取、校验与落位
     /// 全程不持锁。
-    pub(crate) fn add_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    pub(crate) fn add_plugin(
+        &self,
+        store: &impl PluginEntries,
+        source: &str,
+    ) -> Result<(), String> {
         let _install_guard = self
             .install_lock
             .lock()
@@ -43,7 +48,7 @@ impl PluginService {
 
         // 1. 来源即条目唯一身份：重复添加在发起下载之前拒绝。
         let duplicate = store
-            .with_read(|s| s.list_plugins())
+            .list_plugins()
             .map_err(|err| err.to_string())?
             .iter()
             .any(|plugin| plugin.source == source_text);
@@ -59,7 +64,7 @@ impl PluginService {
         let (placed, manifest) = self.fetch_placed(&parsed)?;
         // id 冲突预检：与写入时的复检问同一句规则（见 `Store::check_plugin_id_conflict`）。
         store
-            .with_read(|s| s.check_plugin_id_conflict(&source_text, &manifest.id))
+            .check_plugin_id_conflict(&source_text, &manifest.id)
             .map_err(|err| err.to_string())?;
         // 链接期校验先于解析配置目录与落位：wasm 不是组件或接口不兼容时不建
         // 目录、不落位、不写条目。仅做字节反序列化与类型检查，不触发组件 init、
@@ -78,7 +83,7 @@ impl PluginService {
             enabled: true,
             id: loaded.id().to_owned(),
         };
-        if let Err(e) = store.with_write(|s| s.add_plugin(&entry)) {
+        if let Err(e) = store.add_plugin(&entry) {
             // 条目写不进去，就不能留下注册表看不见的落位目录。
             // 清理失败时把残留路径一并回报：避免注释承诺与实际行为偏离。
             if let Err(uninstall_err) = loaded.plugin.uninstall() {
@@ -169,14 +174,14 @@ impl PluginService {
     ///
     /// 先从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步注册表
     /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
-    pub(crate) fn enable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    pub(crate) fn enable(&self, store: &impl PluginEntries, source: &str) -> Result<(), String> {
         self.set_enabled(store, source, true)
     }
 
     /// 禁用插件条目：与启用同一条流程（见 [`Self::set_enabled`]），只是方向不同。
     ///
     /// 先改配置条目，再把内存注册表换成 Disabled 态（保留描述供列表展示）。
-    pub(crate) fn disable(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    pub(crate) fn disable(&self, store: &impl PluginEntries, source: &str) -> Result<(), String> {
         self.set_enabled(store, source, false)
     }
 
@@ -195,16 +200,21 @@ impl PluginService {
     /// 否则移除可能插进「写配置条目」与「同步注册表」之间，留下条目与落位文件
     /// 都已不在、注册表却仍记着已装载的僵尸项；重新加载则可能读走过期的
     /// `enabled` 并按它覆盖注册表，与刚落盘的配置对不上。
-    /// 锁序 `install_lock` → store → entries，与其余安装类流程一致；
-    /// 本流程只读本机文件、不联网，临界区比含下载的流程短。
-    fn set_enabled(&self, store: &AppStore, source: &str, enabled: bool) -> Result<(), String> {
+    /// 锁序 `install_lock` → store → entries：端口的每次读写各占一把短临界区，
+    /// 注册表锁在其外；本流程只读本机文件、不联网，临界区比含下载的流程短。
+    fn set_enabled(
+        &self,
+        store: &impl PluginEntries,
+        source: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
         let _install_guard = self
             .install_lock
             .lock()
             .map_err(|_| INSTALL_LOCK_POISONED)?;
 
         let entry = store
-            .with_read(|s| s.plugin_by_source(source))
+            .plugin_by_source(source)
             .map_err(|err| err.to_string())?;
         if entry.enabled == enabled {
             return Ok(());
@@ -225,14 +235,7 @@ impl PluginService {
         // 移除与本流程互斥，此处是纵深防御。并发方已完成同样的切换时返回
         // `None`（配置与注册表均已同步，直接成功）。
         let entry = store
-            .with_write(|guard| -> Result<Option<PluginEntry>, StoreError> {
-                let entry = guard.plugin_by_source(source)?;
-                if entry.enabled == enabled {
-                    return Ok(None);
-                }
-                guard.set_plugin_enabled(source, enabled)?;
-                Ok(Some(entry))
-            })
+            .set_plugin_enabled(source, enabled)
             .map_err(|err| err.to_string())?;
         let Some(entry) = entry else {
             return Ok(());
@@ -265,7 +268,11 @@ impl PluginService {
     /// 分发，见 ADR 0004）。整个流程在 `install_lock` 内独占：读条目、卸载内存、
     /// 删条目与删落位目录必须连续完成，中间不得插入另一次 install——安装先落位
     /// 后写条目，删目录若放到锁外，并发安装可能在条目删除后重新落位而被误删。
-    pub(crate) fn remove_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    pub(crate) fn remove_plugin(
+        &self,
+        store: &impl PluginEntries,
+        source: &str,
+    ) -> Result<(), String> {
         let _install_guard = self
             .install_lock
             .lock()
@@ -276,29 +283,25 @@ impl PluginService {
             return Err(format!("内置插件不可移除：{source}"));
         }
 
-        // 读条目、卸载注册表与删条目同处一个临界区（锁内读-改-写）；删落位
-        // 目录是 IO，**不**在锁内——锁纪律由 `with_write` 的作用域保证。
-        let entry = store.with_write(|guard| -> Result<Option<PluginEntry>, String> {
-            let entry = match guard.plugin_by_source(source) {
-                Ok(entry) => entry,
-                // 条目已不存在：上一次移除已连同落位目录一并删除，幂等成功。
-                Err(StoreError::MissingSource { .. }) => return Ok(None),
-                Err(e) => return Err(e.to_string()),
-            };
-
-            // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
-            self.entries
-                .write()
-                .map_err(|_| REGISTRY_LOCK_POISONED.to_owned())?
-                .remove(&entry.id);
-
-            // 2. 删配置条目（锁内读-改-写，与读条目同处一个临界区）。
-            guard.delete_plugin(source).map_err(|err| err.to_string())?;
-            Ok(Some(entry))
-        })?;
-        let Some(entry) = entry else {
-            return Ok(());
+        // 读条目、卸载注册表与删条目三步之间不持存储锁：端口的每个操作自带
+        // 一把短临界区（见 `store::ports`），服务层拿不到锁，也就没有在锁内
+        // 做 IO 的可能。条目写入的互斥由 `install_lock` 保证（所有装卸路径都
+        // 在它里面）。
+        let entry = match store.plugin_by_source(source) {
+            Ok(entry) => entry,
+            // 条目已不存在：上一次移除已连同落位目录一并删除，幂等成功。
+            Err(StoreError::MissingSource { .. }) => return Ok(()),
+            Err(e) => return Err(e.to_string()),
         };
+
+        // 1. 先从内存注册表卸载：此后删除期间插件不再可执行。
+        self.entries
+            .write()
+            .map_err(|_| REGISTRY_LOCK_POISONED.to_owned())?
+            .remove(&entry.id);
+
+        // 2. 删配置条目。
+        store.delete_plugin(source).map_err(|err| err.to_string())?;
 
         // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
         remove_placed_dir(&self.paths.plugin_dir(&entry.id))
@@ -314,7 +317,11 @@ impl PluginService {
     ///
     /// 整个流程在 `install_lock` 内独占：与 add / remove 共用同一把锁，避免
     /// reload 写到一半时另一 add 把同一 id 的产物覆盖或被 remove 误删。
-    pub(crate) fn reload_plugin(&self, store: &AppStore, source: &str) -> Result<(), String> {
+    pub(crate) fn reload_plugin(
+        &self,
+        store: &impl PluginEntries,
+        source: &str,
+    ) -> Result<(), String> {
         let _install_guard = self
             .install_lock
             .lock()
@@ -322,7 +329,7 @@ impl PluginService {
 
         // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
         let entry = store
-            .with_read(|s| s.plugin_by_source(source))
+            .plugin_by_source(source)
             .map_err(|err| err.to_string())?;
 
         // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。

@@ -14,15 +14,16 @@ use super::{
     projection::project_files,
     source::is_https_url,
     testutil::{
-        LockProbeFetcher, StubFetcher, fetcher_service, manifest_json, snapshot, store_at,
-        stub_service, test_service,
+        LockProbeFetcher, MemoryStore, StubFetcher, fetcher_service, manifest_json, snapshot,
+        store_at, stub_service, test_service,
     },
 };
 use crate::{
+    config::PluginEntry,
     paths::Paths,
     provider::{ApiKey, Provider},
-    store::PluginEntry,
     testutil::temp_home,
+    variables::Variables,
 };
 
 const MANIFEST_URL: &str = "https://example.com/releases/download/v1/manifest.json";
@@ -344,9 +345,9 @@ fn add_plugin_does_not_hold_the_store_lock_while_downloading() {
         Arc::new(LockProbeFetcher::new(Arc::clone(&store), https_stub("pi2"))),
     );
 
-    service.add_plugin(&store, MANIFEST_URL).unwrap();
+    service.add_plugin(store.as_ref(), MANIFEST_URL).unwrap();
 
-    assert!(service.list(&store).unwrap()[0].error.is_none());
+    assert!(service.list(store.as_ref()).unwrap()[0].error.is_none());
 }
 
 /// 同 id、不同来源的并发 install：install_lock 串行化整个流程，
@@ -381,7 +382,7 @@ fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
             thread::spawn(move || {
                 // 子线程 thread_local 为空，需重新设置全局目录。
                 crate::testutil::setup_paths(&home);
-                service.add_plugin(&store, source_a)
+                service.add_plugin(store.as_ref(), source_a)
             })
         },
         {
@@ -390,7 +391,7 @@ fn concurrent_add_plugin_with_same_id_serializes_and_preserves_winner() {
             let home = home_path.clone();
             thread::spawn(move || {
                 crate::testutil::setup_paths(&home);
-                service.add_plugin(&store, source_b)
+                service.add_plugin(store.as_ref(), source_b)
             })
         },
     ];
@@ -429,7 +430,7 @@ fn set_enabled_waits_for_the_install_lock() {
     let home_path = home.path().to_path_buf();
     let store = Arc::new(store_at(home.path()));
     let service = Arc::new(stub_service(home.path(), https_stub("pi2")));
-    service.add_plugin(&store, MANIFEST_URL).unwrap();
+    service.add_plugin(store.as_ref(), MANIFEST_URL).unwrap();
 
     // 主线程占住安装锁：模拟一次进行中的安装类操作。
     let guard = service.install_lock.lock().unwrap();
@@ -442,7 +443,8 @@ fn set_enabled_waits_for_the_install_lock() {
         thread::spawn(move || {
             // 子线程 thread_local 为空，需重新设置全局目录。
             crate::testutil::setup_paths(&home);
-            tx.send(service.disable(&store, MANIFEST_URL)).unwrap();
+            tx.send(service.disable(store.as_ref(), MANIFEST_URL))
+                .unwrap();
         })
     };
 
@@ -1616,6 +1618,53 @@ fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
         "禁用后该条目应从投影中移除：{written}"
     );
     assert!(!raw.contains("sk-disabled-must-not-leak"));
+}
+
+/// 投影路径只经端口读配置（#141 I-1）：内存替身跑通一次完整投影，
+/// 配置存储一侧全程不落文件——家目录里没有 config.json。
+///
+/// 这条用例是 I-1 的验收：服务层不再直连 `AppStore`，故「造一份真配置再投影」
+/// 不再是前提。Provider 与变量表都在内存里，投影读到的就是它们。
+#[test]
+fn apply_providers_projects_from_an_in_memory_store_without_writing_the_config_file() {
+    use crate::provider::Protocol;
+
+    let home = temp_home();
+    let service = stub_service(home.path(), https_stub("pi2"));
+    // 端点里的占位符由内存替身提供的变量表解析：投影读到的 Provider 与变量
+    // 都来自替身，没有一份真配置参与。
+    let store = MemoryStore::new()
+        .with_providers(BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://${HOST}/v1".to_owned(),
+                )]),
+                ..Provider::default()
+            },
+        )]))
+        .with_variables(Variables::from([(
+            "HOST".to_owned(),
+            "api.example.com".to_owned(),
+        )]));
+
+    service.add_plugin(&store, MANIFEST_URL).unwrap();
+    let reports = service.apply_providers(&store).unwrap();
+
+    let pi2 = plugin_report(&reports, "pi2");
+    assert_eq!(pi2.status, ApplyStatus::Applied, "{:?}", pi2.reason);
+    let models_path = home.path().join(".pi2").join("agent").join("models.json");
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&models_path).unwrap()).unwrap();
+    assert_eq!(
+        written["providers"]["gateway"]["baseUrl"], "https://api.example.com/v1",
+        "投影的 Provider 来自内存替身"
+    );
+    assert!(
+        !home.path().join(".maestro").join("config.json").exists(),
+        "配置存储不该落盘：内存替身全程没碰文件系统"
+    );
 }
 
 /// 结果行携带的逐插件状态摘要（ADR 0008）：有插件时逐项 `id:status`；没有

@@ -15,7 +15,7 @@ pub(crate) fn list_plugins(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
-    let outcome = service.list(&store);
+    let outcome = service.list(store.inner());
     log_outcome("list_plugins", None, &outcome);
     outcome
 }
@@ -32,9 +32,9 @@ pub(crate) fn set_plugin_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let outcome = if enabled {
-        service.enable(&store, &source)
+        service.enable(store.inner(), &source)
     } else {
-        service.disable(&store, &source)
+        service.disable(store.inner(), &source)
     };
     log_outcome(
         "set_plugin_enabled",
@@ -84,7 +84,7 @@ pub(crate) fn remove_plugin(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<(), String> {
-    let outcome = service.remove_plugin(&store, &source);
+    let outcome = service.remove_plugin(store.inner(), &source);
     log_outcome("remove_plugin", Some(&format!("source={source}")), &outcome);
     outcome
 }
@@ -97,7 +97,7 @@ pub(crate) fn get_plugin_config(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<PluginConfig, String> {
-    let outcome = service.get_config(&store, &source);
+    let outcome = service.get_config(store.inner(), &source);
     log_outcome(
         "get_plugin_config",
         Some(&format!("source={source}")),
@@ -139,7 +139,7 @@ pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
-    let outcome = service.apply_providers(&store);
+    let outcome = service.apply_providers(store.inner());
     let context = outcome
         .as_ref()
         .ok()

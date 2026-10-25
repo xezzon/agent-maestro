@@ -4,7 +4,7 @@
 //! 只是 `Result` 里的一个错误值，而是一个有名字的状态——读写两条路径都经由
 //! [`ProtectedState::config`]，因此不可能只在一侧失效。
 
-use super::schema::{Config, StoreError};
+use crate::config::{Config, StoreError};
 
 /// 存储的内存状态：可用的配置，或「不可用」的原因。
 #[derive(Debug)]

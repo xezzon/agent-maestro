@@ -6,16 +6,18 @@
 //! 第三方来源（https 与 file）的获取、落位与生命周期见 ADR 0006。
 //!
 //! 本模块持有插件服务的共享词汇：四层类型（`PlacedPlugin` → `PluginMeta` →
-//! `LoadedPlugin` → `PluginState`）、落位目录约定，以及与配置存储、命令层共用的
-//! 条目 / 视图 / 配置类型。前几者是模块私有项——定义在模块根，子模块可直接使用
-//! （Rust 的私有项对后代模块可见），不向 crate 外暴露。
+//! `LoadedPlugin` → `PluginState`）、落位目录约定，以及插件配置类型。前几者是
+//! 模块私有项——定义在模块根，子模块可直接使用（Rust 的私有项对后代模块可见），
+//! 不向 crate 外暴露。插件条目不是本模块的词汇：它是配置文件的形状，住在
+//! crate 根的中立层 [`crate::config`]（见 [`ports`]）。
 //!
 //! 行为按职责拆在同级子模块：
 //! - [`install`]：获取、落位、启停、移除与重新加载；
 //! - [`projection`]：Provider 投影与文件路径拼接；
 //! - [`config`]：插件配置（`config.json`）读写；
 //! - [`source`]：插件来源与 https 地址的判定；
-//! - [`manifest`]：manifest 的解析、校验与 `config_dir` 声明语法。
+//! - [`manifest`]：manifest 的解析、校验与 `config_dir` 声明语法；
+//! - [`ports`]：服务层对配置存储的端口（它真正需要哪些能力）。
 
 mod builtin;
 mod config;
@@ -23,6 +25,7 @@ mod execution;
 mod fetch;
 mod install;
 mod manifest;
+pub(crate) mod ports;
 mod projection;
 mod source;
 
@@ -44,15 +47,16 @@ use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
 use crate::{
+    config::PluginEntry,
     fs_util::{Durability, write_atomic},
     paths::Paths,
     plugin::builtin::BUILTINS,
-    store::{AppStore, PluginEntry},
     variables::Variables,
 };
 use execution::SkippedProvider;
 use fetch::{Fetcher, HttpFetcher};
 use manifest::{Manifest, parse_placed};
+use ports::PluginEntries;
 use source::PluginSource;
 
 /// 落位目录中的 manifest 文件名。
@@ -344,9 +348,11 @@ impl PluginService {
     ///
     /// 宿主路径由构造时注入（见 [`PluginService::new`]）。配置存储不可用则
     /// 降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
-    pub(crate) fn startup(&self, store: &AppStore) -> Result<(), String> {
+    ///
+    /// 配置存储经端口访问（见 [`ports`]）：服务层拿不到它的锁与落盘时机。
+    pub(crate) fn startup(&self, store: &impl PluginEntries) -> Result<(), String> {
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
-        let plugin_entries = match store.with_read(|s| s.list_plugins()) {
+        let plugin_entries = match store.list_plugins() {
             Ok(plugin_entries) => plugin_entries,
             Err(reason) => {
                 log::error!(
@@ -401,12 +407,10 @@ impl PluginService {
     }
 
     /// 当前注册表视图。
-    pub(crate) fn list(&self, store: &AppStore) -> Result<Vec<PluginView>, String> {
+    pub(crate) fn list(&self, store: &impl PluginEntries) -> Result<Vec<PluginView>, String> {
         // 配置损坏时把原因原样带出去（哪个文件坏了、坏在哪）——「配置文件损坏」
         // 这四个字会让用户去猜是哪个文件。
-        let plugin_entries = store
-            .with_read(|s| s.list_plugins())
-            .map_err(|err| err.to_string())?;
+        let plugin_entries = store.list_plugins().map_err(|err| err.to_string())?;
         let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
         let plugin_view =
             |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginView {

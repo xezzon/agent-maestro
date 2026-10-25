@@ -6,7 +6,7 @@
 
 use std::{fs, path::Path};
 
-use super::schema::{Config, StoreError};
+use crate::config::{Config, StoreError};
 use crate::fs_util::{Durability, write_atomic};
 
 /// 原子写入：同目录临时文件 → 落盘 → rename 覆盖目标。

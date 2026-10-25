@@ -1,22 +1,27 @@
 //! 配置存储：启动时从磁盘加载进内存，变更后原子写回。
 //!
 //! 模块按职责拆开：
-//! - [`schema`]：配置的形状（顶层文档、插件条目、存储错误、变更标记）；
 //! - [`protected`]：保护态（配置文件损坏时拒绝一切读写）；
 //! - [`persist`]：原子落盘（临时文件 + rename，写法见 crate 级 `fs_util`）；
 //! - [`providers`]：Provider 仓储（新增/更新/删除/启停 + 落盘前的一致性校验）；
 //! - [`plugins`]：插件条目仓储（新增/删除/启停）；
 //! - [`variable_table`]：变量表（整包替换 + 名合法性）。
 //!
-//! 本模块（`Store`）是它们之间的编排：读路径给语义化查询，写路径统一经由
+//! 配置文档的**形状**（顶层文档、插件条目、存储错误）住在 crate 根的
+//! [`crate::config`]：存储层与插件服务两侧都消费它，故它不属于任何一侧。
+//!
+//! 本模块（`Store`）是各仓储之间的编排：读路径给语义化查询，写路径统一经由
 //! [`Store::mutate`]（取当前配置 → clone → 交仓储改 → 落盘 → 换状态）；
 //! [`AppStore`] 则在其外加一把读写锁，把「短临界区」的纪律固定在类型上。
+//!
+//! 插件服务不直接拿 `AppStore`：它经由 [`crate::plugin::ports`] 声明的端口
+//! 访问配置存储，实现在 [`ports`]。
 
 mod persist;
 mod plugins;
+mod ports;
 mod protected;
 mod providers;
-mod schema;
 mod variable_table;
 
 #[cfg(test)]
@@ -29,12 +34,13 @@ use std::{
     sync::RwLock,
 };
 
-use crate::{provider::Provider, variables::Variables};
-
-pub(crate) use schema::{CONFIG_VERSION, Config, PluginEntry, StoreError};
+use crate::{
+    config::{CONFIG_VERSION, Change, Config, PluginEntry, StoreError},
+    provider::Provider,
+    variables::Variables,
+};
 
 use protected::ProtectedState;
-use schema::Change;
 
 /// 配置存储的锁被毒化（其它命令持锁期间 panic）时对用户可见的原因。
 /// `AppStore` 与插件服务共用同一句文案：两条加锁路径对用户是同一件事。
@@ -289,10 +295,9 @@ pub(crate) struct AppStore {
 impl AppStore {
     /// 在读锁内执行闭包：闭包的返回值即脱离锁的那份自有值。
     ///
-    /// 锁守卫不出作用域——「不得持锁做 IO」这条纪律因此由类型保证，而不是靠
-    /// 注释提醒（此前散在 4 处注释里）。读多写少：list_plugins、
-    /// plugin_by_source、provider 列表等只读路径在同一 Store 上并发；写操作
-    /// 走 [`AppStore::with_write`] 独占。
+    /// 锁守卫不出作用域——调用方拿不到守卫，自己的 IO 便不会落在锁内。
+    /// 插件服务够不到这一层：它经 [`crate::plugin::ports`] 的端口访问配置
+    /// 存储，锁与落盘时机都在适配器一侧（#141 I-1）。
     ///
     /// 锁边界不擦除错误类型（#141 I-3）：闭包的错误类型 `E` 原样透传——存储
     /// 错误（[`StoreError`]）由命令层经其 `Display` 归一为面向用户的文案；
@@ -308,12 +313,10 @@ impl AppStore {
 
     /// 在写锁内执行闭包：独占期间所有读守卫与其它写守卫均需等待。
     ///
-    /// 锁被毒化同样报错（经 [`LockPoisoned`] 折进闭包的错误类型）。闭包只应做
-    /// 「改内存里的配置」这一件事——**不要在闭包里做 IO**：写路径的原子落盘
-    /// 由 [`Store`] 在闭包返回后完成（见 [`Store::mutate`]），但那一步仍在这把
-    /// 锁内——落盘期间持锁是既有取舍（写路径要「改内存 + 落盘」原子完成），
-    /// 本方法保证的是**调用方**的锁守卫出不了作用域，故调用方自己的 IO 不会
-    /// 落在锁内。
+    /// 锁被毒化同样报错（经 [`LockPoisoned`] 折进闭包的错误类型）。写路径的
+    /// 原子落盘由 [`Store`] 在闭包返回后完成（见 [`Store::mutate`]），但那一步
+    /// 仍在这把锁内——落盘期间持锁是既有取舍（写路径要「改内存 + 落盘」原子
+    /// 完成）。锁守卫不出作用域，故调用方自己的 IO 不会落在锁内。
     pub(crate) fn with_write<T, E>(
         &self,
         f: impl FnOnce(&mut Store) -> Result<T, E>,

@@ -1,8 +1,12 @@
-//! 配置存储的形状：顶层文档、插件条目、存储错误与变更标记。
+//! 配置文档的形状：顶层文档、插件条目、存储错误与变更标记。
 //!
 //! 本模块只声明「配置长什么样」与「出错时怎么说」，不含读写行为——行为分给
-//! [`providers`]（Provider 仓储）、[`plugins`]（插件条目仓储）、
-//! [`variable_table`]（变量表）与 [`persist`]（原子落盘）。
+//! [`crate::store`]（Provider 仓储、插件条目仓储、变量表、原子落盘与保护态）。
+//!
+//! 住在 crate 根而非 `store/`：这些词汇被存储层与插件服务**两侧**消费（插件
+//! 服务读写插件条目，存储层把它们落盘）。若词汇住在存储层，插件服务就得依赖
+//! 存储层；而存储层又要实现插件服务声明的端口（见 [`crate::plugin::ports`]）——
+//! 两侧会因此互相依赖成环。放在中立层，两边各自单向依赖它（#141 I-1）。
 
 use std::{collections::BTreeMap, fmt::Display, path::PathBuf};
 
@@ -105,35 +109,35 @@ pub(crate) enum StoreError {
 
 impl StoreError {
     /// 「Provider 不存在」错误：update/delete 不做 upsert，绝不静默覆盖。
-    pub(super) fn missing_slug(slug: &str) -> Self {
+    pub(crate) fn missing_slug(slug: &str) -> Self {
         Self::MissingSlug {
             slug: slug.to_owned(),
         }
     }
 
     /// 「已存在同名 Provider」错误。
-    pub(super) fn duplicate_slug(slug: &str) -> Self {
+    pub(crate) fn duplicate_slug(slug: &str) -> Self {
         Self::DuplicateSlug {
             slug: slug.to_owned(),
         }
     }
 
     /// 「插件条目不存在」错误：按来源定位不到条目即报错，绝不静默写入。
-    pub(super) fn missing_source(source: &str) -> Self {
+    pub(crate) fn missing_source(source: &str) -> Self {
         Self::MissingSource {
             source: source.to_owned(),
         }
     }
 
     /// 「已存在同一来源的插件条目」错误。
-    pub(super) fn duplicate_source(source: &str) -> Self {
+    pub(crate) fn duplicate_source(source: &str) -> Self {
         Self::DuplicateSource {
             source: source.to_owned(),
         }
     }
 
     /// 「同一 id 已被其它来源的插件条目持有」错误。
-    pub(super) fn duplicate_id(id: &str, source: &str) -> Self {
+    pub(crate) fn duplicate_id(id: &str, source: &str) -> Self {
         Self::DuplicateId {
             id: id.to_owned(),
             source: source.to_owned(),
@@ -141,7 +145,7 @@ impl StoreError {
     }
 
     /// 「变量名不合法」错误：占位符无法引用。
-    pub(super) fn invalid_variable_name(name: &str) -> Self {
+    pub(crate) fn invalid_variable_name(name: &str) -> Self {
         Self::InvalidVariableName {
             name: name.to_owned(),
         }
@@ -186,7 +190,7 @@ impl Display for StoreError {
                 f,
                 "变量名不合法：「{name}」\n变量名只能包含字母、数字与下划线（见 ADR 0014）。"
             ),
-            StoreError::Unavailable => write!(f, "{}", super::STORE_LOCK_POISONED),
+            StoreError::Unavailable => write!(f, "{}", crate::store::STORE_LOCK_POISONED),
         }
     }
 }
@@ -195,7 +199,7 @@ impl Display for StoreError {
 ///
 /// `Changed` 落盘并替换内存状态；`Unchanged` 什么都不做（幂等路径：
 /// 状态未变即不写盘）。两者都带回领域值——「没变化」不等于「没有返回值」。
-pub(super) enum Change<T> {
+pub(crate) enum Change<T> {
     /// 有变化：落盘成功后替换内存状态。
     Changed(T),
     /// 无变化：不写盘、不动内存状态。

@@ -8,30 +8,28 @@ use std::{
 
 use crate::{
     provider::{Provider, interpolate_providers},
-    store::{AppStore, StoreError},
     variables::Variables,
 };
 
 use super::{
     ApplyStatus, LoadedPlugin, PluginApplyReport, PluginService, PluginState,
     REGISTRY_LOCK_POISONED, config::read_plugin_config, execution::SkippedProvider,
+    ports::ProviderSource,
 };
 
 impl PluginService {
     /// 应用到工具：把 Provider 投影进各插件，返回逐插件结果。
     ///
     /// 禁用 Provider（`enabled == false`）在读取配置时即剔除（#94），不进入插值
-    /// 与写入。store 锁在读取 providers 后即释放，注册表锁也仅用于快照：
-    /// 插件执行时长不受应用控制，执行全程不持锁，不得阻塞其它命令。
+    /// 与写入。配置存储经端口访问（见 [`ProviderSource`]）：读完投影输入即释放，
+    /// 注册表锁也仅用于快照——插件执行时长不受应用控制，执行全程不持锁，
+    /// 不得阻塞其它命令。
     pub(crate) fn apply_providers(
         &self,
-        store: &AppStore,
+        store: &impl ProviderSource,
     ) -> Result<Vec<PluginApplyReport>, String> {
-        let (providers, variables) = store
-            .with_read(|s| -> Result<_, StoreError> {
-                Ok((s.enabled_providers()?, s.variables_snapshot()?))
-            })
-            .map_err(|err| err.to_string())?;
+        let snapshot = store.projection_snapshot().map_err(|err| err.to_string())?;
+        let (providers, variables) = (snapshot.providers, snapshot.variables);
         let reports = self.write_providers(&providers, &variables)?;
         // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
         // 在此按插件各记一条（ADR 0008：服务层的投影步骤打 DEBUG，默认级别

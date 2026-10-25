@@ -1,9 +1,9 @@
 //! 插件条目仓储：插件条目的新增、删除与启停。
 //!
-//! 条目是配置文件的形状（见 [`super::schema::PluginEntry`]），规则与 Provider
+//! 条目是配置文件的形状（见 [`crate::config::PluginEntry`]），规则与 Provider
 //! 同源：来源即条目唯一身份，id 是来源到落位目录的唯一映射（见 ADR 0006）。
 
-use super::schema::{Change, Config, PluginEntry, StoreError};
+use crate::config::{Change, Config, PluginEntry, StoreError};
 
 /// 新增插件条目，追加在现有条目之后。
 ///
