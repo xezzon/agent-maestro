@@ -5,7 +5,7 @@
 
 use std::{
     fmt::{self, Display},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 /// 配置存储的锁被毒化（其它命令持锁期间 panic）。
@@ -15,7 +15,10 @@ use std::{
 /// `From<LockPoisoned>`，统一归到「配置存储不可用」这一句。
 pub(crate) struct LockPoisoned;
 
-/// 配置存储不可用时对用户可见的原因（锁毒化与保护态共用）。
+/// 配置存储不可用时对用户可见的原因。
+///
+/// 只由锁毒化产出：保护态（配置文件损坏）带的是自己的原因（损坏 / 版本不受支持），
+/// 不走这一句。
 const STORE_LOCK_POISONED: &str = "配置存储不可用";
 
 /// 配置文件本身的错误：读取、解析、序列化与落盘。
@@ -43,14 +46,14 @@ pub(crate) enum ConfigError {
 }
 
 impl ConfigError {
-    pub(crate) fn corrupt(path: &std::path::Path, detail: impl Into<String>) -> Self {
+    pub(crate) fn corrupt(path: &Path, detail: impl Into<String>) -> Self {
         Self::Corrupt {
             path: path.to_path_buf(),
             detail: detail.into(),
         }
     }
 
-    pub(crate) fn io(path: &std::path::Path, detail: impl Into<String>) -> Self {
+    pub(crate) fn io(path: &Path, detail: impl Into<String>) -> Self {
         Self::Io {
             path: path.to_path_buf(),
             detail: detail.into(),

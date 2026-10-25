@@ -2,7 +2,7 @@
 
 use std::{
     fmt::{self, Display},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use super::{
@@ -182,7 +182,7 @@ pub(crate) enum PluginError {
 }
 
 impl PluginError {
-    pub(crate) fn read_file(path: &std::path::Path, detail: impl Into<String>) -> Self {
+    pub(crate) fn read_file(path: &Path, detail: impl Into<String>) -> Self {
         Self::ReadFile {
             path: path.to_path_buf(),
             detail: detail.into(),
@@ -195,7 +195,7 @@ impl PluginError {
         }
     }
 
-    pub(crate) fn remove_directory(path: &std::path::Path, detail: impl Into<String>) -> Self {
+    pub(crate) fn remove_directory(path: &Path, detail: impl Into<String>) -> Self {
         Self::RemoveDirectory {
             path: path.to_path_buf(),
             detail: detail.into(),
