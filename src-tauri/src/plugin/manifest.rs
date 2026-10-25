@@ -86,12 +86,14 @@ impl DeclaredConfigDir {
             .filter(|(variable, _)| !variable.is_empty())
             .ok_or_else(|| PluginError::ConfigDirVariableRequired {
                 declared: declared.to_owned(),
+                supported: &crate::paths::SUPPORTED_VARIABLES,
             })?;
         // `~` 与 `$HOME` 同义：两者解析到同一基准目录。
         if variable != "~" && !crate::paths::SUPPORTED_VARIABLES.contains(&variable) {
             return Err(PluginError::ConfigDirUnsupportedVariable {
                 declared: declared.to_owned(),
                 variable: variable.to_owned(),
+                supported: &crate::paths::SUPPORTED_VARIABLES,
             });
         }
         let relative = PathBuf::from(relative);
@@ -133,6 +135,7 @@ impl DeclaredConfigDir {
             .ok_or_else(|| PluginError::ConfigDirUnsupportedVariable {
                 declared: self.declared.clone(),
                 variable: self.variable.clone(),
+                supported: &crate::paths::SUPPORTED_VARIABLES,
             })?
             .to_path_buf();
 
@@ -640,6 +643,29 @@ mod tests {
         assert!(
             !root.path().join("home").exists(),
             "被拒绝的声明不得产生任何目录"
+        );
+    }
+
+    /// 报错里列出的受支持变量前缀逐字钉住：五个、跨平台固定（ADR 0011）。
+    ///
+    /// 该清单由调用方填进错误类型（错误类型不反向依赖 `paths`），故在此钉住，
+    /// 免得清单被换掉却无人察觉——用户正是照着这句去改 `config_dir` 的。
+    #[test]
+    fn the_config_dir_error_lists_the_supported_variable_prefixes_verbatim() {
+        let unsupported = DeclaredConfigDir::parse("$FOO/.x").unwrap_err();
+        assert!(
+            unsupported.contains(
+                "config_dir「$FOO/.x」使用了不支持的平台变量「$FOO」（支持：$HOME、$XDG_CONFIG_HOME、$LOCAL_APP_CONFIG、$XDG_DATA_HOME、$LOCAL_APP_DATA）"
+            ),
+            "{unsupported}"
+        );
+
+        let no_prefix = DeclaredConfigDir::parse("$HOME").unwrap_err();
+        assert!(
+            no_prefix.contains(
+                "config_dir「$HOME」必须以平台变量开头（支持：$HOME、$XDG_CONFIG_HOME、$LOCAL_APP_CONFIG、$XDG_DATA_HOME、$LOCAL_APP_DATA）"
+            ),
+            "{no_prefix}"
         );
     }
 

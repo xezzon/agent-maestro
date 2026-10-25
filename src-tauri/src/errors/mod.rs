@@ -2,8 +2,7 @@
 //!
 //! 错误类型大多住在 crate 根而非某一层：配置存储与插件服务两侧都消费其中一部分
 //! （插件服务经端口收存储错误，命令层把两侧的错误都转成字符串交给 IPC），
-//! 放在中立层才不会让两侧互相依赖成环。路径解析失败（`paths::PathError`）例外：
-//! 它只有一个消费者，随 [`crate::paths`] 住，`paths` 因此不反向依赖本模块。
+//! 放在中立层才不会让两侧互相依赖成环。
 //!
 //! 存储错误按仓储职责拆开：[`ConfigError`]（配置文档读写）、[`ProviderError`]、
 //! [`PluginEntryError`] 与 [`VariableError`]。各自把持久化失败包在 `Storage`
@@ -12,15 +11,16 @@
 //! 领域错误拼在一起。
 //!
 //! 每个领域住在自己的子模块里（[`config`] / [`provider`] / [`entry`] /
-//! [`variable`] / [`interpolation`] / [`fetch`] / [`logging`] / [`plugin`]），
-//! 本模块只做两件事：把类型 re-export 出去（`crate::errors::X` 的路径不变，
-//! 调用方零改动），以及收纳跨领域的契约（见 [`impl_storage_error`]）。
+//! [`variable`] / [`interpolation`] / [`fetch`] / [`logging`] / [`paths`] /
+//! [`plugin`]），本模块只做两件事：把类型 re-export 出去（`crate::errors::X`
+//! 的路径不变，调用方零改动），以及收纳跨领域的契约（见 [`impl_storage_error`]）。
 
 pub(crate) use config::{ConfigError, LockPoisoned};
 pub(crate) use entry::PluginEntryError;
 pub(crate) use fetch::FetchError;
 pub(crate) use interpolation::{FieldError, InterpolationError, ProviderInterpolationError};
 pub(crate) use logging::LoggingError;
+pub(crate) use paths::PathError;
 pub(crate) use plugin::PluginError;
 pub(crate) use provider::ProviderError;
 pub(crate) use variable::VariableError;
@@ -30,6 +30,7 @@ mod entry;
 mod fetch;
 mod interpolation;
 mod logging;
+mod paths;
 mod plugin;
 mod provider;
 mod variable;

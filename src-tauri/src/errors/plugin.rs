@@ -87,10 +87,14 @@ pub(crate) enum PluginError {
     ConfigDirMissing,
     ConfigDirVariableRequired {
         declared: String,
+        /// 受支持的平台变量前缀（由调用方填入：错误类型不反向依赖 `paths`）。
+        supported: &'static [&'static str],
     },
     ConfigDirUnsupportedVariable {
         declared: String,
         variable: String,
+        /// 受支持的平台变量前缀（由调用方填入：错误类型不反向依赖 `paths`）。
+        supported: &'static [&'static str],
     },
     ConfigDirMissingRelative {
         declared: String,
@@ -277,15 +281,22 @@ impl Display for PluginError {
                 "manifest.json 不合法：entry「{entry}」必须是插件目录内的相对路径或 https URL"
             ),
             PluginError::ConfigDirMissing => write!(f, "config_dir 未配置"),
-            PluginError::ConfigDirVariableRequired { declared } => write!(
+            PluginError::ConfigDirVariableRequired {
+                declared,
+                supported,
+            } => write!(
                 f,
                 "config_dir「{declared}」必须以平台变量开头（支持：{}）",
-                supported_variables()
+                supported.join("、")
             ),
-            PluginError::ConfigDirUnsupportedVariable { declared, variable } => write!(
+            PluginError::ConfigDirUnsupportedVariable {
+                declared,
+                variable,
+                supported,
+            } => write!(
                 f,
                 "config_dir「{declared}」使用了不支持的平台变量「{variable}」（支持：{}）",
-                supported_variables()
+                supported.join("、")
             ),
             PluginError::ConfigDirMissingRelative { declared } => {
                 write!(f, "config_dir「{declared}」缺少相对片段")
@@ -376,9 +387,4 @@ impl PluginError {
     pub(crate) fn contains(&self, pattern: &str) -> bool {
         self.to_string().contains(pattern)
     }
-}
-
-/// 声明里支持的平台变量前缀（错误信息里列给用户）。
-fn supported_variables() -> String {
-    crate::paths::SUPPORTED_VARIABLES.join("、")
 }
