@@ -4,8 +4,10 @@
 
 use std::{fs, io::ErrorKind, path::Path};
 
+use crate::errors::PluginError;
+
 use super::{
-    INSTALL_LOCK_POISONED, PLACED_CONFIG, PluginConfig, PluginService,
+    PLACED_CONFIG, PluginConfig, PluginService,
     ports::{PluginEntries, PluginStore},
     write_placed_file,
 };
@@ -18,10 +20,8 @@ impl PluginService {
         &self,
         store: &impl PluginEntries,
         source: &str,
-    ) -> Result<PluginConfig, String> {
-        let entry = store
-            .plugin_by_source(source)
-            .map_err(|err| err.to_string())?;
+    ) -> Result<PluginConfig, PluginError> {
+        let entry = store.plugin_by_source(source)?;
         read_plugin_config(&self.paths.plugin_dir(&entry.id))
     }
 
@@ -36,29 +36,30 @@ impl PluginService {
         store: &impl PluginStore,
         source: &str,
         plugin_config: &PluginConfig,
-    ) -> Result<(), String> {
+    ) -> Result<(), PluginError> {
         let _install_guard = self
             .install_lock
             .lock()
-            .map_err(|_| INSTALL_LOCK_POISONED)?;
+            .map_err(|_| PluginError::InstallLockUnavailable)?;
 
         // 条目读取与校验：声明的真相源就是当前全局变量表。
-        let variables = store.variables_snapshot().map_err(|err| err.to_string())?;
+        let variables = store.variables_snapshot().map_err(PluginError::from)?;
         for name in plugin_config.variables.keys() {
             if !variables.contains_key(name) {
-                return Err(format!(
-                    "变量「{name}」未在全局变量表中声明，不能写入插件配置的覆盖项；请先在全局变量中声明。"
-                ));
+                return Err(PluginError::UndeclaredVariable { name: name.clone() });
             }
         }
-        let entry = store
-            .plugin_by_source(source)
-            .map_err(|err| err.to_string())?;
+        let entry = store.plugin_by_source(source)?;
 
         let plugin_dir = self.paths.plugin_dir(&entry.id);
-        fs::create_dir_all(&plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
-        let raw = serde_json::to_string_pretty(plugin_config)
-            .map_err(|e| format!("序列化插件配置失败：{e}"))?;
+        fs::create_dir_all(&plugin_dir).map_err(|e| PluginError::CreateDirectory {
+            detail: e.to_string(),
+        })?;
+        let raw = serde_json::to_string_pretty(plugin_config).map_err(|e| {
+            PluginError::SerializePluginConfig {
+                detail: e.to_string(),
+            }
+        })?;
         write_placed_file(&plugin_dir, PLACED_CONFIG, format!("{raw}\n").as_bytes())?;
         log::debug!("plugin config written: id={}", entry.id);
         Ok(())
@@ -68,19 +69,20 @@ impl PluginService {
 /// 读取落位目录中的插件配置（ADR 0018）：文件不存在视为「无覆盖、无表单」，
 /// 损坏则报错并给出可读原因，绝不静默降级为空配置。get-config 命令与投影路径
 /// 共用同一份读取与失败语义。
-pub(super) fn read_plugin_config(plugin_dir: &Path) -> Result<PluginConfig, String> {
+pub(super) fn read_plugin_config(plugin_dir: &Path) -> Result<PluginConfig, PluginError> {
     let path = plugin_dir.join(PLACED_CONFIG);
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(PluginConfig::default()),
         Err(e) => {
-            return Err(format!("读取插件配置失败：{}\n原因：{e}", path.display()));
+            return Err(PluginError::ReadPluginConfig {
+                path,
+                detail: e.to_string(),
+            });
         }
     };
-    serde_json::from_str(&raw).map_err(|e| {
-        format!(
-            "插件配置已损坏：{}\n原因：{e}\n请修复或删除该文件后重试；在此之前该插件的配置不可用。",
-            path.display()
-        )
+    serde_json::from_str(&raw).map_err(|e| PluginError::CorruptPluginConfig {
+        path,
+        detail: e.to_string(),
     })
 }

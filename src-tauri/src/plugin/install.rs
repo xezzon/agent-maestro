@@ -6,11 +6,13 @@
 
 use std::{fs, path::Path, sync::Arc};
 
-use crate::config::{PluginEntry, StoreError};
+use crate::{
+    config::PluginEntry,
+    errors::{PluginEntryError, PluginError},
+};
 
 use super::{
-    INSTALL_LOCK_POISONED, LoadedPlugin, PlacedPlugin, PluginService, PluginState,
-    REGISTRY_LOCK_POISONED, builtin,
+    LoadedPlugin, PlacedPlugin, PluginService, PluginState, builtin,
     execution::validate_component,
     manifest::{Manifest, parse_manifest},
     ports::PluginEntries,
@@ -35,11 +37,11 @@ impl PluginService {
         &self,
         store: &impl PluginEntries,
         source: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), PluginError> {
         let _install_guard = self
             .install_lock
             .lock()
-            .map_err(|_| INSTALL_LOCK_POISONED)?;
+            .map_err(|_| PluginError::InstallLockUnavailable)?;
 
         // 来源形态在发起获取之前判定：无法识别的来源直接拒绝。判定一次即成
         // 为值（`PluginSource`），后续流程只 match，不再重新解析同一串文本。
@@ -49,23 +51,20 @@ impl PluginService {
         // 1. 来源即条目唯一身份：重复添加在发起下载之前拒绝。
         let duplicate = store
             .list_plugins()
-            .map_err(|err| err.to_string())?
+            .map_err(PluginError::from)?
             .iter()
             .any(|plugin| plugin.source == source_text);
         if duplicate {
-            return Err(StoreError::DuplicateSource {
-                source: source_text,
-            }
-            .to_string());
+            return Err(PluginError::StoreEntry(PluginEntryError::duplicate_source(
+                &source_text,
+            )));
         }
 
         // 2. 获取 manifest 与 wasm、校验并落位；获取与校验全程不持配置存储锁。
         //    manifest 只解析这一次：解析结果直接交给后面的校验与装配。
         let (placed, manifest) = self.fetch_placed(&parsed)?;
         // id 冲突预检：与写入时的复检问同一句规则（见 `Store::check_plugin_id_conflict`）。
-        store
-            .check_plugin_id_conflict(&source_text, &manifest.id)
-            .map_err(|err| err.to_string())?;
+        store.check_plugin_id_conflict(&source_text, &manifest.id)?;
         // 链接期校验先于解析配置目录与落位：wasm 不是组件或接口不兼容时不建
         // 目录、不落位、不写条目。仅做字节反序列化与类型检查，不触发组件 init、
         // 不预开放真实配置目录；避免未授权的 init 代码在安装失败时仍写入
@@ -87,16 +86,17 @@ impl PluginService {
             // 条目写不进去，就不能留下注册表看不见的落位目录。
             // 清理失败时把残留路径一并回报：避免注释承诺与实际行为偏离。
             if let Err(uninstall_err) = loaded.plugin.uninstall() {
-                return Err(format!(
-                    "{e}；落位目录清理失败：{uninstall_err}（残留路径：{}）",
-                    loaded.plugin.path().display()
-                ));
+                return Err(PluginError::CleanupFailed {
+                    error: e.to_string(),
+                    cleanup: uninstall_err.to_string(),
+                    path: loaded.plugin.path().to_path_buf(),
+                });
             }
-            return Err(e.to_string());
+            return Err(PluginError::from(e));
         }
         self.entries
             .write()
-            .map_err(|_| REGISTRY_LOCK_POISONED)?
+            .map_err(|_| PluginError::RegistryUnavailable)?
             .insert(
                 loaded.id().to_owned(),
                 PluginState::Loaded(Arc::new(loaded)),
@@ -113,7 +113,7 @@ impl PluginService {
     ///
     /// 一并返回**已解析的 manifest**：安装路径上 manifest 只解析这一次，解析
     /// 结果直接交给后面的校验与装配（不再由落位产物重新解析一遍）。
-    fn fetch_placed(&self, source: &PluginSource) -> Result<(PlacedPlugin, Manifest), String> {
+    fn fetch_placed(&self, source: &PluginSource) -> Result<(PlacedPlugin, Manifest), PluginError> {
         let source_text = source.source();
         log::debug!("fetching plugin artifacts: source={source_text}");
 
@@ -121,22 +121,28 @@ impl PluginService {
         // 到某个内置插件——回落会把别人的 manifest 与 wasm 落位到该来源名下。
         let (raw_manifest, builtin) = match source {
             PluginSource::Builtin(id) => {
-                let builtin = builtin::find_by_id(id)
-                    .ok_or_else(|| format!("未知的内置插件来源：{source_text}"))?;
+                let builtin =
+                    builtin::find_by_id(id).ok_or_else(|| PluginError::UnknownBuiltin {
+                        source: source_text.clone(),
+                    })?;
                 (builtin.manifest_json.to_string(), Some(builtin))
             }
             PluginSource::Https(url) => {
                 let bytes = self
                     .fetcher
                     .fetch(url)
-                    .map_err(|e| format!("下载 manifest 失败：{e}"))?;
-                let raw_manifest = String::from_utf8(bytes)
-                    .map_err(|e| format!("manifest.json 不是合法 UTF-8：{e}"))?;
+                    .map_err(|e| PluginError::DownloadManifest {
+                        detail: e.to_string(),
+                    })?;
+                let raw_manifest =
+                    String::from_utf8(bytes).map_err(|e| PluginError::ManifestNotUtf8 {
+                        detail: e.to_string(),
+                    })?;
                 (raw_manifest, None)
             }
             PluginSource::File(path) => {
                 let raw_manifest = fs::read_to_string(path)
-                    .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+                    .map_err(|e| PluginError::read_file(path, e.to_string()))?;
                 (raw_manifest, None)
             }
         };
@@ -148,18 +154,27 @@ impl PluginService {
             PluginSource::Builtin(_) => match builtin {
                 Some(builtin) => Vec::from(builtin.wasm),
                 // 走到这里说明内置表里没有该 id（上面查表时已报错，此处只是让函数完备）。
-                None => return Err(format!("未知的内置插件来源：{source_text}")),
+                None => {
+                    return Err(PluginError::UnknownBuiltin {
+                        source: source_text,
+                    });
+                }
             },
-            PluginSource::Https(_) => self.fetcher.fetch(&manifest.entry)?,
+            PluginSource::Https(_) => self
+                .fetcher
+                .fetch(&manifest.entry)
+                .map_err(PluginError::from)?,
             PluginSource::File(path) => {
                 if is_https_url(&manifest.entry) {
-                    self.fetcher.fetch(&manifest.entry)?
+                    self.fetcher
+                        .fetch(&manifest.entry)
+                        .map_err(PluginError::from)?
                 } else {
                     // `source` 是 manifest.json 的路径，entry 相对其所在目录解析。
                     let source_dir = path.parent().unwrap_or(Path::new("."));
                     let entry_path = source_dir.join(&manifest.entry);
                     fs::read(&entry_path)
-                        .map_err(|e| format!("读取 {} 失败：{e}", entry_path.display()))?
+                        .map_err(|e| PluginError::read_file(&entry_path, e.to_string()))?
                 }
             }
         };
@@ -174,14 +189,22 @@ impl PluginService {
     ///
     /// 先从落位目录重新装载并解析 config_dir，装载成功才写配置条目并同步注册表
     /// ——装载失败即报错且不改配置，修复落位文件后重新启用即可。
-    pub(crate) fn enable(&self, store: &impl PluginEntries, source: &str) -> Result<(), String> {
+    pub(crate) fn enable(
+        &self,
+        store: &impl PluginEntries,
+        source: &str,
+    ) -> Result<(), PluginError> {
         self.set_enabled(store, source, true)
     }
 
     /// 禁用插件条目：与启用同一条流程（见 [`Self::set_enabled`]），只是方向不同。
     ///
     /// 先改配置条目，再把内存注册表换成 Disabled 态（保留描述供列表展示）。
-    pub(crate) fn disable(&self, store: &impl PluginEntries, source: &str) -> Result<(), String> {
+    pub(crate) fn disable(
+        &self,
+        store: &impl PluginEntries,
+        source: &str,
+    ) -> Result<(), PluginError> {
         self.set_enabled(store, source, false)
     }
 
@@ -207,15 +230,13 @@ impl PluginService {
         store: &impl PluginEntries,
         source: &str,
         enabled: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), PluginError> {
         let _install_guard = self
             .install_lock
             .lock()
-            .map_err(|_| INSTALL_LOCK_POISONED)?;
+            .map_err(|_| PluginError::InstallLockUnavailable)?;
 
-        let entry = store
-            .plugin_by_source(source)
-            .map_err(|err| err.to_string())?;
+        let entry = store.plugin_by_source(source)?;
         if entry.enabled == enabled {
             return Ok(());
         }
@@ -234,9 +255,7 @@ impl PluginService {
         // 复检：条目可能已被移除，不得按过期条目继续写。install_lock 已让
         // 移除与本流程互斥，此处是纵深防御。并发方已完成同样的切换时返回
         // `None`（配置与注册表均已同步，直接成功）。
-        let entry = store
-            .set_plugin_enabled(source, enabled)
-            .map_err(|err| err.to_string())?;
+        let entry = store.set_plugin_enabled(source, enabled)?;
         let Some(entry) = entry else {
             return Ok(());
         };
@@ -245,11 +264,14 @@ impl PluginService {
             Some(loaded) => {
                 self.entries
                     .write()
-                    .map_err(|_| REGISTRY_LOCK_POISONED)?
+                    .map_err(|_| PluginError::RegistryUnavailable)?
                     .insert(entry.id.clone(), PluginState::Loaded(Arc::new(loaded)));
             }
             None => {
-                let mut entries = self.entries.write().map_err(|_| REGISTRY_LOCK_POISONED)?;
+                let mut entries = self
+                    .entries
+                    .write()
+                    .map_err(|_| PluginError::RegistryUnavailable)?;
                 if let Some(state) = entries.get_mut(&entry.id)
                     && let PluginState::Loaded(loaded) = state
                 {
@@ -272,20 +294,22 @@ impl PluginService {
         &self,
         store: &impl PluginEntries,
         source: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), PluginError> {
         let _install_guard = self
             .install_lock
             .lock()
-            .map_err(|_| INSTALL_LOCK_POISONED)?;
+            .map_err(|_| PluginError::InstallLockUnavailable)?;
 
         // 内置插件随应用分发，不可移除（见 ADR 0004）。
         if matches!(PluginSource::parse(source), Some(PluginSource::Builtin(_))) {
-            return Err(format!("内置插件不可移除：{source}"));
+            return Err(PluginError::BuiltinNotRemovable {
+                source: source.to_owned(),
+            });
         }
 
         // 1. 删配置条目：存储侧原子（找条目 + 删条目同处一把写锁，见 `store::ports`）。
         //    条目不存在即幂等成功——上一次移除已连同落位目录一并删除。
-        let Some(entry) = store.delete_plugin(source).map_err(|err| err.to_string())? else {
+        let Some(entry) = store.delete_plugin(source).map_err(PluginError::from)? else {
             return Ok(());
         };
 
@@ -298,7 +322,7 @@ impl PluginService {
         //    原样保留，两处状态不会走散。
         self.entries
             .write()
-            .map_err(|_| REGISTRY_LOCK_POISONED.to_owned())?
+            .map_err(|_| PluginError::RegistryUnavailable)?
             .remove(&entry.id);
 
         // 3. 删落位目录：只删宿主副本，不动用户的插件项目目录。
@@ -319,16 +343,14 @@ impl PluginService {
         &self,
         store: &impl PluginEntries,
         source: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), PluginError> {
         let _install_guard = self
             .install_lock
             .lock()
-            .map_err(|_| INSTALL_LOCK_POISONED)?;
+            .map_err(|_| PluginError::InstallLockUnavailable)?;
 
         // 条目是来源到落位目录的唯一映射：未知来源无从重新装载。
-        let entry = store
-            .plugin_by_source(source)
-            .map_err(|err| err.to_string())?;
+        let entry = store.plugin_by_source(source)?;
 
         // 重新获取 manifest 与 wasm、校验：全程不持配置存储锁（与添加同构）。
         //    manifest 只解析这一次，解析结果直接交给后面的校验与装配。
@@ -336,10 +358,10 @@ impl PluginService {
         let (placed, manifest) = self.fetch_placed(&parsed)?;
         // 上游 id 变更报错并保持旧状态：落位目录由条目 id 定位，id 漂移会架空映射。
         if manifest.id != entry.id {
-            return Err(format!(
-                "上游 manifest 的插件 id 已从「{}」变更为「{}」，拒绝重新加载",
-                entry.id, manifest.id
-            ));
+            return Err(PluginError::IdChanged {
+                previous: entry.id,
+                next: manifest.id,
+            });
         }
         // 链接期校验先于解析配置目录与落位：wasm 不是组件或接口不兼容时不建
         // 目录、不落位、注册表保持旧状态。不触发组件 init、不预开放真实配置
@@ -359,7 +381,7 @@ impl PluginService {
         };
         self.entries
             .write()
-            .map_err(|_| REGISTRY_LOCK_POISONED)?
+            .map_err(|_| PluginError::RegistryUnavailable)?
             .insert(entry.id, state);
         Ok(())
     }

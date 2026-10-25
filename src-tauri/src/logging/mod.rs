@@ -12,7 +12,7 @@ use tauri_plugin_log::{
     Builder as LogBuilder, FileOpenStrategy, RotationStrategy, Target, TargetKind,
 };
 
-use crate::paths::Paths;
+use crate::{errors::LoggingError, paths::Paths};
 
 #[cfg(test)]
 pub(crate) mod capture;
@@ -57,15 +57,15 @@ fn parse_level(raw: &str) -> Option<LevelFilter> {
 }
 
 /// 写探测：目录可创建、日志文件可打开才算文件目标可用。
-fn probe_log_dir(paths: &Paths) -> Result<(), String> {
+fn probe_log_dir(paths: &Paths) -> Result<(), LoggingError> {
     let dir = paths.logs_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    fs::create_dir_all(&dir).map_err(|e| LoggingError::create_dir(&dir, e.to_string()))?;
     let file = dir.join(LOG_FILE_NAME);
     fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&file)
-        .map_err(|e| format!("open {}: {e}", file.display()))?;
+        .map_err(|e| LoggingError::open_file(&file, e.to_string()))?;
     Ok(())
 }
 
@@ -96,7 +96,7 @@ pub(crate) fn attach(
 
     let mut targets = vec![Target::new(TargetKind::Stdout)];
     if let Err(reason) = probe_log_dir(paths) {
-        let _ = DEGRADED.set(reason);
+        let _ = DEGRADED.set(reason.to_string());
     } else {
         targets.push(Target::new(TargetKind::Folder {
             path: paths.logs_dir(),
@@ -158,7 +158,7 @@ mod tests {
         fs::create_dir_all(home.path().join(".maestro")).unwrap();
         fs::write(home.path().join(".maestro/logs"), "").unwrap();
 
-        let reason = probe_log_dir(&Paths::get()).unwrap_err();
+        let reason = probe_log_dir(&Paths::get()).unwrap_err().to_string();
         assert!(
             reason.contains("create"),
             "原因应指向目录创建失败：{reason}"

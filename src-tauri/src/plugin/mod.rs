@@ -48,6 +48,7 @@ use wasmtime::Engine;
 
 use crate::{
     config::PluginEntry,
+    errors::PluginError,
     fs_util::{Durability, write_atomic},
     paths::Paths,
     plugin::builtin::BUILTINS,
@@ -67,12 +68,6 @@ const PLACED_WASM: &str = "plugin.wasm";
 /// 落位目录中的插件配置文件名（ADR 0018）：与两个宿主产物混居，逐文件覆盖的
 /// 落位替换与重载完全不碰它。
 const PLACED_CONFIG: &str = "config.json";
-
-/// 插件注册表锁被毒化时对用户可见的原因（其它操作持锁期间 panic）。
-const REGISTRY_LOCK_POISONED: &str = "插件注册表不可用";
-
-/// 安装锁被毒化时对用户可见的原因（其它安装类操作持锁期间 panic）。
-const INSTALL_LOCK_POISONED: &str = "插件安装锁不可用";
 
 struct PlacedPlugin {
     plugin_dir: PathBuf,
@@ -107,14 +102,14 @@ impl PlacedPlugin {
         }
     }
 
-    fn from_plugin_dir(plugin_dir: &Path) -> Result<Self, String> {
+    fn from_plugin_dir(plugin_dir: &Path) -> Result<Self, PluginError> {
         let manifest_path = plugin_dir.join(PLACED_MANIFEST);
         let raw_manifest = fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("读取 {} 失败：{e}", manifest_path.display()))?;
+            .map_err(|e| PluginError::read_file(&manifest_path, e.to_string()))?;
 
         let wasm_path = plugin_dir.join(PLACED_WASM);
         let wasm =
-            fs::read(&wasm_path).map_err(|e| format!("读取 {} 失败：{e}", wasm_path.display()))?;
+            fs::read(&wasm_path).map_err(|e| PluginError::read_file(&wasm_path, e.to_string()))?;
 
         Ok(Self {
             plugin_dir: plugin_dir.to_path_buf(),
@@ -128,10 +123,12 @@ impl PlacedPlugin {
         &self.plugin_dir
     }
 
-    fn save(&self) -> Result<(), String> {
+    fn save(&self) -> Result<(), PluginError> {
         // 首次安装即建目录；已存在则逐文件覆盖，目录中宿主产物以外的文件
         // （如插件配置，见 ADR 0018）完全不受影响。
-        fs::create_dir_all(&self.plugin_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
+        fs::create_dir_all(&self.plugin_dir).map_err(|e| PluginError::CreateDirectory {
+            detail: e.to_string(),
+        })?;
         // 先 manifest、后 wasm：写 wasm 失败会停在「新 manifest + 旧 wasm」的
         // 混合态，恢复手段是从来源重新加载（备份回滚的既有保证已取消，见 ADR 0018）。
         write_placed_file(
@@ -144,7 +141,7 @@ impl PlacedPlugin {
         Ok(())
     }
 
-    fn uninstall(&self) -> Result<(), String> {
+    fn uninstall(&self) -> Result<(), PluginError> {
         remove_placed_dir(&self.plugin_dir)
     }
 
@@ -152,7 +149,7 @@ impl PlacedPlugin {
     ///
     /// 装载是**显式**的一步：解析（反序列化）只产出声明、不碰文件系统，落位
     /// 目录重建时由此把声明解析成宿主绝对路径并建出目录（见 ADR 0022）。
-    fn load(self, paths: &Paths) -> Result<LoadedPlugin, String> {
+    fn load(self, paths: &Paths) -> Result<LoadedPlugin, PluginError> {
         let manifest = parse_placed(self.raw_manifest.as_str())?;
         let config_dir = manifest.config_dir.resolve(paths)?;
         Ok(LoadedPlugin::from_parts(manifest, config_dir, self))
@@ -189,16 +186,17 @@ impl LoadedPlugin {
 /// 原子写的实现收在 crate 级 [`crate::fs_util`]：宿主侧另有一处同样的
 /// 「tmp + rename」（配置存储），两份实现曾各自漂移过一次。耐久性策略在这里
 /// 显式声明——插件侧产物不 fsync（可从来源重新获取，见 [`Durability`]）。
-fn write_placed_file(dir: &Path, name: &str, contents: &[u8]) -> Result<(), String> {
-    write_atomic(&dir.join(name), contents, Durability::Unsynced).map_err(|e| e.to_string())
+fn write_placed_file(dir: &Path, name: &str, contents: &[u8]) -> Result<(), PluginError> {
+    write_atomic(&dir.join(name), contents, Durability::Unsynced)
+        .map_err(|e| PluginError::write_file(e.to_string()))
 }
 
 /// 删除落位目录；目录已不存在同样成功（幂等）。
-fn remove_placed_dir(plugin_dir: &Path) -> Result<(), String> {
+fn remove_placed_dir(plugin_dir: &Path) -> Result<(), PluginError> {
     match fs::remove_dir_all(plugin_dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("删除插件目录 {} 失败：{e}", plugin_dir.display())),
+        Err(e) => Err(PluginError::remove_directory(plugin_dir, e.to_string())),
     }
 }
 
@@ -354,7 +352,7 @@ impl PluginService {
     /// 降级——记日志、留空注册表并返回 `Ok`，由各命令各自报错。
     ///
     /// 配置存储经端口访问（见 [`ports`]）：服务层拿不到它的锁与落盘时机。
-    pub(crate) fn startup(&self, store: &impl PluginEntries) -> Result<(), String> {
+    pub(crate) fn startup(&self, store: &impl PluginEntries) -> Result<(), PluginError> {
         // 从配置文件读取插件条目（短锁：读取后立即释放，后续安装须重新加锁）。
         let plugin_entries = match store.list_plugins() {
             Ok(plugin_entries) => plugin_entries,
@@ -373,7 +371,7 @@ impl PluginService {
             let placed_plugin = match PlacedPlugin::from_plugin_dir(&plugin_dir) {
                 Ok(placed_plugin) => placed_plugin,
                 Err(err) => {
-                    plugins.insert(plugin_id, PluginState::Error(err));
+                    plugins.insert(plugin_id, PluginState::Error(err.to_string()));
                     continue;
                 }
             };
@@ -385,7 +383,7 @@ impl PluginService {
                         PluginState::Disabled(loaded_plugin.meta)
                     }
                 }
-                Err(err) => PluginState::Error(err),
+                Err(err) => PluginState::Error(err.to_string()),
             };
             plugins.insert(plugin_id, plugin_state);
         }
@@ -411,11 +409,17 @@ impl PluginService {
     }
 
     /// 当前注册表视图。
-    pub(crate) fn list(&self, store: &impl PluginEntries) -> Result<Vec<PluginRecord>, String> {
+    pub(crate) fn list(
+        &self,
+        store: &impl PluginEntries,
+    ) -> Result<Vec<PluginRecord>, PluginError> {
         // 配置损坏时把原因原样带出去（哪个文件坏了、坏在哪）——「配置文件损坏」
         // 这四个字会让用户去猜是哪个文件。
-        let plugin_entries = store.list_plugins().map_err(|err| err.to_string())?;
-        let plugins = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
+        let plugin_entries = store.list_plugins().map_err(PluginError::from)?;
+        let plugins = self
+            .entries
+            .read()
+            .map_err(|_| PluginError::RegistryUnavailable)?;
         let plugin_record =
             |entry: &PluginEntry, meta: Option<&PluginMeta>, error: Option<String>| PluginRecord {
                 source: entry.source.clone(),

@@ -168,7 +168,7 @@ fn update_provider_missing_slug_is_rejected_without_upsert() {
             },
         )
         .unwrap_err();
-    assert!(matches!(err, StoreError::MissingSlug { .. }));
+    assert!(matches!(err, ProviderError::MissingSlug { .. }));
     assert!(err.to_string().contains("ghost"));
     assert!(store.get().unwrap().providers.is_empty());
     assert!(!paths.config_path().exists(), "报错路径不得静默写入文件");
@@ -295,7 +295,7 @@ fn delete_provider_missing_slug_is_rejected() {
 
     let err = store.delete_provider("ghost").unwrap_err();
 
-    assert!(matches!(err, StoreError::MissingSlug { .. }));
+    assert!(matches!(err, ProviderError::MissingSlug { .. }));
     assert!(err.to_string().contains("ghost"));
 }
 
@@ -516,7 +516,7 @@ fn corrupt_file_reports_error_with_path_and_refuses_writes() {
     let mut store = Store::new(paths.config_path());
 
     let err = store.get().unwrap_err();
-    assert!(matches!(err, StoreError::Corrupt { .. }));
+    assert!(matches!(err, ConfigError::Corrupt { .. }));
     assert!(
         err.to_string()
             .contains(paths.config_path().to_str().unwrap())
@@ -549,7 +549,7 @@ fn unsupported_version_reports_error_with_path_and_refuses_writes() {
     let mut store = Store::new(paths.config_path());
 
     let err = store.get().unwrap_err();
-    assert!(matches!(err, StoreError::UnsupportedVersion { .. }));
+    assert!(matches!(err, ConfigError::UnsupportedVersion { .. }));
     assert!(
         err.to_string()
             .contains(paths.config_path().to_str().unwrap())
@@ -602,7 +602,7 @@ fn duplicate_slug_is_rejected_and_original_kept() {
             },
         )
         .unwrap_err();
-    assert!(matches!(err, StoreError::DuplicateSlug { .. }));
+    assert!(matches!(err, ProviderError::DuplicateSlug { .. }));
 
     let config = store.get().unwrap();
     assert_eq!(config.providers.len(), 1);
@@ -951,7 +951,7 @@ fn invalid_variable_names_win_over_a_corrupt_config() {
         .unwrap_err();
 
     assert!(
-        matches!(err, StoreError::InvalidVariableName { .. }),
+        matches!(err, VariableError::InvalidVariableName { .. }),
         "非法名先于保护态：{err:?}"
     );
     assert_eq!(fs::read_to_string(&config_path).unwrap(), "不是 JSON {{{");
@@ -975,7 +975,7 @@ fn create_provider_rejects_references_to_undefined_variables() {
         )
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(matches!(err, ProviderError::Interpolation(_)));
     let message = err.to_string();
     assert!(message.contains("HOST"), "{message}");
     assert!(message.contains("base_url.openai-completions"), "{message}");
@@ -985,7 +985,7 @@ fn create_provider_rejects_references_to_undefined_variables() {
 
 /// 落盘前拦截与投影时拦截逐字同报：同一份配置、同一个原因，两条路径给出
 /// 完全相同的一句文案（ADR 0015「报错与投影时同因同报」；共享构造函数见
-/// issue #128）。逐字断言本体住在 `provider::ProviderInterpolationError`
+/// issue #128）。逐字断言本体住在 `errors::ProviderInterpolationError`
 /// （句式的家），这里钉的是 **两条路径汇入同一句式**。
 #[test]
 fn store_and_projection_report_interpolation_failures_identically() {
@@ -1080,7 +1080,7 @@ fn update_provider_rejects_undefined_variables_and_keeps_the_original() {
         )
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(matches!(err, ProviderError::Interpolation(_)));
     let reopened = Store::new(paths.config_path());
     assert_eq!(
         reopened.get().unwrap().providers["gateway"]
@@ -1120,7 +1120,7 @@ fn set_variables_rejects_removing_a_variable_in_use() {
         .set_variables(BTreeMap::from([("UNUSED".to_owned(), "x".to_owned())]))
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(matches!(err, VariableError::Interpolation(_)));
     let message = err.to_string();
     assert!(message.contains("HOST"), "{message}");
     assert!(message.contains("gateway"), "{message}");
@@ -1213,7 +1213,7 @@ fn create_provider_rejects_malformed_placeholders() {
         )
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(matches!(err, ProviderError::Interpolation(_)));
     assert!(err.to_string().contains("base_url.openai-completions"));
     assert!(store.get().unwrap().providers.is_empty());
 }
@@ -1249,7 +1249,7 @@ fn set_variables_rejected_when_a_provider_has_a_malformed_template() {
         )]))
         .unwrap_err();
 
-    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(matches!(err, VariableError::Interpolation(_)));
     assert_eq!(
         fs::read_to_string(paths.config_path()).unwrap(),
         original,
@@ -1270,7 +1270,7 @@ fn set_variables_rejects_invalid_variable_names() {
             .unwrap_err();
 
         assert!(
-            matches!(err, StoreError::InvalidVariableName { .. }),
+            matches!(err, VariableError::InvalidVariableName { .. }),
             "name={name:?}"
         );
         assert!(!paths.config_path().exists(), "报错路径不得落盘");
@@ -1468,7 +1468,7 @@ fn set_provider_enabled_is_idempotent_and_missing_slug_is_rejected() {
     assert!(store.get().unwrap().providers["ollama"].enabled);
 
     let err = store.set_provider_enabled("missing", false).unwrap_err();
-    assert!(matches!(err, StoreError::MissingSlug { .. }));
+    assert!(matches!(err, ProviderError::MissingSlug { .. }));
 }
 
 /// 幂等调用**不写盘**（不只是状态不变）。
@@ -1541,7 +1541,7 @@ fn disabled_provider_is_still_subject_to_interpolation_checks() {
             },
         )
         .unwrap_err();
-    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(matches!(err, ProviderError::Interpolation(_)));
 
     // 先建一个引用 HOST 的启用 Provider，再禁用。
     store
@@ -1566,7 +1566,7 @@ fn disabled_provider_is_still_subject_to_interpolation_checks() {
 
     // 禁用项引用的变量同样不能删除：禁用者仍算「在使用中」。
     let err = store.set_variables(BTreeMap::new()).unwrap_err();
-    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(matches!(err, VariableError::Interpolation(_)));
     assert!(
         store.get().unwrap().variables.contains_key("HOST"),
         "被拒的删变量不改配置"
@@ -1595,7 +1595,7 @@ fn update_provider_to_disabled_still_checks_interpolation() {
             },
         )
         .unwrap_err();
-    assert!(matches!(err, StoreError::Interpolation(_)));
+    assert!(matches!(err, ProviderError::Interpolation(_)));
 
     let provider = &store.get().unwrap().providers["gateway"];
     assert!(provider.enabled, "被拒的更新不改配置");
@@ -1608,9 +1608,11 @@ fn update_provider_to_disabled_still_checks_interpolation() {
     );
 }
 
-/// 锁毒化与 `String` 错误域同句：两条加锁路径对用户是同一件事。
+/// 锁毒化折进错误域后仍是同一句文案：毒化的是锁，不是配置。
 #[test]
-fn lock_poisoned_folds_into_the_same_reason_for_both_error_domains() {
-    assert_eq!(String::from(LockPoisoned), "配置存储不可用");
-    assert_eq!(StoreError::Unavailable.to_string(), "配置存储不可用");
+fn lock_poisoned_folds_into_the_same_reason() {
+    assert_eq!(
+        ConfigError::from(LockPoisoned).to_string(),
+        "配置存储不可用"
+    );
 }

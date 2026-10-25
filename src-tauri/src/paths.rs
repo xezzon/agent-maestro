@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::test_global::Global;
+use crate::{errors::PathError, test_global::Global};
 
 #[cfg(test)]
 use crate::test_global::TestGuard;
@@ -62,10 +62,10 @@ impl Paths {
     /// 测试构建下不读真实环境——全局实例由测试夹具注入（见 crate 级 `testutil`
     /// 模块），故这里是空操作：测试若漏了注入，由 [`Paths::get`] 报错，而不是静默落到
     /// 真实目录。
-    pub(crate) fn init_from_system() -> Result<(), String> {
+    pub(crate) fn init_from_system() -> Result<(), PathError> {
         #[cfg(not(test))]
         {
-            let missing = |what: &str| format!("无法解析平台目录：{what}不可用");
+            let missing = PathError::unavailable;
             PATHS.set(Self {
                 home: dirs::home_dir().ok_or_else(|| missing("主目录"))?,
                 config: dirs::config_dir().ok_or_else(|| missing("配置目录"))?,

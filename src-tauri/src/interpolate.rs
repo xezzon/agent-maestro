@@ -9,15 +9,18 @@
 //! 结构知识在各自的配置类型（`Provider::interpolate`／`ModelEntry::interpolate`），
 //! 跨 Provider 的编排在 `provider::interpolate_providers`。
 //!
-//! 插值失败的面向用户句式由 `provider::ProviderInterpolationError` 一处产出：
-//! 落盘前拦截（`StoreError::Interpolation` 包裹它）与投影时拦截共用它，
-//! 同因同报、逐字一致。
+//! 插值失败的面向用户句式由 `errors::ProviderInterpolationError` 一处产出：
+//! 落盘前拦截（`ProviderError::Interpolation` / `VariableError::Interpolation`
+//! 包裹它）与投影时拦截共用它，同因同报、逐字一致。
 
-use crate::variables::Variables;
+use crate::{errors::InterpolationError, variables::Variables};
 
 /// 对单个字符串值插值；失败原因即库报错（只含变量名与位置，不含值与密钥）。
-pub(crate) fn interpolate_value(template: &str, variables: &Variables) -> Result<String, String> {
-    subst::substitute(template, variables).map_err(|e| e.to_string())
+pub(crate) fn interpolate_value(
+    template: &str,
+    variables: &Variables,
+) -> Result<String, InterpolationError> {
+    subst::substitute(template, variables).map_err(|e| InterpolationError::new(e.to_string()))
 }
 
 #[cfg(test)]
@@ -36,7 +39,9 @@ mod tests {
     }
 
     fn error(template: &str, variables: &Variables) -> String {
-        interpolate_value(template, variables).unwrap_err()
+        interpolate_value(template, variables)
+            .unwrap_err()
+            .to_string()
     }
 
     /// 换库哨兵（ADR 0014）：`${name}` 长式替换，前后缀拼接原样保留。

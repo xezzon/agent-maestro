@@ -1,5 +1,6 @@
 mod command;
 mod config;
+mod errors;
 mod fs_util;
 mod interpolate;
 mod logging;

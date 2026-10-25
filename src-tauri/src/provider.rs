@@ -5,7 +5,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{interpolate::interpolate_value, variables::Variables};
+use crate::{
+    errors::{FieldError, ProviderInterpolationError},
+    interpolate::interpolate_value,
+    variables::Variables,
+};
 
 /// Provider 在各协议下的端点（每协议至多一个；见 ADR 0003）。
 ///
@@ -68,7 +72,7 @@ impl ModelEntry {
             .transpose()
             .map_err(|reason| FieldError {
                 field: "display_name".to_owned(),
-                reason,
+                reason: reason.to_string(),
             })?;
         Ok(ModelEntry {
             id: self.id.clone(),
@@ -272,21 +276,6 @@ impl Debug for Provider {
     }
 }
 
-/// 插值失败：字段名 + 原因。
-///
-/// 字段名指明插的是哪个字段（`base_url.openai-completions`、`models[1].display_name`），
-/// 原因取自库（只含变量名与位置，不含值与密钥）。
-///
-/// 用具名字段而非匿名元组：元组的两个位置写反了编译器不报错，解构点读到的
-/// 字段名与原因会悄悄对调。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FieldError {
-    /// 出错的字段名。
-    pub(crate) field: String,
-    /// 原因（库报错）。
-    pub(crate) reason: String,
-}
-
 impl Provider {
     /// 插值（docs/GLOSSARY.md「插值」/ ADR 0015）：把自身全部字符串值里的占位符
     /// 替换为变量实际值，返回字面值副本；失败返回（字段名, 库报错）。
@@ -307,8 +296,10 @@ impl Provider {
         let mut base_url = BTreeMap::new();
         for (protocol, url) in &self.base_url {
             let field = format!("base_url.{protocol}");
-            let value =
-                interpolate_value(url, variables).map_err(|reason| FieldError { field, reason })?;
+            let value = interpolate_value(url, variables).map_err(|reason| FieldError {
+                field,
+                reason: reason.to_string(),
+            })?;
             base_url.insert(*protocol, value);
         }
         // api_key 原样保留，不参与插值。
@@ -317,8 +308,10 @@ impl Provider {
         let mut custom_header = BTreeMap::new();
         for (name, value) in &self.custom_header {
             let field = format!("custom_header.{name}");
-            let value = interpolate_value(value, variables)
-                .map_err(|reason| FieldError { field, reason })?;
+            let value = interpolate_value(value, variables).map_err(|reason| FieldError {
+                field,
+                reason: reason.to_string(),
+            })?;
             custom_header.insert(name.clone(), value);
         }
         let mut models = Vec::with_capacity(self.models.len());
@@ -338,30 +331,6 @@ impl Provider {
             custom_header,
             models,
         })
-    }
-}
-
-/// 跨 Provider 插值失败：出错的条目（slug）与其字段级失败。
-///
-/// 面向用户的句式由本类型独家产出（见 [`Display`]）：slug + 字段名 + 原因入句。
-/// 落盘前拦截（`StoreError::Interpolation` 包裹本类型）与投影时拦截（调用方直接
-/// 格式化本类型）据此同因同报、逐字一致——同一句式只有这一处实现。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProviderInterpolationError {
-    /// 出错的 Provider（slug）。
-    pub(crate) slug: String,
-    /// 字段级失败：字段名 + 库报错。
-    pub(crate) error: FieldError,
-}
-
-impl Display for ProviderInterpolationError {
-    /// 插值失败的面向用户文案：slug + 字段名 + 原因逐字入句。
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Provider「{}」的 {} 插值失败：{}",
-            self.slug, self.error.field, self.error.reason
-        )
     }
 }
 
@@ -402,7 +371,7 @@ mod tests {
     use super::*;
 
     /// 插值失败句式逐字钉住：slug + 字段名 + 原因逐字入句。
-    /// 落盘前拦截（`StoreError::Interpolation` 包裹本类型）与投影时拦截共用
+    /// 落盘前拦截（`ProviderError::Interpolation` 包裹本类型）与投影时拦截共用
     /// 这一句式：同因同报、逐字一致（ADR 0015）。
     #[test]
     fn interpolation_failure_message_renders_slug_field_and_reason() {
@@ -708,7 +677,9 @@ mod tests {
     }
 
     fn error(template: &str, variables: &Variables) -> String {
-        interpolate_value(template, variables).unwrap_err()
+        interpolate_value(template, variables)
+            .unwrap_err()
+            .to_string()
     }
 
     /// 插值（`Provider::interpolate`）输出全部字面值副本：除模型 ID、api_key 与
@@ -900,7 +871,7 @@ mod tests {
     }
 
     /// 投影时插值失败的文案逐字断言：slug、字段名、原因三者都在句子里，
-    /// 且与落盘前拦截（`store::StoreError::Interpolation`）同一句式。
+    /// 且与落盘前拦截（`ProviderError::Interpolation`）同一句式。
     ///
     /// 原因取自库（`interpolate_value` 的真实报错）而非写死：句式是展示层的
     /// 契约（`ProviderInterpolationError` 独家产出），库的措辞由 ADR 0014 的

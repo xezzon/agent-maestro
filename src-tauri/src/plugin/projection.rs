@@ -7,14 +7,14 @@ use std::{
 };
 
 use crate::{
+    errors::PluginError,
     provider::{Provider, interpolate_providers},
     variables::Variables,
 };
 
 use super::{
     LoadedPlugin, PluginOutcome, PluginService, PluginState, ProjectionStatus,
-    REGISTRY_LOCK_POISONED, config::read_plugin_config, execution::SkippedProvider,
-    ports::ProviderSource,
+    config::read_plugin_config, execution::SkippedProvider, ports::ProviderSource,
 };
 
 impl PluginService {
@@ -27,8 +27,8 @@ impl PluginService {
     pub(crate) fn apply_providers(
         &self,
         store: &impl ProviderSource,
-    ) -> Result<Vec<PluginOutcome>, String> {
-        let snapshot = store.projection_snapshot().map_err(|err| err.to_string())?;
+    ) -> Result<Vec<PluginOutcome>, PluginError> {
+        let snapshot = store.projection_snapshot().map_err(PluginError::from)?;
         let (providers, variables) = (snapshot.providers, snapshot.variables);
         let reports = self.write_providers(&providers, &variables)?;
         // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
@@ -61,9 +61,12 @@ impl PluginService {
         &self,
         providers: &BTreeMap<String, Provider>,
         variables: &Variables,
-    ) -> Result<Vec<PluginOutcome>, String> {
+    ) -> Result<Vec<PluginOutcome>, PluginError> {
         let (mut reports, loaded) = {
-            let entries = self.entries.read().map_err(|_| REGISTRY_LOCK_POISONED)?;
+            let entries = self
+                .entries
+                .read()
+                .map_err(|_| PluginError::RegistryUnavailable)?;
             let mut reports = Vec::with_capacity(entries.len());
             let mut loaded = Vec::new();
             for (id, state) in entries.iter() {
@@ -105,7 +108,7 @@ impl PluginService {
         loaded_plugin: &LoadedPlugin,
         providers: &BTreeMap<String, Provider>,
         variables: &Variables,
-    ) -> Result<(Vec<String>, Vec<SkippedProvider>), String> {
+    ) -> Result<(Vec<String>, Vec<SkippedProvider>), PluginError> {
         // 按插件读取插件配置（ADR 0018）：读取或解析失败即整插件失败，不静默降级。
         let plugin_config = read_plugin_config(&self.paths.plugin_dir(id))?;
         // 全局变量表 ⊕ 该插件的变量覆盖：覆盖键优先，只影响本插件的插值。
@@ -123,9 +126,10 @@ impl PluginService {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()
-            .map_err(|e| format!("序列化插件 form 失败：{e}"))?;
-        let projected =
-            interpolate_providers(providers, &merged).map_err(|error| error.to_string())?;
+            .map_err(|e| PluginError::SerializeForm {
+                detail: e.to_string(),
+            })?;
+        let projected = interpolate_providers(providers, &merged).map_err(PluginError::from)?;
         let (files, skipped) = loaded_plugin
             .instantiate_component(&self.engine, form)?
             .write_provider(&projected)?;
@@ -139,7 +143,7 @@ impl PluginService {
 /// 失败即 `failed`（不回报任何文件与跳过项，只留原因）。
 fn build_report(
     id: String,
-    projected: Result<(Vec<String>, Vec<SkippedProvider>), String>,
+    projected: Result<(Vec<String>, Vec<SkippedProvider>), PluginError>,
 ) -> PluginOutcome {
     match projected {
         Ok((files, skipped)) => PluginOutcome {
@@ -154,7 +158,7 @@ fn build_report(
             status: ProjectionStatus::Failed,
             files: Vec::new(),
             skipped: Vec::new(),
-            reason: Some(reason),
+            reason: Some(reason.to_string()),
         },
     }
 }
@@ -172,7 +176,10 @@ fn skipped_report(id: String, reason: String) -> PluginOutcome {
 
 /// 把插件返回的相对路径拼成宿主绝对路径；越界路径一律报错（fail-loud）：
 /// 绝对路径与 `..` 都指向预开放目录之外，不得被回报成一次成功投影。
-pub(super) fn project_files(config_dir: &Path, files: Vec<String>) -> Result<Vec<String>, String> {
+pub(super) fn project_files(
+    config_dir: &Path,
+    files: Vec<String>,
+) -> Result<Vec<String>, PluginError> {
     files
         .into_iter()
         .map(|file| {
@@ -185,9 +192,7 @@ pub(super) fn project_files(config_dir: &Path, files: Vec<String>) -> Result<Vec
                     )
                 })
             {
-                return Err(format!(
-                    "插件返回的文件路径「{file}」不是 config_dir 内的相对路径"
-                ));
+                return Err(PluginError::PathOutsideConfigDir { file });
             }
             Ok(config_dir.join(relative).display().to_string())
         })

@@ -4,6 +4,7 @@ use tauri::{AppHandle, Manager, State};
 use super::log_outcome;
 use crate::{
     AppStore,
+    errors::PluginError,
     plugin::{
         PluginConfig, PluginOutcome, PluginRecord, PluginService, ProjectionStatus,
         SkippedProvider, apply_summary,
@@ -103,12 +104,15 @@ pub(crate) fn list_plugins(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginView>, String> {
-    let outcome = service.list(store.inner()).map(|records| {
-        records
-            .into_iter()
-            .map(PluginView::from)
-            .collect::<Vec<_>>()
-    });
+    let outcome = service
+        .list(store.inner())
+        .map_err(|err| err.to_string())
+        .map(|records| {
+            records
+                .into_iter()
+                .map(PluginView::from)
+                .collect::<Vec<_>>()
+        });
     log_outcome("list_plugins", None, &outcome);
     outcome
 }
@@ -128,7 +132,8 @@ pub(crate) fn set_plugin_enabled(
         service.enable(store.inner(), &source)
     } else {
         service.disable(store.inner(), &source)
-    };
+    }
+    .map_err(|err| err.to_string());
     log_outcome(
         "set_plugin_enabled",
         Some(&format!("source={source} enabled={enabled}")),
@@ -177,7 +182,9 @@ pub(crate) fn remove_plugin(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<(), String> {
-    let outcome = service.remove_plugin(store.inner(), &source);
+    let outcome = service
+        .remove_plugin(store.inner(), &source)
+        .map_err(|err| err.to_string());
     log_outcome("remove_plugin", Some(&format!("source={source}")), &outcome);
     outcome
 }
@@ -190,7 +197,9 @@ pub(crate) fn get_plugin_config(
     service: State<'_, PluginService>,
     source: String,
 ) -> Result<PluginConfig, String> {
-    let outcome = service.get_config(store.inner(), &source);
+    let outcome = service
+        .get_config(store.inner(), &source)
+        .map_err(|err| err.to_string());
     log_outcome(
         "get_plugin_config",
         Some(&format!("source={source}")),
@@ -232,7 +241,9 @@ pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
-    let outcomes = service.apply_providers(store.inner());
+    let outcomes = service
+        .apply_providers(store.inner())
+        .map_err(|err| err.to_string());
     // 摘要取自服务层的内部形状：状态词由服务层产出（ADR 0008 的日志词），
     // 与线格式同形（由 `apply_status_wire_values_are_pinned` 钉住）。
     let context = outcomes
@@ -257,12 +268,12 @@ pub(crate) fn apply_providers(
 async fn on_install_pool<T, F>(app: AppHandle, task: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce(&AppStore, &PluginService) -> Result<T, String> + Send + 'static,
+    F: FnOnce(&AppStore, &PluginService) -> Result<T, PluginError> + Send + 'static,
 {
     tauri::async_runtime::spawn_blocking(move || {
         let store = app.state::<AppStore>();
         let service = app.state::<PluginService>();
-        task(&store, &service)
+        task(&store, &service).map_err(|err| err.to_string())
     })
     .await
     .map_err(|e| format!("插件安装任务执行失败：{e}"))?

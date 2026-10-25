@@ -10,7 +10,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    config::{PluginEntry, StoreError},
+    config::PluginEntry,
+    errors::{ConfigError, PluginEntryError},
     provider::Provider,
     variables::Variables,
 };
@@ -33,23 +34,23 @@ pub(crate) struct ProjectionSnapshot {
 /// 只读能力，测试里换一份内存替身即可（不落任何文件）。
 pub(crate) trait ProviderSource {
     /// 投影输入的快照（Provider 表与变量表同源）。
-    fn projection_snapshot(&self) -> Result<ProjectionSnapshot, StoreError>;
+    fn projection_snapshot(&self) -> Result<ProjectionSnapshot, ConfigError>;
     /// 全局变量表：写插件配置时校验覆盖项用（不必连带 Provider 表）。
-    fn variables_snapshot(&self) -> Result<Variables, StoreError>;
+    fn variables_snapshot(&self) -> Result<Variables, ConfigError>;
 }
 
 /// 插件条目端口：条目是配置文件的形状，服务层按来源读写它们。
 pub(crate) trait PluginEntries {
     /// 全部插件条目。
-    fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError>;
+    fn list_plugins(&self) -> Result<Vec<PluginEntry>, ConfigError>;
     /// 按来源取条目；不存在即报错（来源即条目唯一身份）。
-    fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError>;
+    fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, PluginEntryError>;
     /// 新增条目（来源重复或 id 冲突即报错）。
-    fn add_plugin(&self, entry: &PluginEntry) -> Result<(), StoreError>;
+    fn add_plugin(&self, entry: &PluginEntry) -> Result<(), PluginEntryError>;
     /// 删除条目，返回被删的那一条；条目不存在即 `None`（幂等）。
     ///
     /// 「找条目 + 删条目」在存储侧同处一把写锁：两步之间不留窗口。
-    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, StoreError>;
+    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, PluginEntryError>;
     /// 切换启用态：条目不存在即报错；已处于目标态则不写盘并返回 `None`。
     ///
     /// 读-判断-写在同一把锁内完成（适配器侧的纪律）：并发方已完成切换时
@@ -58,9 +59,9 @@ pub(crate) trait PluginEntries {
         &self,
         source: &str,
         enabled: bool,
-    ) -> Result<Option<PluginEntry>, StoreError>;
+    ) -> Result<Option<PluginEntry>, PluginEntryError>;
     /// id 冲突预检：同一 id 不得被**其它**来源的条目持有。
-    fn check_plugin_id_conflict(&self, source: &str, id: &str) -> Result<(), StoreError>;
+    fn check_plugin_id_conflict(&self, source: &str, id: &str) -> Result<(), PluginEntryError>;
 }
 
 /// 组合端口：既要条目又要变量表的入口（如写插件配置）收它。

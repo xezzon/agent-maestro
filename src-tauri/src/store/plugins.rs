@@ -3,7 +3,10 @@
 //! 条目是配置文件的形状（见 [`crate::config::PluginEntry`]），规则与 Provider
 //! 同源：来源即条目唯一身份，id 是来源到落位目录的唯一映射（见 ADR 0006）。
 
-use crate::config::{Change, Config, PluginEntry, StoreError};
+use crate::{
+    config::{Change, Config, PluginEntry},
+    errors::PluginEntryError,
+};
 
 /// 新增插件条目，追加在现有条目之后。
 ///
@@ -15,10 +18,10 @@ use crate::config::{Change, Config, PluginEntry, StoreError};
 pub(super) fn add(
     config: &mut Config,
     plugin_entry: &PluginEntry,
-) -> Result<Change<()>, StoreError> {
+) -> Result<Change<()>, PluginEntryError> {
     let source = plugin_entry.source.clone();
     if config.plugins.iter().any(|plugin| plugin.source == source) {
-        return Err(StoreError::duplicate_source(&source));
+        return Err(PluginEntryError::duplicate_source(&source));
     }
     check_id_conflict(config, &source, &plugin_entry.id)?;
     config.plugins.push(plugin_entry.clone());
@@ -29,24 +32,31 @@ pub(super) fn add(
 ///
 /// 安装前的预检与写入时的复检共用这一条规则：「两次加锁之间可能被抢占」是
 /// 要复检的理由，不是要写两份实现的理由——预检与写入问同一句，答案一致。
-pub(super) fn check_id_conflict(config: &Config, source: &str, id: &str) -> Result<(), StoreError> {
+pub(super) fn check_id_conflict(
+    config: &Config,
+    source: &str,
+    id: &str,
+) -> Result<(), PluginEntryError> {
     match config
         .plugins
         .iter()
         .find(|plugin| plugin.source != source && plugin.id == id)
     {
-        Some(other) => Err(StoreError::duplicate_id(id, &other.source)),
+        Some(other) => Err(PluginEntryError::duplicate_id(id, &other.source)),
         None => Ok(()),
     }
 }
 
 /// 删除插件条目，返回被删除的条目（调用方据此删除落位目录）。
-pub(super) fn delete(config: &mut Config, source: &str) -> Result<Change<PluginEntry>, StoreError> {
+pub(super) fn delete(
+    config: &mut Config,
+    source: &str,
+) -> Result<Change<PluginEntry>, PluginEntryError> {
     let index = config
         .plugins
         .iter()
         .position(|plugin| plugin.source == source)
-        .ok_or_else(|| StoreError::missing_source(source))?;
+        .ok_or_else(|| PluginEntryError::missing_source(source))?;
     let removed = config.plugins.remove(index);
     Ok(Change::Changed(removed))
 }
@@ -56,12 +66,12 @@ pub(super) fn set_enabled(
     config: &mut Config,
     source: &str,
     enabled: bool,
-) -> Result<Change<()>, StoreError> {
+) -> Result<Change<()>, PluginEntryError> {
     let entry = config
         .plugins
         .iter_mut()
         .find(|plugin| plugin.source == source)
-        .ok_or_else(|| StoreError::missing_source(source))?;
+        .ok_or_else(|| PluginEntryError::missing_source(source))?;
     entry.enabled = enabled;
     Ok(Change::Changed(()))
 }

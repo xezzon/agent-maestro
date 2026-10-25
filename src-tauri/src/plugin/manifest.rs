@@ -11,7 +11,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use crate::paths::Paths;
+use crate::{errors::PluginError, paths::Paths};
 
 use super::source::{PluginSource, is_https_url};
 
@@ -32,11 +32,6 @@ pub(crate) struct Manifest {
     /// 段的形状，原样透传给前端渲染，宿主不校验其内容；缺省即无需用户填写。
     #[serde(default)]
     pub(crate) settings_schema: Option<serde_json::Value>,
-}
-
-/// 声明里支持的平台变量前缀（错误信息里列给用户）。
-fn supported_variables() -> String {
-    crate::paths::SUPPORTED_VARIABLES.join("、")
 }
 
 /// 解析计数（测试期）：本线程累计解析了多少份 manifest。
@@ -80,31 +75,30 @@ impl DeclaredConfigDir {
     /// 语法检查（纯判断）：把声明拆成变量前缀与相对片段，不读目录、不碰文件系统。
     ///
     /// 语法错误在解析期就报：manifest 不合法就不该触发 wasm 下载，更不该留下目录。
-    fn parse(declared: &str) -> Result<Self, String> {
+    fn parse(declared: &str) -> Result<Self, PluginError> {
         if declared.is_empty() {
-            return Err("config_dir 未配置".to_owned());
+            return Err(PluginError::ConfigDirMissing);
         }
         // 绝对路径以 `/` 开头，切出的变量前缀为空：与「没有 `/`」一样报前缀错误，
         // 不要误报成「不支持的变量」。
         let (variable, relative) = declared
             .split_once('/')
             .filter(|(variable, _)| !variable.is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "config_dir「{declared}」必须以平台变量开头（支持：{}）",
-                    supported_variables()
-                )
+            .ok_or_else(|| PluginError::ConfigDirVariableRequired {
+                declared: declared.to_owned(),
             })?;
         // `~` 与 `$HOME` 同义：两者解析到同一基准目录。
         if variable != "~" && !crate::paths::SUPPORTED_VARIABLES.contains(&variable) {
-            return Err(format!(
-                "config_dir「{declared}」使用了不支持的平台变量「{variable}」（支持：{}）",
-                supported_variables()
-            ));
+            return Err(PluginError::ConfigDirUnsupportedVariable {
+                declared: declared.to_owned(),
+                variable: variable.to_owned(),
+            });
         }
         let relative = PathBuf::from(relative);
         if relative.as_os_str().is_empty() {
-            return Err(format!("config_dir「{declared}」缺少相对片段"));
+            return Err(PluginError::ConfigDirMissingRelative {
+                declared: declared.to_owned(),
+            });
         }
         // 相对片段必须始终落在基准目录内部：绝对路径（`$HOME//etc`）、`..` 上跳与裸 `.
         // `在同一条路径上拒绝，不依赖后面的规范化回退。裸 `.` 单列是因为它把基准目录整盘交出去。
@@ -117,9 +111,9 @@ impl DeclaredConfigDir {
                     | Component::CurDir
             )
         }) {
-            return Err(format!(
-                "config_dir「{declared}」的相对片段不得是绝对路径，也不得包含「..」或「.」"
-            ));
+            return Err(PluginError::ConfigDirUnsafeRelative {
+                declared: declared.to_owned(),
+            });
         }
         Ok(Self {
             declared: declared.to_owned(),
@@ -133,32 +127,36 @@ impl DeclaredConfigDir {
     /// 这一步**有副作用**（创建目录），因此是显式的一步：解析 manifest 不碰
     /// 文件系统（ADR 0022）。调用方在链接期校验通过之后才调它——wasm 不合法
     /// 时不留配置目录。
-    pub(crate) fn resolve(&self, paths: &Paths) -> Result<PathBuf, String> {
+    pub(crate) fn resolve(&self, paths: &Paths) -> Result<PathBuf, PluginError> {
         let base = paths
             .base_dir(&self.variable)
-            .ok_or_else(|| {
-                format!(
-                    "config_dir「{}」使用了不支持的平台变量「{}」（支持：{}）",
-                    self.declared,
-                    self.variable,
-                    supported_variables()
-                )
+            .ok_or_else(|| PluginError::ConfigDirUnsupportedVariable {
+                declared: self.declared.clone(),
+                variable: self.variable.clone(),
             })?
             .to_path_buf();
 
         let dir = base.join(&self.relative);
-        fs::create_dir_all(&dir).map_err(|e| format!("创建插件配置目录失败：{e}"))?;
+        fs::create_dir_all(&dir).map_err(|e| PluginError::ConfigDirCreate {
+            detail: e.to_string(),
+        })?;
         // 目录可能是符号链接：以规范化后的真实路径确认它仍在基准目录内。
         // 必须严格子代——相等（裸 `.` 已被语法检查拒掉；但以防万一把这一道关补上）
         // 也视为逃逸，避免把整盘基准目录交出去。
-        let canonical_base = base
-            .canonicalize()
-            .map_err(|e| format!("解析平台基准目录失败：{e}"))?;
+        let canonical_base =
+            base.canonicalize()
+                .map_err(|e| PluginError::ConfigDirResolveBase {
+                    detail: e.to_string(),
+                })?;
         let canonical = dir
             .canonicalize()
-            .map_err(|e| format!("解析插件配置目录失败：{e}"))?;
+            .map_err(|e| PluginError::ConfigDirResolve {
+                detail: e.to_string(),
+            })?;
         if canonical == canonical_base || !canonical.starts_with(&canonical_base) {
-            return Err(format!("config_dir「{}」逃逸了基准目录", self.declared));
+            return Err(PluginError::ConfigDirEscape {
+                declared: self.declared.clone(),
+            });
         }
         Ok(canonical)
     }
@@ -179,16 +177,11 @@ where
             platform_declaration(&map, current_platform_key()).map_err(serde::de::Error::custom)?
         }
         _ => {
-            return Err(serde::de::Error::custom(
-                "config_dir 必须是字符串或按平台键声明的对象",
-            ));
+            return Err(serde::de::Error::custom(PluginError::ConfigDirShape));
         }
     };
     DeclaredConfigDir::parse(&declared).map_err(serde::de::Error::custom)
 }
-
-/// config_dir 对象形式允许的平台键（错误信息里列给用户）。
-const SUPPORTED_PLATFORM_KEYS: &str = "linux、macos、windows";
 
 /// 当前平台在 config_dir 对象形式里对应的键；其余 Unix 平台沿用 `linux` 键。
 fn current_platform_key() -> &'static str {
@@ -203,60 +196,60 @@ fn current_platform_key() -> &'static str {
 
 /// 从 config_dir 对象声明里取 `platform` 平台的声明。
 ///
-/// 键固定为 [`SUPPORTED_PLATFORM_KEYS`] 列出的三个平台名，未知键与非字符串值一律拒绝；
+/// 键固定为 `linux`、`macos`、`windows`，未知键与非字符串值一律拒绝；
 /// 取出的值交给 [`DeclaredConfigDir::parse`] 走与字符串形式同一套变量语法。`platform` 由
 /// 反序列化传入 [`current_platform_key`]，独立成参数以便测试覆盖三个平台的选取。
 fn platform_declaration(
     map: &serde_json::Map<String, serde_json::Value>,
     platform: &str,
-) -> Result<String, String> {
+) -> Result<String, PluginError> {
     for (key, value) in map {
         if !matches!(key.as_str(), "linux" | "macos" | "windows") {
-            return Err(format!(
-                "config_dir 对象使用了不支持的平台键「{key}」（支持：{SUPPORTED_PLATFORM_KEYS}）"
-            ));
+            return Err(PluginError::PlatformKeyUnsupported { key: key.clone() });
         }
         if !value.is_string() {
-            return Err(format!("config_dir 对象的平台键「{key}」的值必须是字符串"));
+            return Err(PluginError::PlatformValueNotString { key: key.clone() });
         }
     }
     map.get(platform)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| format!("config_dir 对象缺少平台「{platform}」的声明"))
+        .ok_or_else(|| PluginError::PlatformMissing {
+            platform: platform.to_owned(),
+        })
 }
 
 /// 解析并校验落位 manifest；插件 id 与 `entry` 由这里把关，`config_dir` 的**声明**
 /// 在反序列化时已校验形态（不解析成路径、不建目录）。
-pub(crate) fn parse_placed(value: &str) -> Result<Manifest, String> {
+pub(crate) fn parse_placed(value: &str) -> Result<Manifest, PluginError> {
     #[cfg(test)]
     PARSE_COUNT.with(|count| count.set(count.get() + 1));
     let manifest: Manifest =
-        serde_json::from_str(value).map_err(|e| format!("manifest.json 不合法：{e}"))?;
+        serde_json::from_str(value).map_err(|e| PluginError::InvalidManifest {
+            detail: e.to_string(),
+        })?;
     if !is_valid_plugin_id(&manifest.id) {
-        return Err(format!(
-            "manifest.json 不合法：插件 id「{}」需以小写字母开头，仅允许小写字母、数字、连字符和下划线",
-            manifest.id
-        ));
+        return Err(PluginError::InvalidPluginId {
+            id: manifest.id.clone(),
+        });
     }
     if manifest.entry.is_empty() {
-        return Err("manifest.json 不合法：entry 不能为空".to_owned());
+        return Err(PluginError::EmptyEntry);
     }
     Ok(manifest)
 }
 
 /// 解析并校验 manifest 文本；`entry` 的约束按来源分列。
-pub(crate) fn parse_manifest(source: &PluginSource, text: &str) -> Result<Manifest, String> {
+pub(crate) fn parse_manifest(source: &PluginSource, text: &str) -> Result<Manifest, PluginError> {
     let manifest = parse_placed(text)?;
     match source {
         // wasm 内嵌于二进制，entry 不参与解析。
         PluginSource::Builtin(_) => {}
         PluginSource::Https(_) => {
             if !is_https_url(&manifest.entry) {
-                return Err(format!(
-                    "manifest.json 不合法：https 来源的 entry「{}」必须是 https URL",
-                    manifest.entry
-                ));
+                return Err(PluginError::HttpsEntryRequired {
+                    entry: manifest.entry.clone(),
+                });
             }
         }
         // file 来源的 entry 是插件目录内的相对路径或 https URL（回源到网络）：绝对路径、
@@ -271,10 +264,9 @@ pub(crate) fn parse_manifest(source: &PluginSource, text: &str) -> Result<Manife
                     // 存在的文件：在校验期拒掉，而不是报误导性的读取错误。
                     || url::Url::parse(&manifest.entry).is_ok()
                 {
-                    return Err(format!(
-                        "manifest.json 不合法：entry「{}」必须是插件目录内的相对路径或 https URL",
-                        manifest.entry
-                    ));
+                    return Err(PluginError::RelativeOrHttpsEntryRequired {
+                        entry: manifest.entry.clone(),
+                    });
                 }
             }
         }

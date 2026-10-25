@@ -4,7 +4,8 @@
 //! 规则住在这里，存储层与投影层共用一份口径。
 
 use crate::{
-    config::{Change, Config, StoreError},
+    config::{Change, Config},
+    errors::VariableError,
     variables::Variables,
 };
 
@@ -21,10 +22,10 @@ pub(super) fn is_valid_name(name: &str) -> bool {
 /// 非法名与配置文件损坏同时发生时，报的必须是非法名。`Store::set_variables`
 /// 因此在进入 [`super::Store::mutate`]（第一步就是读配置）之前先调本函数。
 /// [`replace`] 自己也调一次，仓储不依赖调用方先校验。
-pub(super) fn validate_names(variables: &Variables) -> Result<(), StoreError> {
+pub(super) fn validate_names(variables: &Variables) -> Result<(), VariableError> {
     for name in variables.keys() {
         if !is_valid_name(name) {
-            return Err(StoreError::invalid_variable_name(name));
+            return Err(VariableError::invalid_variable_name(name));
         }
     }
     Ok(())
@@ -36,10 +37,13 @@ pub(super) fn validate_names(variables: &Variables) -> Result<(), StoreError> {
 /// 用新表对全部存量 Provider（含禁用者）插值一次：删除导致任一 Provider 的
 /// 引用无法解析时整表拒绝（provider↔variables 一致性）。空默认值合法
 /// （`${EMPTY}`）。
-pub(super) fn replace(config: &mut Config, variables: Variables) -> Result<Change<()>, StoreError> {
+pub(super) fn replace(
+    config: &mut Config,
+    variables: Variables,
+) -> Result<Change<()>, VariableError> {
     validate_names(&variables)?;
     for (slug, provider) in &config.providers {
-        validate_provider(slug, provider, &variables)?;
+        validate_provider(slug, provider, &variables).map_err(VariableError::Interpolation)?;
     }
     config.variables = variables;
     Ok(Change::Changed(()))

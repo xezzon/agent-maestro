@@ -14,7 +14,8 @@ use super::{
     ports::{PluginEntries, ProjectionSnapshot, ProviderSource},
 };
 use crate::{
-    config::{Config, PluginEntry, StoreError},
+    config::{Config, PluginEntry},
+    errors::{ConfigError, PluginEntryError},
     paths::Paths,
     provider::Provider,
     store::{AppStore, Store},
@@ -87,7 +88,7 @@ impl MemoryStore {
 }
 
 impl ProviderSource for MemoryStore {
-    fn projection_snapshot(&self) -> Result<ProjectionSnapshot, StoreError> {
+    fn projection_snapshot(&self) -> Result<ProjectionSnapshot, ConfigError> {
         // 端口的契约：投影输入只含启用的 Provider（禁用项不参与，见 #94）——
         // 替身实现的是这条契约，不是存储层的筛选函数。
         let providers = self
@@ -102,44 +103,44 @@ impl ProviderSource for MemoryStore {
         })
     }
 
-    fn variables_snapshot(&self) -> Result<Variables, StoreError> {
+    fn variables_snapshot(&self) -> Result<Variables, ConfigError> {
         Ok(self.variables.clone())
     }
 }
 
 impl PluginEntries for MemoryStore {
-    fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
+    fn list_plugins(&self) -> Result<Vec<PluginEntry>, ConfigError> {
         Ok(self.plugins.lock().unwrap().clone())
     }
 
-    fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
+    fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, PluginEntryError> {
         self.plugins
             .lock()
             .unwrap()
             .iter()
             .find(|entry| entry.source == source)
             .cloned()
-            .ok_or_else(|| StoreError::missing_source(source))
+            .ok_or_else(|| PluginEntryError::missing_source(source))
     }
 
-    fn add_plugin(&self, entry: &PluginEntry) -> Result<(), StoreError> {
+    fn add_plugin(&self, entry: &PluginEntry) -> Result<(), PluginEntryError> {
         let mut plugins = self.plugins.lock().unwrap();
         if plugins.iter().any(|other| other.source == entry.source) {
-            return Err(StoreError::duplicate_source(&entry.source));
+            return Err(PluginEntryError::duplicate_source(&entry.source));
         }
         if let Some(other) = id_conflict(&plugins, &entry.source, &entry.id) {
-            return Err(StoreError::duplicate_id(&entry.id, &other.source));
+            return Err(PluginEntryError::duplicate_id(&entry.id, &other.source));
         }
         plugins.push(entry.clone());
         Ok(())
     }
 
-    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, StoreError> {
+    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, PluginEntryError> {
         let mut plugins = self.plugins.lock().unwrap();
         let index = plugins
             .iter()
             .position(|entry| entry.source == source)
-            .ok_or_else(|| StoreError::missing_source(source))?;
+            .ok_or_else(|| PluginEntryError::missing_source(source))?;
         Ok(Some(plugins.remove(index)))
     }
 
@@ -147,12 +148,12 @@ impl PluginEntries for MemoryStore {
         &self,
         source: &str,
         enabled: bool,
-    ) -> Result<Option<PluginEntry>, StoreError> {
+    ) -> Result<Option<PluginEntry>, PluginEntryError> {
         let mut plugins = self.plugins.lock().unwrap();
         let entry = plugins
             .iter_mut()
             .find(|entry| entry.source == source)
-            .ok_or_else(|| StoreError::missing_source(source))?;
+            .ok_or_else(|| PluginEntryError::missing_source(source))?;
         if entry.enabled == enabled {
             return Ok(None);
         }
@@ -161,10 +162,10 @@ impl PluginEntries for MemoryStore {
         Ok(Some(previous))
     }
 
-    fn check_plugin_id_conflict(&self, source: &str, id: &str) -> Result<(), StoreError> {
+    fn check_plugin_id_conflict(&self, source: &str, id: &str) -> Result<(), PluginEntryError> {
         let plugins = self.plugins.lock().unwrap();
         match id_conflict(&plugins, source, id) {
-            Some(other) => Err(StoreError::duplicate_id(id, &other.source)),
+            Some(other) => Err(PluginEntryError::duplicate_id(id, &other.source)),
             None => Ok(()),
         }
     }

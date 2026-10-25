@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::plugin::builtin;
+use crate::{errors::PluginError, plugin::builtin};
 
 /// 插件来源：解析一次，随值传递。
 ///
@@ -50,11 +50,9 @@ impl PluginSource {
     ///
     /// 文案只此一份：安装与重新加载此前各写一遍同样的句子，改一边就会与另一边
     /// 漂移。
-    pub(crate) fn parse_or_err(source: &str) -> Result<Self, String> {
-        Self::parse(source).ok_or_else(|| {
-            format!(
-                "无法识别的插件来源：{source}（支持内置 builtin:<id>、指向 manifest.json 的 https 地址或本机绝对路径）"
-            )
+    pub(crate) fn parse_or_err(source: &str) -> Result<Self, PluginError> {
+        Self::parse(source).ok_or_else(|| PluginError::UnrecognizedSource {
+            source: source.to_owned(),
         })
     }
 

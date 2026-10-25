@@ -7,21 +7,26 @@ use super::bindings::exports::maestro::plugin::plugin::{
     ModelCapability as WitModelCapability, ModelLimit as WitModelLimit, Protocol as WitProtocol,
     Provider as WitProvider,
 };
-use crate::provider::{ModelCapability, ModelEntry, Protocol, Provider};
+use crate::{
+    errors::PluginError,
+    provider::{ModelCapability, ModelEntry, Protocol, Provider},
+};
 
 impl InstantiatedPlugin {
     pub(crate) fn write_provider(
         &mut self,
         providers: &BTreeMap<String, Provider>,
-    ) -> Result<(Vec<String>, Vec<SkippedProvider>), String> {
+    ) -> Result<(Vec<String>, Vec<SkippedProvider>), PluginError> {
         let (wit_providers, skipped_providers) = to_wit_provider(providers);
         let handle = self.world.maestro_plugin_plugin();
         let result = handle
             .call_write_providers(&mut self.store, &wit_providers)
-            .map_err(|e| format!("调用插件失败：{e}"))?;
+            .map_err(|e| PluginError::CallPlugin {
+                detail: e.to_string(),
+            })?;
         result
             .map(|files| (files, skipped_providers))
-            .map_err(|msg| format!("插件返回错误：{msg}"))
+            .map_err(|msg| PluginError::PluginReturned { detail: msg })
     }
 }
 

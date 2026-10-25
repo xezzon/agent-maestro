@@ -8,7 +8,8 @@
 //! 依赖箭头指向内层，模块图不成环（#141 I-1）。
 
 use crate::{
-    config::{PluginEntry, StoreError},
+    config::PluginEntry,
+    errors::{ConfigError, PluginEntryError},
     plugin::ports::{PluginEntries, ProjectionSnapshot, ProviderSource},
     variables::Variables,
 };
@@ -16,7 +17,7 @@ use crate::{
 use super::AppStore;
 
 impl ProviderSource for AppStore {
-    fn projection_snapshot(&self) -> Result<ProjectionSnapshot, StoreError> {
+    fn projection_snapshot(&self) -> Result<ProjectionSnapshot, ConfigError> {
         // 一次读锁内取两份快照：投影按同一份配置插值（见 `ProjectionSnapshot`）。
         self.with_read(|store| {
             Ok(ProjectionSnapshot {
@@ -26,30 +27,30 @@ impl ProviderSource for AppStore {
         })
     }
 
-    fn variables_snapshot(&self) -> Result<Variables, StoreError> {
+    fn variables_snapshot(&self) -> Result<Variables, ConfigError> {
         self.with_read(|store| store.variables_snapshot())
     }
 }
 
 impl PluginEntries for AppStore {
-    fn list_plugins(&self) -> Result<Vec<PluginEntry>, StoreError> {
+    fn list_plugins(&self) -> Result<Vec<PluginEntry>, ConfigError> {
         self.with_read(|store| store.list_plugins())
     }
 
-    fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, StoreError> {
+    fn plugin_by_source(&self, source: &str) -> Result<PluginEntry, PluginEntryError> {
         self.with_read(|store| store.plugin_by_source(source))
     }
 
-    fn add_plugin(&self, entry: &PluginEntry) -> Result<(), StoreError> {
+    fn add_plugin(&self, entry: &PluginEntry) -> Result<(), PluginEntryError> {
         self.with_write(|store| store.add_plugin(entry))
     }
 
-    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, StoreError> {
+    fn delete_plugin(&self, source: &str) -> Result<Option<PluginEntry>, PluginEntryError> {
         // 找条目 + 删条目同处一把写锁：两步之间不留「条目已找、条目未删」的窗口。
         self.with_write(|store| match store.delete_plugin(source) {
             Ok(entry) => Ok(Some(entry)),
             // 条目已不存在：幂等（调用方据此认定「已移除」）。
-            Err(StoreError::MissingSource { .. }) => Ok(None),
+            Err(PluginEntryError::MissingSource { .. }) => Ok(None),
             Err(err) => Err(err),
         })
     }
@@ -58,7 +59,7 @@ impl PluginEntries for AppStore {
         &self,
         source: &str,
         enabled: bool,
-    ) -> Result<Option<PluginEntry>, StoreError> {
+    ) -> Result<Option<PluginEntry>, PluginEntryError> {
         // 读-判断-写同处一把写锁：并发方已完成切换时返回 None（不写盘）。
         self.with_write(|store| {
             let entry = store.plugin_by_source(source)?;
@@ -70,7 +71,7 @@ impl PluginEntries for AppStore {
         })
     }
 
-    fn check_plugin_id_conflict(&self, source: &str, id: &str) -> Result<(), StoreError> {
+    fn check_plugin_id_conflict(&self, source: &str, id: &str) -> Result<(), PluginEntryError> {
         self.with_read(|store| store.check_plugin_id_conflict(source, id))
     }
 }
