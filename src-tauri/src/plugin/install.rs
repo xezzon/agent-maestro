@@ -26,7 +26,7 @@ impl PluginService {
     /// 2. 随后获取 manifest 与 wasm、id 冲突检查、链接期校验，全部通过才落位。
     /// 3. 安装成功后写入配置条目；此前任何一步失败都不写条目、不留落位残留。
     ///
-    /// 链接期校验（[`execution::validate_component`]）只做字节反序列化与导入/导出类型匹配，
+    /// 链接期校验（[`crate::plugin::execution::validate_component`]）只做字节反序列化与导入/导出类型匹配，
     /// 不触发组件 init、不预开放真实配置目录。实投影阶段才完整实例化（见
     /// `write_providers`）。
     ///

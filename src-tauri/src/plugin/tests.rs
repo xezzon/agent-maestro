@@ -1449,6 +1449,36 @@ fn set_plugin_config_rejects_variables_not_declared_in_the_global_table() {
     );
 }
 
+/// 插件条目不存在时，先报「条目不存在」而不是「变量未声明」。
+///
+/// 条目与变量表同取一次读锁（见 `PluginStore::plugin_entry_with_variables`），
+/// 读条目在前，故条目缺失先于变量校验暴露。两条消息各自都成立，但根因是
+/// 插件根本不存在——先报它，用户才不会去查一个根本没被写入的变量。
+/// 该顺序由此用例钉住：把端口拆回「先校验变量、再查条目」时它会变红。
+/// （拆成两次读锁不影响本用例——先查条目这个次序由快照方法本身决定。）
+#[test]
+fn set_plugin_config_reports_the_missing_plugin_before_the_undeclared_variable() {
+    let home = temp_home();
+    let store = store_at(home.path());
+    let service = test_service(home.path());
+    service.startup(&store).unwrap();
+
+    let config = PluginConfig {
+        variables: BTreeMap::from([("UNDECLARED".to_owned(), "sk-canary".to_owned())]),
+        form: None,
+    };
+    let err = service
+        .set_config(&store, "https://example.com/nope/manifest.json", &config)
+        .unwrap_err();
+
+    assert!(err.contains("插件条目不存在"), "{err}");
+    assert!(
+        !err.contains("未在全局变量表中声明"),
+        "条目缺失应先于变量校验暴露：{err}"
+    );
+    assert!(!err.contains("sk-canary"), "报错不得携带变量值：{err}");
+}
+
 /// 插件配置损坏时报错并给出可读原因（含文件路径），不静默降级为「无覆盖」。
 #[test]
 fn get_plugin_config_reports_corruption_instead_of_degrading() {
