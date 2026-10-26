@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { message } from "antd";
+import { App } from "antd";
 
 /**
  * 异步动作的共享样板：进行中状态 + 失败提示 + 收尾。
@@ -13,6 +13,9 @@ import { message } from "antd";
  */
 export default function useAsyncAction() {
   const [busy, setBusy] = useState(false);
+  // 静态 message 渲染在独立根里，拿不到 ConfigProvider 的动态主题；
+  // useApp 这一份才跟着明暗走。
+  const { message } = App.useApp();
 
   async function run(action) {
     setBusy(true);

@@ -74,13 +74,14 @@ export default function PreferencesProvider({ children }) {
     [theme, systemAppearance],
   );
 
-  // 「跟随系统」时订阅系统外观变化；解析结果与当前值相同时不触发重渲染。
+  // 系统外观始终挂着监听：停在显式亮 / 暗期间系统换外观时，状态也跟着更新，
+  // 切到「跟随系统」的第一帧就按当前外观绘制，不会先用陈旧值闪一下。
+  // 解析结果与当前值相同时不触发重渲染，常驻一个监听没有额外成本。
   useEffect(() => {
-    if (theme !== THEME_SYSTEM) return undefined;
     return subscribeSystemAppearance((next) => {
       setSystemAppearance((current) => (current === next ? current : next));
     });
-  }, [theme]);
+  }, []);
 
   // 原生控件跟随：把解析后的外观写到根元素，滚动条、表单控件等随之变化。
   // 偏好尚未加载时不写——那会把「跟随系统」提前钉成亮色，反而闪一下。

@@ -1,4 +1,4 @@
-import { Button, Flex, message, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Flex, Tag, Tooltip, Typography } from "antd";
 import { FileTextOutlined } from "@ant-design/icons";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { applyStatusPresentation } from "./applyStatus";
@@ -9,6 +9,7 @@ import { applyStatusPresentation } from "./applyStatus";
  * @param {import("@/api/plugins").PluginApplyReport[]} param0.reports
  */
 export default function ApplyResultList({ reports }) {
+  const { message } = App.useApp();
   return (
     <Flex vertical gap={12}>
       {reports.map((report) => {

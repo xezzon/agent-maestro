@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 /**
  * @typedef {'light' | 'dark' | 'system'} ThemePreference 主题偏好：亮色、暗色、跟随系统。
  * @typedef {'light' | 'dark'} Appearance 解析后的外观：跟随系统解析后的明暗。
@@ -8,7 +10,6 @@
  * @property {number=} version 偏好文件 schema 版本；写入时由后端强制，前端不必给。
  * @property {ThemePreference} theme 主题偏好。
  */
-import { invoke } from "@tauri-apps/api/core";
 
 /** @type {ThemePreference} 亮色：应用外观固定为亮色。 */
 export const THEME_LIGHT = "light";

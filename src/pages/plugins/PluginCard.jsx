@@ -1,9 +1,9 @@
 import {
   Alert,
+  App,
   Button,
   Card,
   Flex,
-  message,
   Popconfirm,
   Switch,
   Tag,
@@ -26,6 +26,7 @@ import useAsyncAction from "@/hooks/useAsyncAction";
  */
 export default function PluginCard({ plugin, onReload }) {
   const [busy, run] = useAsyncAction();
+  const { message } = App.useApp();
 
   async function handleAction(action, successText) {
     await run(async () => {

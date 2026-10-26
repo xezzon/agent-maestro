@@ -47,6 +47,7 @@ export default function PreferencesPage() {
           <Flex align="center" gap={16}>
             <span>主题</span>
             <Radio.Group
+              aria-label="主题"
               optionType="button"
               buttonStyle="solid"
               options={THEME_OPTIONS}

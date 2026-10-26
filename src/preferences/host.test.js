@@ -26,9 +26,11 @@ import {
   subscribeSystemAppearance,
 } from "./host";
 
-// 打桩的调用记录逐条断言，故每次用例前清空——实现（mockResolvedValue 等）留着。
+// 每个用例自己装宿主 / 浏览器环境；用例间连实现带环境一起重置，避免上一条的
+// mockResolvedValue 或 globalThis.window 漏进下一条。
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  globalThis.window = {};
 });
 
 /**
@@ -132,6 +134,26 @@ describe("系统外观的订阅", () => {
 
     expect(listener).toHaveBeenCalledWith("dark");
   });
+
+  it("取消早于异步订阅完成时，订阅一落地立即退订", async () => {
+    useHost(false);
+    const unlisten = vi.fn();
+    let finishSubscribe;
+    host.onThemeChanged.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishSubscribe = resolve;
+        }),
+    );
+
+    const dispose = subscribeSystemAppearance(vi.fn());
+    // disposer 先于订阅 promise 完成。
+    dispose();
+    finishSubscribe(unlisten);
+
+    // 守卫若缺失，unlisten 永远不会被调用——悬挂监听就留下了。
+    await vi.waitFor(() => expect(unlisten).toHaveBeenCalled());
+  });
 });
 
 describe("原生主题的应用", () => {
@@ -190,5 +212,28 @@ describe("原生主题的应用", () => {
     await applyNativeTheme("dark");
 
     expect(host.setTheme).not.toHaveBeenCalled();
+  });
+
+  it("快速切换时按发起顺序落地，旧调用不能覆盖新选择", async () => {
+    useHost(false);
+    host.setTheme.mockResolvedValue(undefined);
+    host.theme.mockResolvedValue("dark");
+    let resolvePolicy;
+    core.invoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePolicy = resolve;
+        }),
+    );
+
+    // 第一次「跟随系统」卡在问宿主策略上；其间用户改选暗色。
+    const first = applyNativeTheme("system");
+    await vi.waitFor(() => expect(core.invoke).toHaveBeenCalled());
+    const second = applyNativeTheme("dark");
+    resolvePolicy(false);
+    await Promise.all([first, second]);
+
+    // 旧调用先交还系统，新选择的暗色必须最后落在窗口上。
+    expect(host.setTheme.mock.calls).toEqual([[null], ["dark"]]);
   });
 });

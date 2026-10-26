@@ -1,4 +1,4 @@
-import { message } from "antd";
+import { App } from "antd";
 import { setPluginConfig } from "@/api/plugins";
 import useAsyncAction from "@/hooks/useAsyncAction";
 
@@ -12,6 +12,7 @@ import useAsyncAction from "@/hooks/useAsyncAction";
  */
 export default function usePluginConfigSave(source) {
   const [saving, run] = useAsyncAction();
+  const { message } = App.useApp();
   async function save(config, patch, onSaved) {
     await run(async () => {
       await setPluginConfig(source, { ...config, ...patch });

@@ -9,7 +9,7 @@ import { THEME_SYSTEM } from "@/api/preferences";
  * 此时「跟随系统」靠浏览器能力（matchMedia）工作，开发时也能验证。
  * @returns {boolean}
  */
-export function inTauriHost() {
+function inTauriHost() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
@@ -61,7 +61,7 @@ export async function readSystemAppearance() {
  * 宿主里媒体查询跟着应用自己的选择走，多半读不到系统外观。
  * @returns {import("@/api/preferences").Appearance}
  */
-export function matchMediaAppearance() {
+function matchMediaAppearance() {
   if (
     typeof window === "undefined" ||
     typeof window.matchMedia !== "function"
@@ -154,7 +154,7 @@ async function hostRequiresPinnedTheme() {
  * @returns {Promise<import("@/api/preferences").Appearance | null>} 跟随系统时
  *   返回读到的系统外观；显式偏好返回 null。
  */
-export async function applyNativeTheme(preference) {
+async function applyNativeThemeNow(preference) {
   if (!inTauriHost()) return null;
   try {
     if (preference !== THEME_SYSTEM) {
@@ -176,4 +176,23 @@ export async function applyNativeTheme(preference) {
     console.warn("failed to set the native window theme", err);
     return null;
   }
+}
+
+// 对窗口的操作必须按发起顺序落地：快速切换时，早发起的一次若在 await 之后才动
+// 窗口，会把晚发起的选择覆盖掉（React effect 的取消标志只挡状态更新，挡不住
+// 已经发给宿主的操作）。用一条 promise 链把所有调用串起来。
+let nativeThemeUpdate = Promise.resolve();
+
+/**
+ * 串行地应用原生主题：调用按发起顺序依次落地，旧调用不可能在新选择之后再改窗口。
+ * @param {import("@/api/preferences").ThemePreference} preference 主题偏好。
+ * @returns {Promise<import("@/api/preferences").Appearance | null>}
+ */
+export function applyNativeTheme(preference) {
+  const update = nativeThemeUpdate.then(() =>
+    applyNativeThemeNow(preference),
+  );
+  // 链尾不能携带拒绝：一次失败不该堵死之后的所有切换。
+  nativeThemeUpdate = update.catch(() => {});
+  return update;
 }
