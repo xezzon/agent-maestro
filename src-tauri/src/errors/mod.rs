@@ -154,5 +154,29 @@ mod tests {
             VariableError::from(LockPoisoned).to_string(),
             "配置存储不可用"
         );
+        assert_eq!(
+            PreferencesError::from(LockPoisoned).to_string(),
+            "偏好存储不可用",
+            "偏好是独立的存储域：锁毒化折成自己的那句"
+        );
+    }
+
+    /// 偏好版本不受支持的文案逐字断言：整数版本号说成「更新版本写出」，
+    /// 非整数取值说成「不是版本号」——两种修法方向不同，文案不能张冠李戴。
+    #[test]
+    fn unsupported_version_messages_distinguish_integer_from_garbage() {
+        let path = std::path::Path::new("/home/tester/.maestro/preferences.json");
+        let newer = PreferencesError::unsupported_version(path, "99", 1, true).to_string();
+        assert!(
+            newer.contains("文件中的 version 为 99") && newer.contains("可能由更新版本写出"),
+            "{newer}"
+        );
+        let garbage = PreferencesError::unsupported_version(path, "1.0", 1, false).to_string();
+        assert!(
+            garbage.contains("文件中的 version 为 1.0")
+                && garbage.contains("version 必须是整数版本号")
+                && !garbage.contains("更新版本写出"),
+            "{garbage}"
+        );
     }
 }

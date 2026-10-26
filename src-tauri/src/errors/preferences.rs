@@ -27,14 +27,17 @@ pub(crate) enum PreferencesError {
     Serialize { detail: String },
     /// 偏好文件的版本不被当前应用支持。
     ///
-    /// 那可能是更新版本写下的文件：覆盖它等于用旧版销毁新版的数据，故存储层
-    /// 拒写（ADR 0023）。
+    /// 整数版本号可能是更新版本写下的文件：覆盖它等于用旧版销毁新版的数据，故
+    /// 存储层拒写（ADR 0023）。非整数取值（`1.0`、字符串等）是文件形状被改坏，
+    /// 同样不碰它，但文案说成「不是版本号」而非「更新版本写出」。
     UnsupportedVersion {
         path: PathBuf,
         /// 文件里的版本取值（原样带进文案，便于用户对照文件）。
         found: String,
         /// 当前应用支持的版本。
         supported: u32,
+        /// 取值是不是整数版本号。
+        integer: bool,
     },
     /// 偏好存储的锁不可用（其它命令持锁期间 panic 毒化了锁）。
     Unavailable,
@@ -58,11 +61,13 @@ impl PreferencesError {
         path: &Path,
         found: impl Into<String>,
         supported: u32,
+        integer: bool,
     ) -> Self {
         Self::UnsupportedVersion {
             path: path.to_path_buf(),
             found: found.into(),
             supported,
+            integer,
         }
     }
 }
@@ -86,11 +91,19 @@ impl Display for PreferencesError {
                 path,
                 found,
                 supported,
-            } => write!(
-                f,
-                "偏好文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用仅支持 {supported}。\n该文件可能由更新版本写出，Maestro 不会覆盖它；请自行处理该文件后重启应用。",
-                path.display()
-            ),
+                integer,
+            } => {
+                let advice = if *integer {
+                    "该文件可能由更新版本写出，Maestro 不会覆盖它；请自行处理该文件后重启应用。"
+                } else {
+                    "version 必须是整数版本号，Maestro 不会覆盖该文件；请修正或删除它后重启应用。"
+                };
+                write!(
+                    f,
+                    "偏好文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用仅支持 {supported}。\n{advice}",
+                    path.display()
+                )
+            }
             PreferencesError::Unavailable => write!(f, "{STORE_LOCK_POISONED}"),
         }
     }

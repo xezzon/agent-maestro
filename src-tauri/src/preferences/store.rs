@@ -39,7 +39,12 @@ enum FileState {
     /// 归当前版本管：可读写。
     Managed,
     /// 版本不受支持：只读不写（文件里的版本取值原样带进报错）。
-    Foreign { found: String },
+    Foreign {
+        /// 文件里读到的版本取值。
+        found: String,
+        /// 取值是不是整数版本号：决定报错说成「更新版本写出」还是「不是版本号」。
+        integer: bool,
+    },
 }
 
 impl PreferencesStore {
@@ -68,11 +73,12 @@ impl PreferencesStore {
     /// 文件版本不受支持时整包替换被拒：那一份可能由更新版本写出，覆盖它等于
     /// 降级销毁（ADR 0023；用户故事 13 说的正是这件事）。
     pub(crate) fn update(&self, preferences: Preferences) -> Result<Preferences, PreferencesError> {
-        if let FileState::Foreign { found } = &self.file_state {
+        if let FileState::Foreign { found, integer } = &self.file_state {
             return Err(PreferencesError::unsupported_version(
                 &self.path,
                 found.clone(),
                 PREFERENCES_VERSION,
+                *integer,
             ));
         }
         // 写锁覆盖「落盘 + 换内存」两步：并发两次更新不能交错，否则先落盘的那次
@@ -121,11 +127,14 @@ fn load(path: &Path) -> (Preferences, FileState) {
                 }
                 (preferences, FileState::Managed)
             }
-            Loaded::UnsupportedVersion { found } => {
+            Loaded::UnsupportedVersion { found, integer } => {
                 log::warn!(
                     "preferences version {found} is not supported (current: {PREFERENCES_VERSION}); using defaults and leaving the file untouched"
                 );
-                (Preferences::default(), FileState::Foreign { found })
+                (
+                    Preferences::default(),
+                    FileState::Foreign { found, integer },
+                )
             }
         },
         Err(err) => {

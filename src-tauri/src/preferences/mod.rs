@@ -99,7 +99,8 @@ impl Default for Preferences {
 /// 而非具体类型，缺字段与非预期类型因此各走各的兜底规则。
 #[derive(Debug, Deserialize)]
 pub(crate) struct PreferencesFile {
-    /// 版本：缺字段即按缺省补齐；显式给出但不受支持时按「不碰该文件」处理。
+    /// 版本：缺字段或 `null` 即按缺省补齐；显式给出但不受支持时按「不碰该文件」
+    /// 处理。
     #[serde(default)]
     version: Option<serde_json::Value>,
     /// 主题：缺字段或取值非法一律兜底为跟随系统。
@@ -120,23 +121,34 @@ pub(crate) enum Loaded {
     UnsupportedVersion {
         /// 文件里读到的版本取值（原样带进日志，便于用户对照文件）。
         found: String,
+        /// 取值是不是整数：整数版本号可能来自更新版本；非整数（`1.0`、字符串
+        /// 等）是文件形状被改坏，报错文案据此区分，不说成「更新版本写出」。
+        integer: bool,
     },
 }
 
 impl PreferencesFile {
     /// 归一化：缺字段补缺省、非法主题值兜底为跟随系统。
     ///
-    /// 版本不受支持时返回 [`Loaded::UnsupportedVersion`]——那种文件可能来自更新
-    /// 的版本，不该被改写，调用方据此按默认值运行且不碰它。
+    /// 版本不受支持时返回 [`Loaded::UnsupportedVersion`]——整数版本号可能来自
+    /// 更新的版本，不该被改写，调用方据此按默认值运行且不碰它。
     pub(crate) fn normalize(self) -> Loaded {
-        let version_was_absent = self.version.is_none();
+        // `null` 与字段缺失同义（显式写 null 等于没给），都按缺省补齐。
+        let version_was_absent = matches!(&self.version, None | Some(serde_json::Value::Null));
         let version = match &self.version {
-            None => PREFERENCES_VERSION,
+            None | Some(serde_json::Value::Null) => PREFERENCES_VERSION,
             Some(value) => match value.as_u64() {
                 Some(found) if found == u64::from(PREFERENCES_VERSION) => PREFERENCES_VERSION,
-                _ => {
+                Some(_) => {
                     return Loaded::UnsupportedVersion {
                         found: describe(value),
+                        integer: true,
+                    };
+                }
+                None => {
+                    return Loaded::UnsupportedVersion {
+                        found: describe(value),
+                        integer: false,
                     };
                 }
             },

@@ -170,6 +170,73 @@ fn unsupported_version_runs_with_defaults_and_leaves_the_file_untouched() {
     );
 }
 
+/// 版本写成 `null`：与字段缺失同义，按缺省补齐并写回，不当版本不受支持处理。
+#[test]
+fn null_version_is_filled_like_a_missing_field() {
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
+    fs::write(
+        paths.preferences_path(),
+        r#"{"version":null,"theme":"dark"}"#,
+    )
+    .unwrap();
+
+    let store = PreferencesStore::new(paths.preferences_path());
+
+    assert_eq!(store.get().unwrap().version, PREFERENCES_VERSION);
+    assert_eq!(store.get().unwrap().theme, Theme::Dark, "已有字段不受影响");
+    assert_eq!(
+        read_file(&paths),
+        "{\n  \"version\": 1,\n  \"theme\": \"dark\"\n}\n",
+        "null 补齐为当前版本后写回，该文件仍归当前版本管"
+    );
+
+    // 归当前版本管：后续更新不被拒。
+    let updated = store
+        .update(Preferences {
+            version: PREFERENCES_VERSION,
+            theme: Theme::Light,
+        })
+        .unwrap();
+    assert_eq!(updated.theme, Theme::Light);
+}
+
+/// 版本写成非整数（`1.0`）：不是「更新版本写出」的文件，但形状已坏——按默认值
+/// 运行且不碰该文件，随后的更新同样被拒。
+#[test]
+fn non_integer_version_is_left_untouched_with_a_garbage_reason() {
+    let (_home, paths) = temp_paths();
+    fs::create_dir_all(paths.maestro_dir()).unwrap();
+    let original = r#"{"version":1.0,"theme":"dark"}"#;
+    fs::write(paths.preferences_path(), original).unwrap();
+
+    let store = PreferencesStore::new(paths.preferences_path());
+
+    assert_eq!(
+        store.get().unwrap(),
+        Preferences {
+            version: PREFERENCES_VERSION,
+            theme: Theme::System
+        },
+        "形状坏了按默认值运行"
+    );
+    assert_eq!(read_file(&paths), original, "非整数版本的文件不读写");
+
+    let err = store
+        .update(Preferences {
+            version: PREFERENCES_VERSION,
+            theme: Theme::Light,
+        })
+        .unwrap_err();
+    match err {
+        PreferencesError::UnsupportedVersion { found, integer, .. } => {
+            assert_eq!(found, "1.0");
+            assert!(!integer, "非整数取值不被当成更新版本写出的文件");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// 版本不受支持：随后切主题也不得覆盖那份文件。
 ///
 /// 加载期的「不读写」只挡住了启动那一刻——若存储层不记住这件事，用户第一次
