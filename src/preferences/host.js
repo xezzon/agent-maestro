@@ -189,9 +189,7 @@ let nativeThemeUpdate = Promise.resolve();
  * @returns {Promise<import("@/api/preferences").Appearance | null>}
  */
 export function applyNativeTheme(preference) {
-  const update = nativeThemeUpdate.then(() =>
-    applyNativeThemeNow(preference),
-  );
+  const update = nativeThemeUpdate.then(() => applyNativeThemeNow(preference));
   // 链尾不能携带拒绝：一次失败不该堵死之后的所有切换。
   nativeThemeUpdate = update.catch(() => {});
   return update;
