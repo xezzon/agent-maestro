@@ -90,9 +90,24 @@ export default function PreferencesProvider({ children }) {
   }, [preferences, appearance]);
 
   // 原生标题栏与控件跟随：选亮色 / 暗色时显式设置，选跟随系统时交还系统。
+  //
+  // 交还之后才读系统外观：窗口主题交还前由应用定住，读到的会是应用自己的
+  // 选择而不是系统外观。读完再落地，前端与原生控件才对得上。
   useEffect(() => {
-    if (!preferences) return;
-    applyNativeTheme(preferences.theme);
+    if (!preferences) return undefined;
+    let cancelled = false;
+    (async () => {
+      await applyNativeTheme(preferences.theme);
+      if (cancelled || preferences.theme !== THEME_SYSTEM) return;
+      const appearance = await readSystemAppearance();
+      if (cancelled) return;
+      setSystemAppearance((current) =>
+        current === appearance ? current : appearance,
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [preferences]);
 
   /**
