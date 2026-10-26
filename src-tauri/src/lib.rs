@@ -6,6 +6,7 @@ mod interpolate;
 mod logging;
 mod paths;
 mod plugin;
+mod preferences;
 mod provider;
 mod store;
 mod test_global;
@@ -15,11 +16,13 @@ mod variables;
 mod testutil;
 
 use command::{
-    add_plugin, apply_providers, create_provider, delete_provider, get_plugin_config, list_plugins,
-    list_providers, list_variables, reload_plugin, remove_plugin, set_plugin_config,
-    set_plugin_enabled, set_provider_enabled, set_variables, update_provider,
+    add_plugin, apply_providers, create_provider, delete_provider, get_plugin_config,
+    get_preferences, host_requires_pinned_theme, list_plugins, list_providers, list_variables,
+    reload_plugin, remove_plugin, set_plugin_config, set_plugin_enabled, set_provider_enabled,
+    set_variables, update_preferences, update_provider,
 };
 use plugin::PluginService;
+use preferences::PreferencesStore;
 use std::sync::RwLock;
 use store::{AppStore, Store};
 use tauri::Manager;
@@ -100,6 +103,9 @@ pub fn run() {
             app.manage(AppStore {
                 store: RwLock::new(store),
             });
+            // 偏好是独立的存储（自己的内存状态与锁，ADR 0023）：启动时即加载，
+            // 读不出来按缺省值运行——偏好是外观问题，不是启动阻塞。
+            app.manage(PreferencesStore::new(paths.preferences_path()));
             app.manage(PluginService::new(paths));
 
             // logger 已随插件 setup attach：补报降级原因与非法级别值。
@@ -143,7 +149,10 @@ pub fn run() {
             remove_plugin,
             get_plugin_config,
             set_plugin_config,
-            apply_providers
+            apply_providers,
+            get_preferences,
+            update_preferences,
+            host_requires_pinned_theme
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

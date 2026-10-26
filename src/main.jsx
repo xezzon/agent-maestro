@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { ConfigProvider } from "antd";
+import { App as AntApp, ConfigProvider, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import {
   error as logError,
@@ -10,6 +10,9 @@ import {
   trace,
 } from "@tauri-apps/plugin-log";
 import App from "./App";
+import PreferencesProvider, {
+  usePreferences,
+} from "@/preferences/PreferencesProvider";
 
 // 前端日志汇入统一日志文件（ADR 0008）：console.* 经 @tauri-apps/plugin-log
 // 落盘（记录 target 为 webview::<location>）；未捕获异常另由下面两个监听兜住
@@ -51,10 +54,39 @@ window.addEventListener("unhandledrejection", (event) => {
   void logError(formatReason(event.reason)).catch(() => {});
 });
 
+/**
+ * 主界面：外观跟着偏好走（antd 的明暗算法随之切换）。
+ *
+ * 住在 `PreferencesProvider` 之内：它门控首帧，偏好加载完成后才渲染这里，
+ * 故 antd 从第一帧起就是对的配色，不会「先亮后暗」。
+ *
+ * `AntApp` 提供可消费 `ConfigProvider` 上下文的 `message`（静态 `message`
+ * 渲染在自己的根里，拿不到主题与语言，暗色下弹窗仍是亮色）。`component={false}`
+ * 表示不额外套一层 DOM，页面布局不受影响。
+ */
+function ThemedApp() {
+  const { appearance } = usePreferences();
+  return (
+    <ConfigProvider
+      locale={zhCN}
+      theme={{
+        algorithm:
+          appearance === "dark"
+            ? antdTheme.darkAlgorithm
+            : antdTheme.defaultAlgorithm,
+      }}
+    >
+      <AntApp component={false}>
+        <App />
+      </AntApp>
+    </ConfigProvider>
+  );
+}
+
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <ConfigProvider locale={zhCN}>
-      <App />
-    </ConfigProvider>
+    <PreferencesProvider>
+      <ThemedApp />
+    </PreferencesProvider>
   </React.StrictMode>,
 );

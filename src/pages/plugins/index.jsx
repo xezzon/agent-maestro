@@ -1,10 +1,10 @@
 import { useState } from "react";
 import {
   Alert,
+  App,
   Button,
   Empty,
   Flex,
-  message,
   Spin,
   Typography,
 } from "antd";
@@ -30,6 +30,7 @@ export default function PluginsPage({
   onReload,
 }) {
   const [adding, setAdding] = useState(false);
+  const { message } = App.useApp();
 
   /** 安装成功才写入条目：失败由命令层抛出原因（对话框内展示），这里只刷新成功的结果。 */
   async function handleAdd(source) {

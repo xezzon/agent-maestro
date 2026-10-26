@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import { Layout, Menu } from "antd";
 import PluginsPage from "@/pages/plugins";
 import PluginConfigPage from "@/pages/plugin-config";
+import PreferencesPage from "@/pages/preferences";
 import ProvidersPage from "@/pages/provider";
 import { listPlugins } from "@/api/plugins";
+import { usePreferences } from "@/preferences/PreferencesProvider";
 import { currentPluginOf, pluginNavItems } from "./navigation";
 import { createLatestRequestGate } from "./latestRequest";
 import "./App.css";
@@ -12,10 +14,15 @@ const { Sider, Content } = Layout;
 
 // 侧边栏结构：品牌置顶，普通菜单居中，功能性入口置底（见 issue #34）。
 const NAV_MAIN_ITEMS = [{ key: "providers", label: "Provider" }];
-const NAV_BOTTOM_ITEMS = [{ key: "plugins", label: "Plugins" }];
+const NAV_BOTTOM_ITEMS = [
+  { key: "plugins", label: "Plugins" },
+  { key: "preferences", label: "偏好" },
+];
 
 function App() {
   const [current, setCurrent] = useState("providers");
+  // 侧边栏外观跟着解析后的偏好走（不再是硬编码的亮色）。
+  const { appearance } = usePreferences();
   // 插件列表是全应用的一份数据：导航项、Provider 页的投影按钮与 Plugins 页
   // 的卡片读的都是它。此前 App 与 Provider 页各调一次 listPlugins，各持一份
   // 快照——判定（isUsablePlugin）共享了，数据没有。
@@ -66,7 +73,7 @@ function App() {
 
   return (
     <Layout className="app-shell">
-      <Sider theme="light" width={200} className="app-sider">
+      <Sider theme={appearance} width={200} className="app-sider">
         <div className="brand">Maestro</div>
         <Menu
           className="nav-main"
@@ -94,6 +101,7 @@ function App() {
               onReload={reloadPlugins}
             />
           )}
+          {current === "preferences" && <PreferencesPage />}
           {currentPlugin && (
             <PluginConfigPage
               key={currentPlugin.source}
