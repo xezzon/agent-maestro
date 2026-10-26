@@ -149,6 +149,16 @@ impl Paths {
         self.maestro_dir().join("config.json")
     }
 
+    /// 偏好文件路径：`~/.maestro/preferences.json`（ADR 0023）。
+    ///
+    /// 与 [`Paths::config_path`] 并列但不是同一份数据：偏好是应用级用户偏好
+    /// （主题等），独立于领域配置（Provider、变量、插件），容错策略也相反
+    /// （偏好兜底并重写，配置损坏即拒写）。两条路径由同一处派生，将来若要把
+    /// `~/.maestro` 的布局收成一份文档，只改这里。
+    pub(crate) fn preferences_path(&self) -> PathBuf {
+        self.maestro_dir().join("preferences.json")
+    }
+
     /// 插件落位目录的父目录：`~/.maestro/plugins`。
     pub(crate) fn plugins_dir(&self) -> PathBuf {
         self.maestro_dir().join("plugins")

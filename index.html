@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent Maestro</title>
+    <style>
+      /*
+       * 偏好加载完成前（门控首帧）先按系统外观铺底，避免白闪；偏好就位后由
+       * PreferencesProvider 把根元素的 color-scheme 换成解析出来的外观。
+       */
+      :root {
+        color-scheme: light dark;
+      }
+
+      body {
+        background-color: Canvas;
+      }
+    </style>
   </head>
 
   <body>

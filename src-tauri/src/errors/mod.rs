@@ -10,18 +10,26 @@
 //! 存储错误。插件服务另有 [`PluginError`]，它把来自端口的两类存储错误与自己的
 //! 领域错误拼在一起。
 //!
+//! 偏好存储另有 [`PreferencesError`]：它与配置错误**不共享状态机**——配置损坏
+//! 要「拒写」（ADR 0001），偏好损坏要「兜底并重写」（ADR 0023），一条规则
+//! 同时表达不了这两件事。锁毒化（[`LockPoisoned`]）是各存储域共用的标记，
+//! 各经一段 `From` 折进自己那句「存储不可用」。
+//!
 //! 每个领域住在自己的子模块里（[`config`] / [`provider`] / [`entry`] /
 //! [`variable`] / [`interpolation`] / [`fetch`] / [`logging`] / [`paths`] /
-//! [`plugin`]），本模块只做两件事：把类型 re-export 出去（`crate::errors::X`
-//! 的路径不变，调用方零改动），以及收纳跨领域的契约（见 [`impl_storage_error`]）。
+//! [`plugin`] / [`preferences`] / [`lock`]），本模块只做两件事：把类型
+//! re-export 出去（`crate::errors::X` 的路径不变，调用方零改动），以及收纳
+//! 跨领域的契约（见 [`impl_storage_error`]）。
 
-pub(crate) use config::{ConfigError, LockPoisoned};
+pub(crate) use config::ConfigError;
 pub(crate) use entry::PluginEntryError;
 pub(crate) use fetch::FetchError;
 pub(crate) use interpolation::{FieldError, InterpolationError, ProviderInterpolationError};
+pub(crate) use lock::LockPoisoned;
 pub(crate) use logging::LoggingError;
 pub(crate) use paths::PathError;
 pub(crate) use plugin::PluginError;
+pub(crate) use preferences::PreferencesError;
 pub(crate) use provider::ProviderError;
 pub(crate) use variable::VariableError;
 
@@ -29,9 +37,11 @@ mod config;
 mod entry;
 mod fetch;
 mod interpolation;
+mod lock;
 mod logging;
 mod paths;
 mod plugin;
+mod preferences;
 mod provider;
 mod variable;
 

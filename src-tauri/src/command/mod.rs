@@ -1,4 +1,5 @@
 mod plugin;
+mod preferences;
 mod provider;
 mod variables;
 
@@ -6,6 +7,7 @@ pub(crate) use plugin::{
     add_plugin, apply_providers, get_plugin_config, list_plugins, reload_plugin, remove_plugin,
     set_plugin_config, set_plugin_enabled,
 };
+pub(crate) use preferences::{get_preferences, update_preferences};
 pub(crate) use provider::{
     create_provider, delete_provider, list_providers, set_provider_enabled, update_provider,
 };

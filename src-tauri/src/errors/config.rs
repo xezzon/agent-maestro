@@ -1,19 +1,14 @@
 //! 配置存储的错误：配置文件本身的读取、解析、序列化与落盘。
 //!
-//! 锁毒化（[`LockPoisoned`]）也住在这一域——被毒化的是 `AppStore` 的锁，
-//! 不是配置本身。
+//! 锁毒化（[`LockPoisoned`]）不住在这一域——被毒化的是锁，不是配置本身；
+//! 它是各存储域共用的标记，住在 [`crate::errors::lock`]。
 
 use std::{
     fmt::{self, Display},
     path::{Path, PathBuf},
 };
 
-/// 配置存储的锁被毒化（其它命令持锁期间 panic）。
-///
-/// 这不是任何领域错误的一种：毒化的是 `AppStore` 的锁而非配置本身。锁边界
-/// 经 [`From`] 把它折进调用方的错误类型——每个可经由锁触发的错误类型都有一段
-/// `From<LockPoisoned>`，统一归到「配置存储不可用」这一句。
-pub(crate) struct LockPoisoned;
+use crate::errors::LockPoisoned;
 
 /// 配置存储不可用时对用户可见的原因。
 ///

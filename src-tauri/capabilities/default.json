@@ -11,6 +11,7 @@
       "allow": [{ "path": "$HOME/**" }]
     },
     "opener:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "core:window:allow-set-theme"
   ]
 }
