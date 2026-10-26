@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { THEME_SYSTEM } from "@/api/preferences";
 
@@ -34,6 +35,9 @@ function toAppearance(isDark) {
  * 那一步顺手把媒体查询拨成了亮色）。
  *
  * 浏览器开发服务器没有宿主，才退回浏览器的 matchMedia。
+ *
+ * 读的是窗口主题，故只在窗口主题未被应用定住时才是系统外观：应用显式设置过窗口
+ * 主题时读到的是应用自己的选择，交还系统之后读才准。
  * @returns {Promise<import("@/api/preferences").Appearance>}
  */
 export async function readSystemAppearance() {
@@ -117,20 +121,59 @@ export function subscribeSystemAppearance(listener) {
 }
 
 /**
- * 让原生标题栏与控件跟随应用外观：选亮色 / 暗色时显式设置，选跟随系统时传
- * `null` 交还系统。
+ * 宿主是否要求跟随系统时把窗口主题钉在系统外观上。
+ *
+ * Linux 的 GTK 实现把「交还系统」当成一次亮色切换：交还之后原生标题栏是亮色，
+ * 与系统的暗色外观对不上——此时须由应用自己把窗口主题钉在系统外观上。其余平台
+ * 交还即跟随，宿主自己让窗口随系统明暗变化。
+ *
+ * 问不到就按「交还即跟随」处理：那是各平台的默认行为，标题栏与界面不同明暗只
+ * 差一次设置，不至于让整次主题切换失败。
+ * @returns {Promise<boolean>}
+ */
+async function hostRequiresPinnedTheme() {
+  try {
+    return await invoke("host_requires_pinned_theme");
+  } catch (err) {
+    console.warn("failed to read the host theme policy", err);
+    return false;
+  }
+}
+
+/**
+ * 让原生标题栏与控件跟随应用外观：选亮色 / 暗色时显式设置，选跟随系统时交还
+ * 系统，并按宿主的实现把窗口主题落到该外观上。
  *
  * 交还之后窗口主题不再由应用定住，宿主报出的外观才是系统外观——「跟随系统」
- * 的外观要在这之后才读得到准，故调用方要等它完成再读。
+ * 的外观要在这之后才读得到准，故交还与读在本函数内连着做完。
+ *
+ * 宿主把「交还」实现成强制亮色时（Linux 的 GTK 实现），交还之后原生标题栏是
+ * 亮色，与系统的暗色外观对不上：此时把窗口主题钉在读到的系统外观上，标题栏才
+ * 与界面同明暗。
  * @param {import("@/api/preferences").ThemePreference} preference 主题偏好。
- * @returns {Promise<void>}
+ * @returns {Promise<import("@/api/preferences").Appearance | null>} 跟随系统时
+ *   返回读到的系统外观；显式偏好返回 null。
  */
 export async function applyNativeTheme(preference) {
-  if (!inTauriHost()) return;
-  const theme = preference === THEME_SYSTEM ? null : preference;
+  if (!inTauriHost()) return null;
   try {
-    await getCurrentWindow().setTheme(theme);
+    if (preference !== THEME_SYSTEM) {
+      await getCurrentWindow().setTheme(preference);
+      return null;
+    }
+    // 先问清宿主要哪种落地方式，再动窗口：问错了还能原样收手。
+    const pinned = await hostRequiresPinnedTheme();
+    // 交还系统：此刻宿主报出的才是系统外观。
+    await getCurrentWindow().setTheme(null);
+    const appearance = await readSystemAppearance();
+    if (pinned) {
+      // 交还等于强制亮色的宿主：自己把窗口主题钉在系统外观上，标题栏才与界面
+      // 同明暗。
+      await getCurrentWindow().setTheme(appearance);
+    }
+    return appearance;
   } catch (err) {
     console.warn("failed to set the native window theme", err);
+    return null;
   }
 }

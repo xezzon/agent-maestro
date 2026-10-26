@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Tauri 宿主是系统边界：窗口 API 只能通过打桩观察。
 const host = vi.hoisted(() => ({
@@ -11,11 +11,25 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => host,
 }));
 
+// 宿主策略查询（跟随系统时窗口主题要不要钉在系统外观上）。
+const core = vi.hoisted(() => ({
+  invoke: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: core.invoke,
+}));
+
 import {
   applyNativeTheme,
   readSystemAppearance,
   subscribeSystemAppearance,
 } from "./host";
+
+// 打桩的调用记录逐条断言，故每次用例前清空——实现（mockResolvedValue 等）留着。
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 /**
  * 造一个 matchMedia 桩：记录订阅者，可手动触发变化。
@@ -130,13 +144,44 @@ describe("原生主题的应用", () => {
     expect(host.setTheme).toHaveBeenCalledWith("dark");
   });
 
-  it("跟随系统时把窗口主题交还系统", async () => {
+  it("跟随系统时把窗口主题交还系统，并带回系统外观", async () => {
     useHost(false);
     host.setTheme.mockResolvedValue(undefined);
+    host.theme.mockResolvedValue("dark");
+    core.invoke.mockResolvedValue(false);
+
+    const appearance = await applyNativeTheme("system");
+
+    expect(core.invoke).toHaveBeenCalledWith("host_requires_pinned_theme");
+    expect(host.setTheme.mock.calls).toEqual([[null]]);
+    expect(appearance).toBe("dark");
+  });
+
+  it("宿主要求钉住时，把窗口主题钉在系统外观上", async () => {
+    // 宿主把「交还系统」实现成强制亮色（Linux 的 GTK 实现）：不钉住，原生标题栏
+    // 就是亮色，与系统的暗色外观对不上。
+    useHost(false);
+    host.setTheme.mockResolvedValue(undefined);
+    host.theme.mockResolvedValue("dark");
+    core.invoke.mockResolvedValue(true);
 
     await applyNativeTheme("system");
 
-    expect(host.setTheme).toHaveBeenCalledWith(null);
+    // 先交还（此刻宿主报出的才是系统外观），读到后钉住。
+    expect(host.setTheme.mock.calls).toEqual([[null], ["dark"]]);
+  });
+
+  it("问不到宿主策略时按交还处理，不钉住", async () => {
+    useHost(false);
+    host.setTheme.mockResolvedValue(undefined);
+    host.theme.mockResolvedValue("dark");
+    core.invoke.mockRejectedValue(new Error("no command"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await applyNativeTheme("system");
+
+    expect(host.setTheme.mock.calls).toEqual([[null]]);
+    warn.mockRestore();
   });
 
   it("浏览器里没有宿主，什么都不做", async () => {

@@ -89,21 +89,18 @@ export default function PreferencesProvider({ children }) {
     document.documentElement.style.colorScheme = appearance;
   }, [preferences, appearance]);
 
-  // 原生标题栏与控件跟随：选亮色 / 暗色时显式设置，选跟随系统时交还系统。
+  // 原生标题栏与控件跟随：把主题偏好落到窗口主题上。
   //
-  // 交还之后才读系统外观：窗口主题交还前由应用定住，读到的会是应用自己的
-  // 选择而不是系统外观。读完再落地，前端与原生控件才对得上。
+  // 跟随系统时窗口主题先交还系统，交还之后宿主报出的才是系统外观——应用据此
+  // 把读到的系统外观带回（Linux 上还要把窗口主题钉在该外观上，标题栏才与界面
+  // 同明暗）。
   useEffect(() => {
     if (!preferences) return undefined;
     let cancelled = false;
     (async () => {
-      await applyNativeTheme(preferences.theme);
-      if (cancelled || preferences.theme !== THEME_SYSTEM) return;
-      const appearance = await readSystemAppearance();
-      if (cancelled) return;
-      setSystemAppearance((current) =>
-        current === appearance ? current : appearance,
-      );
+      const system = await applyNativeTheme(preferences.theme);
+      if (cancelled || !system) return;
+      setSystemAppearance((current) => (current === system ? current : system));
     })();
     return () => {
       cancelled = true;

@@ -17,9 +17,9 @@ mod testutil;
 
 use command::{
     add_plugin, apply_providers, create_provider, delete_provider, get_plugin_config,
-    get_preferences, list_plugins, list_providers, list_variables, reload_plugin, remove_plugin,
-    set_plugin_config, set_plugin_enabled, set_provider_enabled, set_variables, update_preferences,
-    update_provider,
+    get_preferences, host_requires_pinned_theme, list_plugins, list_providers, list_variables,
+    reload_plugin, remove_plugin, set_plugin_config, set_plugin_enabled, set_provider_enabled,
+    set_variables, update_preferences, update_provider,
 };
 use plugin::PluginService;
 use preferences::PreferencesStore;
@@ -151,7 +151,8 @@ pub fn run() {
             set_plugin_config,
             apply_providers,
             get_preferences,
-            update_preferences
+            update_preferences,
+            host_requires_pinned_theme
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
