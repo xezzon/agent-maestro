@@ -45,8 +45,16 @@ _避免_：模板、渲染
 ## 凭证
 
 **API Key（API 密钥）**：
-调用 Provider 的凭证，可有可无——本地网关（如 Ollama）无需凭证。以明文随配置一起保存在本地配置文件中，界面可查看与编辑。
+调用 Provider 的凭证，可有可无——本地网关（如 Ollama）无需凭证。真值只保存在**系统密钥链**；Provider 的 `api_key` 字段只保存空串（未设置）或**密钥引用**（已设置），真值永不落进配置文件。界面只显示「已设置 / 未设置」，永不回读真值；写入只有「不变 / 更换 / 清除」三种意图。迁移失败时字段可暂时保留旧明文，界面标记为「明文待迁移」，下次启动重试。
 _避免_：token、credential（当作 Provider 的专有概念时）
+
+**密钥链（keychain）**：
+操作系统提供的凭证存储（macOS Keychain、Windows Credential Manager、Linux Secret Service），是 API Key 真值的唯一持久落点。Maestro 以命名空间 `io.github.xezzon.agent-maestro`、account `provider/<slug>/api_key` 存放每个 Provider 的凭证；密钥链不可用时如实报错，绝不回退为明文。
+_避免_：密码库、凭据管理器（作为泛指时）
+
+**密钥引用（secret reference）**：
+配置文件里指向密钥链条目的 URI：`secret://io.github.xezzon.agent-maestro/provider/<slug>/api_key`。它不含秘密，可随配置复制；引用与明文在类型上可区分，`secret://` 是保留前缀，明文密钥不能以它开头。引用与 slug 绑定（slug 不可变，引用因此稳定）；引用不合法即整份配置进入保护态。
+_避免_：链接、指针
 
 ## 插件
 
