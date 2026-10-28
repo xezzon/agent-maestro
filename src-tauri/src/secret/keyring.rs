@@ -9,10 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use crate::{
     errors::{SecretCause, SecretError},
-    secret::{
-        reference::SecretRef,
-        store::{SecretOp, SecretStore},
-    },
+    secret::{SecretOp, SecretRef, SecretStore},
 };
 
 /// 串行化全部调用的闸门。

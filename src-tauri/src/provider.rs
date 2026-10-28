@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     errors::{FieldError, ProviderInterpolationError},
     interpolate::interpolate_value,
+    secret::SecretText,
     variables::Variables,
 };
 
@@ -128,73 +129,76 @@ where
     Ok(capabilities)
 }
 
-/// Provider 的凭证：未设置，或一段非空明文。
+/// API Key 的写入意图：不变 / 清除 / 覆盖。
 ///
-/// 「未设置」与「空串」不再混淆：空串不是合法的凭证值，本类型造不出那种
-/// 状态——命令层的缺省载荷与显式空串都归一为「未设置」，规则只在这里一份
-/// （此前散在领域层的 `is_empty()`、命令层的 `unwrap_or_default()` 与前端
-/// 的 `!!api_key` 三处）。
-///
-/// 脱敏是类型级隔离：[`Debug`] 只渲染「配没配」，绝不渲染明文——调用点不必
-/// 记得别打印，派生 `Debug` 的容器（如 `Config`）自动安全。
-#[derive(Clone, PartialEq, Eq, Default)]
-pub(crate) struct ApiKey {
-    /// 明文凭证；`None` 即未设置。
-    value: Option<String>,
+/// 覆盖时携带真值（明文）：它**只**流向密钥链，绝不落进配置文件
+/// （ADR 0002）。`Debug` 只渲染「配没配」，绝不渲染真值。
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum ApiKeyIntent {
+    /// 不变：沿用现有值，完全不碰密钥链。
+    Unchanged,
+    /// 清除：删掉密钥链条目，字段落为空串（未设置）。
+    Clear,
+    /// 覆盖：真值写进密钥链，字段落为规范引用。
+    Overwrite(String),
 }
 
-impl ApiKey {
-    /// 未设置。
-    pub(crate) fn unset() -> Self {
-        Self { value: None }
-    }
-
-    /// 由一段明文构造：空串归一为未设置（空串不是合法凭证值）。
-    pub(crate) fn new(value: String) -> Self {
-        match value.is_empty() {
-            true => Self::unset(),
-            false => Self { value: Some(value) },
-        }
-    }
-
-    /// 由命令层的可选载荷构造：缺省与空串都读作未设置。
-    pub(crate) fn from_optional(value: Option<String>) -> Self {
-        match value {
-            Some(value) => Self::new(value),
-            None => Self::unset(),
-        }
-    }
-
-    /// 明文凭证；`None` 即未设置。
-    pub(crate) fn as_deref(&self) -> Option<&str> {
-        self.value.as_deref()
-    }
-
-    /// 是否已配置凭证。
-    pub(crate) fn is_set(&self) -> bool {
-        self.value.is_some()
-    }
-}
-
-impl Debug for ApiKey {
-    /// 只渲染「配没配」，绝不渲染明文（ADR 0008：凭证绝不落盘进日志）。
+impl Debug for ApiKeyIntent {
+    /// 覆盖时只渲染「配没配」，绝不渲染真值（ADR 0008：凭证绝不落盘进日志）。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.is_set() { "<set>" } else { "<unset>" })
+        match self {
+            ApiKeyIntent::Unchanged => f.write_str("Unchanged"),
+            ApiKeyIntent::Clear => f.write_str("Clear"),
+            ApiKeyIntent::Overwrite(_) => f.write_str("Overwrite(<set>)"),
+        }
     }
 }
 
-impl Serialize for ApiKey {
-    /// 存储形态不变：明文字符串，未设置即空串（ADR 0002 推迟采纳密钥链）。
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.value.as_deref().unwrap_or(""))
-    }
+/// Provider 的一次写入：记录本体 + API Key 的写入意图。
+///
+/// 记录本体的 `api_key` 字段**不作为输入**：字段的最终形态由意图决定
+/// （未设置 / 规范引用），存储层按意图覆写它。之所以仍带着整条记录，是为了让
+/// 其余字段照旧整包替换（ADR 0015 的插值作用域因此只有一份定义）。
+#[derive(Debug)]
+pub(crate) struct ProviderWrite {
+    /// 记录本体；`api_key` 字段由存储层覆写。
+    pub(crate) provider: Provider,
+    /// 凭证的写入意图。
+    pub(crate) api_key: ApiKeyIntent,
 }
 
-impl<'de> Deserialize<'de> for ApiKey {
-    /// 读入：空串即未设置（旧配置文件里未设置的凭证恒为空串）。
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Ok(ApiKey::new(raw))
+impl ProviderWrite {
+    /// 凭证不变的一次写入：更新时沿用现值，新建时落成未设置。
+    pub(crate) fn unchanged(provider: Provider) -> Self {
+        Self {
+            provider: Self::without_credential(provider),
+            api_key: ApiKeyIntent::Unchanged,
+        }
+    }
+
+    /// 覆盖凭证的一次写入：真值写进密钥链，字段落为规范引用。
+    pub(crate) fn overwrite(provider: Provider, value: String) -> Self {
+        Self {
+            provider: Self::without_credential(provider),
+            api_key: ApiKeyIntent::Overwrite(value),
+        }
+    }
+
+    /// 清除凭证的一次写入：删掉密钥链条目，字段落为空串。
+    pub(crate) fn clear(provider: Provider) -> Self {
+        Self {
+            provider: Self::without_credential(provider),
+            api_key: ApiKeyIntent::Clear,
+        }
+    }
+
+    /// 去掉记录里的凭证：写路径的凭证**一律**由意图给出，记录里的那个字段
+    /// 不是输入。
+    ///
+    /// 清掉它，写路径就带不进明文——真值只有一条去处：密钥链（ADR 0002）。
+    fn without_credential(mut provider: Provider) -> Provider {
+        provider.api_key = SecretText::unset();
+        provider
     }
 }
 
@@ -212,10 +216,15 @@ pub(crate) struct Provider {
     /// 选择是否有效（该协议是否真的配了端点）由投影侧裁定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) selected_protocol: Option<Protocol>,
-    /// 凭证以明文随配置文件落盘：未设置即空串（第一期不做密钥链，
-    /// ADR 0002 已修订为推迟采纳）。「未设置」由 [`ApiKey`] 独家表达。
+    /// 凭证：未设置 / 密钥链引用 / 迁移期暂时保留的旧明文。
+    ///
+    /// 落盘形态：空串（未设置）、`secret://…`（引用）、原字符串（旧明文）。
+    /// 真值只进系统密钥链，配置只留引用（ADR 0002）。
+    ///
+    /// **写路径不读这个字段**：保存时它由存储层按写入意图覆写（见
+    /// [`ApiKeyIntent`]）——真值绝不随记录落盘。
     #[serde(default)]
-    pub(crate) api_key: ApiKey,
+    pub(crate) api_key: SecretText,
     /// 跨协议、跨模型共享的自定义 HTTP header：**恒落盘**（缺省即 `{}`）。
     /// 键是标识符（与 api_key、模型 ID 同级，不参与插值）；值是配置值
     /// （参与宿主插值），且**可能含凭证**——Debug 只渲染键名，见下方手工 `Debug`。
@@ -241,7 +250,7 @@ impl Default for Provider {
             enabled: true,
             base_url: Endpoints::default(),
             selected_protocol: None,
-            api_key: ApiKey::default(),
+            api_key: SecretText::default(),
             custom_header: BTreeMap::new(),
             models: Vec::new(),
         }
@@ -267,7 +276,7 @@ impl Debug for Provider {
             .field("enabled", &self.enabled)
             .field("base_url", &self.base_url)
             .field("selected_protocol", &self.selected_protocol)
-            // api_key 的脱敏由 `ApiKey` 自己负责：类型级隔离，调用点不必
+            // api_key 的脱敏由 `SecretText` 自己负责：类型级隔离，调用点不必
             // 记得别打印明文。
             .field("api_key", &self.api_key)
             .field("custom_header", &HeaderKeyNames(&self.custom_header))
@@ -369,6 +378,7 @@ pub(crate) fn interpolate_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret::SecretRef;
 
     /// 插值失败句式逐字钉住：slug + 字段名 + 原因逐字入句。
     /// 落盘前拦截（`ProviderError::Interpolation` 包裹本类型）与投影时拦截共用
@@ -512,7 +522,7 @@ mod tests {
                     "https://anthropic.example.com/v1".to_owned(),
                 ),
             ]),
-            api_key: ApiKey::new("sk-test".to_owned()),
+            api_key: SecretText::Plaintext("sk-test".to_owned()),
             custom_header: BTreeMap::from([
                 ("X-Gateway-Key".to_owned(), "gw-plain".to_owned()),
                 ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
@@ -600,7 +610,7 @@ mod tests {
 
         assert!(
             text.contains(r#""api_key":""#),
-            "api_key 恒为明文字符串，空串即未设置（见 #24 数据模型）"
+            "api_key 恒为字符串，空串即未设置（引用与明文各占自己的形态）"
         );
         let parsed: Provider = serde_json::from_str(&text).unwrap();
         assert!(!parsed.api_key.is_set(), "api_key 未设置");
@@ -611,7 +621,7 @@ mod tests {
     #[test]
     fn debug_output_never_contains_the_api_key() {
         let set = Provider {
-            api_key: ApiKey::new("sk-secret-canary-9f3a".to_owned()),
+            api_key: SecretText::Plaintext("sk-secret-canary-9f3a".to_owned()),
             ..Provider::default()
         };
         let rendered = format!("{set:?}");
@@ -627,46 +637,28 @@ mod tests {
         );
     }
 
-    /// 凭证的两种状态在类型上分清：未设置与已设置。空串不是合法凭证值——
-    /// 造不出那种状态（命令层的缺省载荷与显式空串都归一为未设置）。
+    /// 凭证的落盘形态逐字钉住：恒为字符串——未设置即空串，引用即规范 URI，
+    /// 旧明文原样保留（迁移期，ADR 0002）。
     #[test]
-    fn api_key_distinguishes_unset_from_set_and_never_holds_an_empty_string() {
-        assert!(!ApiKey::unset().is_set());
-        assert!(!ApiKey::default().is_set());
-        assert!(!ApiKey::new(String::new()).is_set());
-        assert!(!ApiKey::from_optional(None).is_set());
-        assert!(!ApiKey::from_optional(Some(String::new())).is_set());
-
-        let set = ApiKey::new("sk-test".to_owned());
-        assert!(set.is_set());
-        assert_eq!(set.as_deref(), Some("sk-test"));
-    }
-
-    /// 存储形态逐字未变：未设置恒为空串，已设置即明文；旧配置文件里的空串
-    /// 读作未设置（向后兼容，见 ADR 0002）。
-    #[test]
-    fn api_key_serializes_as_a_plain_string() {
-        assert_eq!(
-            serde_json::to_value(ApiKey::unset()).unwrap(),
-            serde_json::json!("")
-        );
-        assert_eq!(
-            serde_json::to_value(ApiKey::new("sk-test".to_owned())).unwrap(),
-            serde_json::json!("sk-test")
+    fn api_key_is_always_written_as_a_string() {
+        let unset = serde_json::to_string(&Provider::default()).unwrap();
+        assert!(
+            unset.contains(r#""api_key":""#),
+            "api_key 恒为字符串，空串即未设置：{unset}"
         );
 
-        let legacy: ApiKey = serde_json::from_str(r#""""#).unwrap();
-        assert!(!legacy.is_set(), "旧配置文件里的空串读作未设置");
-    }
+        let referenced: Provider = serde_json::from_str(
+            r#"{"api_key":"secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            referenced.api_key.reference().map(SecretRef::slug),
+            Some("openrouter"),
+            "引用读作引用，不当明文放行"
+        );
 
-    /// 脱敏是类型级隔离：凭证自己知道怎么渲染，`Debug` 绝不携带明文。
-    #[test]
-    fn api_key_debug_output_never_contains_the_plaintext() {
-        let set = ApiKey::new("sk-canary-4b7e".to_owned());
-        let rendered = format!("{set:?}");
-        assert!(!rendered.contains("sk-canary-4b7e"), "{rendered}");
-        assert!(rendered.contains("<set>"), "{rendered}");
-        assert!(format!("{:?}", ApiKey::unset()).contains("<unset>"));
+        let legacy: Provider = serde_json::from_str(r#"{"api_key":"sk-legacy"}"#).unwrap();
+        assert_eq!(legacy.api_key.plaintext(), Some("sk-legacy"));
     }
 
     fn vars(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -693,7 +685,7 @@ mod tests {
                 "https://${HOST}/v1".to_owned(),
             )]),
             selected_protocol: Some(Protocol::OpenaiCompletions),
-            api_key: ApiKey::new("${KEY}".to_owned()),
+            api_key: SecretText::Plaintext("${KEY}".to_owned()),
             // header 的值参与插值；键里的占位符是标识符，原样保留。
             custom_header: BTreeMap::from([
                 ("X-Gateway-Key".to_owned(), "${KEY}".to_owned()),
@@ -738,7 +730,7 @@ mod tests {
             "选择是枚举，原样投影、不参与插值"
         );
         assert_eq!(
-            projected.api_key.as_deref(),
+            projected.api_key.plaintext(),
             Some("${KEY}"),
             "api_key 原样投影、不参与插值"
         );
@@ -774,7 +766,7 @@ mod tests {
         assert_eq!(projected.models[1].id, "plain-id");
         assert_eq!(projected.models[1].display_name, None);
         // 原 Provider 不被修改。
-        assert_eq!(provider.api_key.as_deref(), Some("${KEY}"),);
+        assert_eq!(provider.api_key.plaintext(), Some("${KEY}"),);
     }
 
     /// 插值作用域的**哨兵**：每一个参与插值的字符串字段都填占位符，逐字段
@@ -796,7 +788,7 @@ mod tests {
                 (Protocol::AnthropicMessages, "${HOST}/messages".to_owned()),
             ]),
             selected_protocol: Some(Protocol::OpenaiCompletions),
-            api_key: ApiKey::new("sk-literal".to_owned()),
+            api_key: SecretText::Plaintext("sk-literal".to_owned()),
             custom_header: BTreeMap::from([("X-Gateway-Key".to_owned(), "${KEY}".to_owned())]),
             models: vec![ModelEntry {
                 id: "model-literal".to_owned(),
@@ -830,7 +822,7 @@ mod tests {
                     ),
                 ]),
                 selected_protocol: Some(Protocol::OpenaiCompletions),
-                api_key: ApiKey::new("sk-literal".to_owned()),
+                api_key: SecretText::Plaintext("sk-literal".to_owned()),
                 custom_header: BTreeMap::from([("X-Gateway-Key".to_owned(), "sk-x".to_owned())]),
                 models: vec![ModelEntry {
                     id: "model-literal".to_owned(),
@@ -910,7 +902,7 @@ mod tests {
                     Protocol::OpenaiCompletions,
                     "https://${HOST}/v1".to_owned(),
                 )]),
-                api_key: ApiKey::new("sk-canary-do-not-leak".to_owned()),
+                api_key: SecretText::Plaintext("sk-canary-do-not-leak".to_owned()),
                 ..Default::default()
             },
         );
@@ -939,7 +931,7 @@ mod tests {
 
         let legacy: Provider = serde_json::from_str(r#"{"api_key":"sk-legacy"}"#).unwrap();
         assert_eq!(legacy.custom_header, BTreeMap::new(), "旧配置读作空映射");
-        assert_eq!(legacy.api_key.as_deref(), Some("sk-legacy"),);
+        assert_eq!(legacy.api_key.plaintext(), Some("sk-legacy"),);
     }
 
     /// header 名按 BTreeMap 键序落盘（映射本无序，排序保证产物确定）。

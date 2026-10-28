@@ -1,7 +1,10 @@
-//! Provider 仓储：Provider 记录的新增、更新、删除与启停。
+//! Provider 的领域规则：参与投影的筛选、落盘前的一致性校验与启停。
 //!
 //! 落盘前的一致性校验（provider↔variables，ADR 0015）也在这里：写路径统一
 //! 经由本模块，校验规则只有一份——存储层与投影层因此不会各判各的。
+//!
+//! 新增与删除记录不在本模块：它们要先把凭证落到密钥链、再落配置，两步之间
+//! 还要能回滚（见 [`super::secrets`]），编排归 [`super::Store`]。
 
 use std::collections::BTreeMap;
 
@@ -26,53 +29,6 @@ pub(super) fn select_enabled_providers(
         .filter(|(_, provider)| provider.enabled)
         .map(|(slug, provider)| (slug.clone(), provider.clone()))
         .collect()
-}
-
-/// 新建一条 Provider（slug 唯一）。
-///
-/// 落盘前对当前变量表插值一次：占位符引用必须可解析（变量已定义，或带
-/// 内联默认值），语法错误同样拦截——provider↔variables 一致性；
-/// 禁用状态不影响该校验。
-pub(super) fn create(
-    config: &mut Config,
-    slug: &str,
-    provider: Provider,
-) -> Result<Change<()>, ProviderError> {
-    if config.providers.contains_key(slug) {
-        return Err(ProviderError::duplicate_slug(slug));
-    }
-    validate_provider(slug, &provider, &config.variables).map_err(ProviderError::Interpolation)?;
-    config.providers.insert(slug.to_owned(), provider);
-    Ok(Change::Changed(()))
-}
-
-/// 整包替换指定 Provider 的端点、模型列表与 API Key（明文）。
-///
-/// slug 不存在时报错，不做 upsert；落盘前对当前变量表插值一次，占位符引用必须
-/// 可解析（同 [`create`]，禁用状态不影响校验）。返回被替换的原记录。
-pub(super) fn update(
-    config: &mut Config,
-    slug: &str,
-    provider: Provider,
-) -> Result<Change<Provider>, ProviderError> {
-    let original = config
-        .providers
-        .get(slug)
-        .cloned()
-        .ok_or_else(|| ProviderError::missing_slug(slug))?;
-    validate_provider(slug, &provider, &config.variables).map_err(ProviderError::Interpolation)?;
-    config.providers.insert(slug.to_owned(), provider);
-    Ok(Change::Changed(original))
-}
-
-/// 删除 Provider，其端点、模型与 API Key 随记录一并移除，不留孤儿数据。
-/// 返回被删除的记录。
-pub(super) fn delete(config: &mut Config, slug: &str) -> Result<Change<Provider>, ProviderError> {
-    let removed = config
-        .providers
-        .remove(slug)
-        .ok_or_else(|| ProviderError::missing_slug(slug))?;
-    Ok(Change::Changed(removed))
 }
 
 /// 启用/禁用单个 Provider（独立于编辑表单的开关）。

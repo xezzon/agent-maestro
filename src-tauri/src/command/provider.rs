@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::Deserialize;
 use tauri::State;
@@ -6,17 +6,19 @@ use tauri::State;
 use super::log_outcome;
 use crate::{
     AppStore,
-    provider::{ApiKey, Endpoints, ModelEntry, Protocol, Provider},
+    errors::ProviderError,
+    provider::{Endpoints, ModelEntry, Protocol, Provider, ProviderWrite},
+    secret::{SCHEME, SecretRef, SecretText},
 };
 
 /// 创建/更新 Provider 命令的 `provider` 负载；slug 亦随负载传入。
 ///
-/// `base_url` 与 `models` 缺省即视为未配置/空列表；`api_key` 缺省即未设置
-/// （空串）；`custom_header` 缺省即空映射；`selected_protocol` 缺省即未选择
+/// `base_url` 与 `models` 缺省即视为未配置/空列表；`api_key` 的三种意图由
+/// [`parse_api_key`] 解析（缺省/`null` = 不变、`""` = 清除、其余非空串 =
+/// 覆盖）；`custom_header` 缺省即空映射；`selected_protocol` 缺省即未选择
 /// （`null` 同义，见 ADR 0016）；`enabled` 缺省即启用（旧 payload 不带该字段时
 /// 不被静默禁用）。模型条目随 `models` 携带 `limit` 与 `capabilities`。
-/// 更新为整包替换，`api_key` 携带现值或新值（明文，第一期随配置
-/// 文件落盘，ADR 0002 推迟采纳），`enabled` 亦携带现值或新值。
+/// 更新为整包替换，`enabled` 亦携带现值或新值。
 /// 命令层不加值域校验：`limit` 三项用无符号整数承载，负数与非整数被**类型**
 /// 拒绝，0 **被放行**（「正整数」只由前端 min=1 保证，见 issue #58）。
 #[derive(Deserialize)]
@@ -38,18 +40,102 @@ pub(crate) struct ProviderRequest {
 }
 
 /// 映射为配置记录：slug 由调用方另行取出作存储 key，不进记录本体；
-/// `api_key` 缺省或空串即未设置（归一规则由 [`ApiKey`] 独家持有）。
+/// `api_key` **不进记录**——凭证由写入意图决定，存储层按意图覆写该字段。
 impl From<ProviderRequest> for Provider {
     fn from(val: ProviderRequest) -> Self {
         Provider {
             enabled: val.enabled,
             base_url: val.base_url,
             selected_protocol: val.selected_protocol,
-            api_key: ApiKey::from_optional(val.api_key),
+            api_key: SecretText::unset(),
             custom_header: val.custom_header,
             models: val.models,
         }
     }
+}
+
+/// `api_key` 载荷解析出的写入意图。
+#[derive(Clone, PartialEq, Eq)]
+enum ApiKeyPayload {
+    /// 缺省或 `null`：不变（新建时即未设置）。
+    Absent,
+    /// 空串：清除。
+    Clear,
+    /// 本 slug 的规范引用：更新时按「不变」处理（防前端回传）。
+    CanonicalReference,
+    /// 其余非空串：覆盖写入。
+    Plaintext(String),
+}
+
+impl fmt::Debug for ApiKeyPayload {
+    /// 明文只渲染「配没配」，绝不渲染值（ADR 0008：凭证绝不落盘进日志）。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApiKeyPayload::Absent => f.write_str("Absent"),
+            ApiKeyPayload::Clear => f.write_str("Clear"),
+            ApiKeyPayload::CanonicalReference => f.write_str("CanonicalReference"),
+            ApiKeyPayload::Plaintext(_) => f.write_str("Plaintext(<set>)"),
+        }
+    }
+}
+
+/// 解析 `api_key` 载荷：显式三态。
+///
+/// 缺省 / `null` = 不变；`""` = 清除；本 slug 的规范引用 = 不变（防前端
+/// 回传）；其它 `secret://` 前缀值一律报错、不进存储层；其余非空串 = 覆盖。
+///
+/// 报错发生在命令层：引用只由 Maestro 自己写入，前端回传的一律不算凭证
+/// （ADR 0002）。`secret://` 是保留前缀，明文密钥不能以它开头——真撞上了
+/// 只能报错，绝不放行。
+fn parse_api_key(slug: &str, payload: Option<&str>) -> Result<ApiKeyPayload, ProviderError> {
+    let Some(text) = payload else {
+        return Ok(ApiKeyPayload::Absent);
+    };
+    if text.is_empty() {
+        return Ok(ApiKeyPayload::Clear);
+    }
+    if text.starts_with(SCHEME) {
+        let canonical = SecretRef::for_provider(slug)
+            .ok()
+            .map(|reference| reference.to_string());
+        if canonical.as_deref() == Some(text) {
+            return Ok(ApiKeyPayload::CanonicalReference);
+        }
+        return Err(ProviderError::unexpected_secret_reference(slug));
+    }
+    Ok(ApiKeyPayload::Plaintext(text.to_owned()))
+}
+
+/// 创建的一次写入：记录本体 + 凭证的写入意图。
+///
+/// 缺省与清除都落成未设置（新建没有旧值可沿用，也没有条目可删）；任何引用
+/// （含规范引用）一律拒绝——新建的 Provider 不该由引用起步。
+fn create_write(slug: &str, request: ProviderRequest) -> Result<ProviderWrite, ProviderError> {
+    let payload = parse_api_key(slug, request.api_key.as_deref())?;
+    let provider: Provider = request.into();
+    Ok(match payload {
+        ApiKeyPayload::Absent | ApiKeyPayload::Clear => ProviderWrite::unchanged(provider),
+        ApiKeyPayload::CanonicalReference => {
+            return Err(ProviderError::unexpected_secret_reference(slug));
+        }
+        ApiKeyPayload::Plaintext(value) => ProviderWrite::overwrite(provider, value),
+    })
+}
+
+/// 更新的一次写入：记录本体 + 凭证的写入意图。
+///
+/// 缺省与规范引用都按不变处理（规范引用是前端回传，防它产生新密钥）；空串即
+/// 清除；其余非空串即覆盖。
+fn update_write(slug: &str, request: ProviderRequest) -> Result<ProviderWrite, ProviderError> {
+    let payload = parse_api_key(slug, request.api_key.as_deref())?;
+    let provider: Provider = request.into();
+    Ok(match payload {
+        ApiKeyPayload::Absent | ApiKeyPayload::CanonicalReference => {
+            ProviderWrite::unchanged(provider)
+        }
+        ApiKeyPayload::Clear => ProviderWrite::clear(provider),
+        ApiKeyPayload::Plaintext(value) => ProviderWrite::overwrite(provider, value),
+    })
 }
 
 #[tauri::command]
@@ -70,8 +156,8 @@ pub(crate) fn create_provider(
 ) -> Result<(), String> {
     let slug = provider.slug.clone();
     let context = format!("slug={slug}");
-    let outcome = store
-        .with_write(move |s| s.create_provider(&slug, provider.into()))
+    let outcome = create_write(&slug, provider)
+        .and_then(|write| store.with_write(move |s| s.create_provider(&slug, write)))
         .map_err(|err| err.to_string());
     log_outcome("create_provider", Some(&context), &outcome);
     outcome
@@ -84,8 +170,8 @@ pub(crate) fn update_provider(
 ) -> Result<(), String> {
     let slug = provider.slug.clone();
     let context = format!("slug={slug}");
-    let outcome = store
-        .with_write(move |s| s.update_provider(&slug, provider.into()).map(|_| ()))
+    let outcome = update_write(&slug, provider)
+        .and_then(|write| store.with_write(move |s| s.update_provider(&slug, write).map(|_| ())))
         .map_err(|err| err.to_string());
     log_outcome("update_provider", Some(&context), &outcome);
     outcome
@@ -118,31 +204,69 @@ pub(crate) fn set_provider_enabled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ApiKeyIntent;
 
     fn parse(text: &str) -> Result<ProviderRequest, serde_json::Error> {
         serde_json::from_str(text)
     }
 
+    /// 缺省与 `null` 都读作「不变」。
     #[test]
-    fn api_key_absent_or_null_means_unset() {
+    fn api_key_absent_or_null_means_unchanged() {
         assert_eq!(parse(r#"{}"#).unwrap().api_key, None);
         assert_eq!(parse(r#"{"api_key":null}"#).unwrap().api_key, None);
-    }
-
-    #[test]
-    fn api_key_empty_string_means_clear() {
         assert_eq!(
-            parse(r#"{"api_key":""}"#).unwrap().api_key,
-            Some(String::new()),
-            "空串即清除凭证"
+            create_write("openrouter", parse(r#"{}"#).unwrap())
+                .unwrap()
+                .api_key,
+            ApiKeyIntent::Unchanged
+        );
+        assert_eq!(
+            update_write("openrouter", parse(r#"{"api_key":null}"#).unwrap())
+                .unwrap()
+                .api_key,
+            ApiKeyIntent::Unchanged
         );
     }
 
+    /// 空串即清除：更新时删条目，新建时落成未设置。
+    #[test]
+    fn api_key_empty_string_means_clear() {
+        let payload = parse(r#"{"api_key":""}"#).unwrap().api_key;
+        assert_eq!(payload, Some(String::new()), "空串即清除凭证");
+
+        assert_eq!(
+            update_write("openrouter", parse(r#"{"api_key":""}"#).unwrap())
+                .unwrap()
+                .api_key,
+            ApiKeyIntent::Clear
+        );
+        assert_eq!(
+            create_write("openrouter", parse(r#"{"api_key":""}"#).unwrap())
+                .unwrap()
+                .api_key,
+            ApiKeyIntent::Unchanged,
+            "新建没有条目可删：空串落成未设置"
+        );
+    }
+
+    /// 其余非空串即覆盖：真值随意图进密钥链，绝不落进配置。
     #[test]
     fn api_key_plain_string_is_the_new_plaintext_value() {
+        let payload = parse(r#"{"api_key":"sk-test"}"#).unwrap().api_key;
+        assert_eq!(payload.as_deref(), Some("sk-test"));
+
         assert_eq!(
-            parse(r#"{"api_key":"sk-test"}"#).unwrap().api_key,
-            Some("sk-test".to_owned())
+            update_write("openrouter", parse(r#"{"api_key":"sk-test"}"#).unwrap())
+                .unwrap()
+                .api_key,
+            ApiKeyIntent::Overwrite("sk-test".to_owned())
+        );
+        assert_eq!(
+            create_write("openrouter", parse(r#"{"api_key":"sk-test"}"#).unwrap())
+                .unwrap()
+                .api_key,
+            ApiKeyIntent::Overwrite("sk-test".to_owned())
         );
     }
 
@@ -150,6 +274,132 @@ mod tests {
     fn api_key_non_string_is_rejected() {
         assert!(parse(r#"{"api_key":{"slug":"openrouter"}}"#).is_err());
         assert!(parse(r#"{"api_key":42}"#).is_err());
+    }
+
+    /// 本 slug 的规范引用回传按「不变」处理：前端拿到的引用原样送回，
+    /// 不产生新密钥、也不丢密钥。
+    #[test]
+    fn canonical_reference_is_treated_as_unchanged_on_update() {
+        let canonical = "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key";
+
+        assert_eq!(
+            update_write(
+                "openrouter",
+                parse(&format!(r#"{{"api_key":"{canonical}"}}"#)).unwrap()
+            )
+            .unwrap()
+            .api_key,
+            ApiKeyIntent::Unchanged
+        );
+    }
+
+    /// 新建时任何引用都拒绝：新建的 Provider 不该由引用起步。
+    #[test]
+    fn canonical_reference_is_rejected_on_create() {
+        let canonical = "secret://io.github.xezzon.agent-maestro/provider/openrouter/api_key";
+
+        let error = create_write(
+            "openrouter",
+            parse(&format!(r#"{{"api_key":"{canonical}"}}"#)).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ProviderError::UnexpectedSecretReference { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// 别的 Provider 的引用、以及不成形的引用，一律报错、不进存储层。
+    #[test]
+    fn other_references_are_rejected() {
+        let cases = [
+            "secret://io.github.xezzon.agent-maestro/provider/other/api_key",
+            "secret://io.github.xezzon.agent-maestro/provider/openrouter",
+            "secret://elsewhere/provider/openrouter/api_key",
+            "secret://",
+        ];
+
+        for payload in cases {
+            let error = update_write(
+                "openrouter",
+                parse(&format!(r#"{{"api_key":"{payload}"}}"#)).unwrap(),
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(error, ProviderError::UnexpectedSecretReference { .. }),
+                "payload={payload} error={error:?}"
+            );
+        }
+    }
+
+    /// 错误文案点名 Provider，且不携带载荷里的值。
+    #[test]
+    fn rejected_reference_message_names_the_provider_and_hides_the_payload() {
+        let error = update_write(
+            "openrouter",
+            parse(r#"{"api_key":"secret://whatever"}"#).unwrap(),
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("openrouter"), "{message}");
+        assert!(!message.contains("secret://whatever"), "{message}");
+    }
+
+    /// 规范引用回传端到端：前端拿到的引用原样送回，**不产生新密钥**、
+    /// **不丢密钥**——旧值原样留在密钥链里，配置里仍是同一个引用。
+    ///
+    /// 这一条走真实的存储接缝（内存密钥链 + 临时配置文件）：命令层把引用归成
+    /// 「不变」，存储层因此一个密钥链动作都不做。
+    #[test]
+    fn echoing_the_canonical_reference_back_leaves_the_keychain_untouched() {
+        use crate::provider::{Provider, ProviderWrite};
+        use crate::secret::SecretRef;
+        use crate::store::testutil::Fixture;
+
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        store
+            .create_provider(
+                "openrouter",
+                ProviderWrite::overwrite(Provider::default(), "sk-live".to_owned()),
+            )
+            .unwrap();
+        let reference = SecretRef::for_provider("openrouter").unwrap();
+        let before = fixture.secrets().calls().len();
+
+        let write = update_write(
+            "openrouter",
+            parse(&format!(
+                r#"{{"slug":"openrouter","api_key":"{reference}"}}"#
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        store.update_provider("openrouter", write).unwrap();
+
+        assert_eq!(
+            fixture.secrets().calls().len(),
+            before,
+            "回传引用不产生新的密钥链动作：{:?}",
+            fixture.secrets().calls()
+        );
+        assert_eq!(
+            fixture.secrets().entry(&reference),
+            Some("sk-live".to_owned()),
+            "旧密钥原样留着"
+        );
+        let providers = store.providers_snapshot().unwrap();
+        assert_eq!(
+            providers["openrouter"]
+                .api_key
+                .reference()
+                .map(SecretRef::slug),
+            Some("openrouter"),
+            "配置里仍是同一个引用"
+        );
     }
 
     #[test]
@@ -288,14 +538,14 @@ mod tests {
         );
     }
 
+    /// 凭证**不进记录**：真值只随写入意图流向密钥链，记录里只留形态。
     #[test]
-    fn create_request_maps_to_record_with_plaintext_api_key() {
+    fn api_key_never_enters_the_record() {
         let with_value: Provider = parse(r#"{"api_key":"sk-test"}"#).unwrap().into();
 
-        assert_eq!(
-            with_value.api_key.as_deref(),
-            Some("sk-test"),
-            "凭证以明文直接进入配置记录（第一期不做密钥链）"
+        assert!(
+            !with_value.api_key.is_set(),
+            "记录里的 api_key 由存储层按意图覆写，命令层不填真值"
         );
 
         let without_api_key: Provider = parse(r#"{}"#).unwrap().into();
@@ -305,17 +555,14 @@ mod tests {
 
     #[test]
     fn update_request_maps_to_whole_record_including_api_key() {
-        let with_value: Provider = parse(r#"{"api_key":"sk-new"}"#).unwrap().into();
+        let write = update_write("openrouter", parse(r#"{"api_key":"sk-new"}"#).unwrap()).unwrap();
 
         assert_eq!(
-            with_value.api_key.as_deref(),
-            Some("sk-new"),
-            "更新整包替换，api_key 携带现值或新值（明文）"
+            write.api_key,
+            ApiKeyIntent::Overwrite("sk-new".to_owned()),
+            "更新整包替换，api_key 携带新值"
         );
-
-        let without_api_key: Provider = parse(r#"{}"#).unwrap().into();
-
-        assert!(!without_api_key.api_key.is_set(), "api_key 缺省即未设置");
+        assert!(!write.provider.api_key.is_set(), "记录里不落真值");
     }
 
     /// `enabled` 缺省即启用：旧 payload 或漏字段不会被静默禁用。

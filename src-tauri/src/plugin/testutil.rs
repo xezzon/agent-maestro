@@ -18,7 +18,7 @@ use crate::{
     errors::{ConfigError, PluginEntryError},
     paths::Paths,
     provider::Provider,
-    store::{AppStore, Store},
+    store::AppStore,
     testutil::setup_paths,
     variables::Variables,
 };
@@ -41,8 +41,10 @@ pub(super) fn fetcher_service(home: &Path, fetcher: Arc<dyn Fetcher>) -> PluginS
 
 pub(crate) fn store_at(home: &Path) -> AppStore {
     setup_paths(home);
+    // 配置存储一律经夹具构造：密钥链注入只有这一处做法（见 `store::testutil`）。
+    let fixture = crate::store::testutil::Fixture::at(home);
     AppStore {
-        store: RwLock::new(Store::new(Paths::from_home(home).config_path())),
+        store: RwLock::new(fixture.store()),
     }
 }
 

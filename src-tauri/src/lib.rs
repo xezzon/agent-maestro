@@ -24,7 +24,8 @@ use command::{
 };
 use plugin::PluginService;
 use preferences::PreferencesStore;
-use std::sync::RwLock;
+use secret::KeyringSecrets;
+use std::sync::{Arc, RwLock};
 use store::{AppStore, Store};
 use tauri::Manager;
 
@@ -100,7 +101,9 @@ pub fn run() {
         // 添加插件对话框用它选择本机 manifest.json（file 来源）。
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            let store = Store::new(paths.config_path());
+            // 凭证的真值落系统密钥链，配置里只留引用（ADR 0002）：
+            // 密钥链由这里注入，存储层因此不依赖具体后端。
+            let store = Store::new(paths.config_path(), Arc::new(KeyringSecrets::new()));
             app.manage(AppStore {
                 store: RwLock::new(store),
             });

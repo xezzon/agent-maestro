@@ -5,6 +5,7 @@
 
 use std::{
     fmt::{self, Display},
+    ops::RangeInclusive,
     path::{Path, PathBuf},
 };
 
@@ -25,9 +26,21 @@ pub(crate) enum ConfigError {
     UnsupportedVersion {
         path: PathBuf,
         found: u32,
-        /// 当前应用支持的版本。由存储层在比较时填入——错误类型不反向依赖
-        /// [`crate::config`]（#141 无环约束）。
-        supported: u32,
+        /// 当前应用支持的版本区间（闭区间）。由存储层在比较时填入——错误类型
+        /// 不反向依赖 [`crate::config`]（#141 无环约束）。
+        supported: RangeInclusive<u32>,
+    },
+    /// 配置文件里的密钥引用与它所在 Provider 的 slug 不一致。
+    ///
+    /// 引用与 slug 绑定（GLOSSARY「密钥引用」）：不一致说明文件被手工改坏，
+    /// 或引用被搬到了别的 Provider 下——两种情况都会让「取密钥」取到错的
+    /// 条目，故整份配置进保护态，绝不按其中一条硬着头皮往下走。
+    SecretReferenceMismatch {
+        path: PathBuf,
+        /// 记录所在的键（Provider 的 slug）。
+        slug: String,
+        /// 引用里带的 slug。
+        reference_slug: String,
     },
     /// 读写配置文件时发生 IO 错误。
     Io { path: PathBuf, detail: String },
@@ -82,7 +95,18 @@ impl Display for ConfigError {
                 supported,
             } => write!(
                 f,
-                "配置文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用仅支持 {supported}。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
+                "配置文件版本不受支持：{}\n文件中的 version 为 {found}，当前应用支持版本 {} 与 {}。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
+                path.display(),
+                supported.start(),
+                supported.end()
+            ),
+            ConfigError::SecretReferenceMismatch {
+                path,
+                slug,
+                reference_slug,
+            } => write!(
+                f,
+                "配置文件已损坏：{}\n原因：Provider「{slug}」的密钥引用指向 {reference_slug}，与它自己的 slug 不一致\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。",
                 path.display()
             ),
             ConfigError::Io { path, detail } => {
@@ -123,12 +147,27 @@ mod tests {
         let err = ConfigError::UnsupportedVersion {
             path: PathBuf::from("/home/u/.maestro/config.json"),
             found: 99,
-            supported: 1,
+            supported: 1..=2,
         };
 
         assert_eq!(
             err.to_string(),
-            "配置文件版本不受支持：/home/u/.maestro/config.json\n文件中的 version 为 99，当前应用仅支持 1。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。"
+            "配置文件版本不受支持：/home/u/.maestro/config.json\n文件中的 version 为 99，当前应用支持版本 1 与 2。\n请修复该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。"
+        );
+    }
+
+    /// 引用与 slug 不一致：整份配置进保护态，错误文案点名两个 slug。
+    #[test]
+    fn secret_reference_mismatch_message_is_verbatim() {
+        let err = ConfigError::SecretReferenceMismatch {
+            path: PathBuf::from("/home/u/.maestro/config.json"),
+            slug: "openrouter".to_owned(),
+            reference_slug: "other".to_owned(),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "配置文件已损坏：/home/u/.maestro/config.json\n原因：Provider「openrouter」的密钥引用指向 other，与它自己的 slug 不一致\n请修复或删除该文件后重启应用；在此之前 Maestro 拒绝任何写入，绝不会静默重建。"
         );
     }
 

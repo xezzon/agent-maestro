@@ -14,10 +14,7 @@ use std::{
 
 use crate::{
     errors::SecretError,
-    secret::{
-        reference::SecretRef,
-        store::{SecretOp, SecretStore},
-    },
+    secret::{SecretOp, SecretRef, SecretStore},
 };
 
 /// 一次调用：动作与被指向的 account。

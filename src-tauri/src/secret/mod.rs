@@ -21,12 +21,6 @@
 //! - [`keyring`]：系统密钥链（唯一生产实现）；
 //! - `memory`：内存密钥链（仅测试）。
 
-// 基座票（#144）：类型与端口已就位，接线在 #145（Store 注入
-// `Arc<dyn SecretStore>`）。在那之前没有人调用本模块的公开面，rustc 会把
-// 未被使用的类型与再导出判为 dead code / unused import——此处显式放行，
-// #145 接线后删掉这一行。
-#![allow(dead_code, unused_imports)]
-
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod keyring;
 #[cfg(test)]
@@ -39,7 +33,7 @@ mod text;
 pub(crate) use keyring::KeyringSecrets;
 #[cfg(test)]
 pub(crate) use memory::MemorySecrets;
-pub(crate) use reference::SecretRef;
+pub(crate) use reference::{SCHEME, SecretRef};
 pub(crate) use store::{SecretOp, SecretStore};
 pub(crate) use text::SecretText;
 

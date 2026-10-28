@@ -19,10 +19,7 @@ use super::{
     },
 };
 use crate::{
-    config::PluginEntry,
-    paths::Paths,
-    provider::{ApiKey, Provider},
-    testutil::temp_home,
+    config::PluginEntry, paths::Paths, provider::Provider, secret::SecretText, testutil::temp_home,
     variables::Variables,
 };
 
@@ -1035,7 +1032,7 @@ fn projection_path_never_logs_the_api_key() {
     let providers = BTreeMap::from([(
         "gateway".to_owned(),
         Provider {
-            api_key: ApiKey::new(canary.to_owned()),
+            api_key: SecretText::Plaintext(canary.to_owned()),
             base_url: BTreeMap::from([(
                 Protocol::OpenaiCompletions,
                 "https://api.example.com/v1".to_owned(),
@@ -1134,7 +1131,7 @@ fn write_providers_interpolates_placeholders_before_projection() {
                 Protocol::OpenaiCompletions,
                 "https://${HOST}/v1".to_owned(),
             )]),
-            api_key: ApiKey::new("sk-literal".to_owned()),
+            api_key: SecretText::Plaintext("sk-literal".to_owned()),
             ..Provider::default()
         },
     )]);
@@ -1257,7 +1254,7 @@ fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_er
                 Protocol::OpenaiCompletions,
                 "https://${UNDEFINED_VAR}/v1".to_owned(),
             )]),
-            api_key: ApiKey::new("sk-canary-must-not-leak".to_owned()),
+            api_key: SecretText::Plaintext("sk-canary-must-not-leak".to_owned()),
             ..Provider::default()
         },
     )]);
@@ -1589,37 +1586,30 @@ fn apply_providers_logs_each_failed_plugin_with_its_reason() {
 /// 真存进 store，筛选规则被真正执行。
 #[test]
 fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
-    use crate::provider::Protocol;
-
     let home = temp_home();
+    // 旧配置（明文仍在文件里）：写路径不再接受明文，故这类凭证只能从旧
+    // 配置读入——迁移（#147）之前它们照常投影。
+    fs::create_dir_all(home.path().join(".maestro")).unwrap();
+    fs::write(
+        home.path().join(".maestro").join("config.json"),
+        r#"{
+            "version": 1,
+            "providers": {
+                "gateway": {
+                    "base_url": {"openai-completions": "https://api.example.com/v1"},
+                    "api_key": "sk-gateway"
+                },
+                "offline": {
+                    "base_url": {"openai-completions": "https://offline.example.com/v1"},
+                    "api_key": "sk-disabled-must-not-leak"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
     let store = store_at(home.path());
     let service = test_service(home.path());
     service.startup(&store).unwrap();
-
-    let provider = |url: &str, api_key: &str| Provider {
-        base_url: BTreeMap::from([(Protocol::OpenaiCompletions, url.to_owned())]),
-        api_key: ApiKey::new(api_key.to_owned()),
-        ..Provider::default()
-    };
-    store
-        .with_write(|s| {
-            s.create_provider(
-                "gateway",
-                provider("https://api.example.com/v1", "sk-gateway"),
-            )
-        })
-        .unwrap();
-    store
-        .with_write(|s| {
-            s.create_provider(
-                "offline",
-                provider(
-                    "https://offline.example.com/v1",
-                    "sk-disabled-must-not-leak",
-                ),
-            )
-        })
-        .unwrap();
 
     let models_path = home.path().join(".pi").join("agent").join("models.json");
     let first = service.apply_providers(&store).unwrap();

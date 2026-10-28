@@ -37,8 +37,10 @@
  * @property {string} value
  */
 /**
- * 后端 `list_providers` 返回的记录形态：`api_key` 为明文凭证，
- * 空串即未设置；第一期凭证随配置文件落盘，不做密钥链（ADR 0002 推迟采纳）。
+ * 后端 `list_providers` 返回的记录形态：`api_key` 恒为字符串——空串即未设置，
+ * `secret://…` 即密钥链引用（旧配置里还可能是明文，等启动迁移换掉）。
+ * 真值只进系统密钥链，配置只留引用（ADR 0002）；本视图改造前，界面原样
+ * 携带这个字符串（回传它等价于「不变」，见第 5 票）。
  * `base_url` 只包含已配置的槽位，缺键即未配置。
  * `custom_header` 是名→值映射（无序），缺键即空映射。
  * 创建/更新命令的 `provider` 负载复用同一组字段名，但恒带 `slug`、
@@ -54,7 +56,8 @@
  * @property {Model[]} models 保序模型列表。
  */
 /**
- * 列表页/表单使用的 Provider 视图：原样携带明文 `api_key`（空串即未设置）。
+ * 列表页/表单使用的 Provider 视图：原样携带 `api_key` 字符串（空串即未设置，
+ * 引用 URI 即真值在密钥链里）。
  * 创建/更新时按写入字段集回传（见 `toProviderPayload`），只读字段不回传。
  * @typedef {Object} Provider
  * @property {string} slug
@@ -275,8 +278,8 @@ export async function listProviders() {
       // 记录层是 BTreeMap，但 JSON 传进 JS 对象后键序不保证（整数字样键还会前置），
       // 故显式按名排序展开成行列表，与表单的 Form.List 对齐。
       custom_header: toHeaderRows(provider.custom_header),
-      // 后端的「未设置」约定：未配置的凭证恒为空串（`ApiKey` 类型的序列化形态，
-      // 见 src-tauri/src/provider.rs）。这一句是那条约定的唯一前端落点。
+      // 后端的「未设置」约定：未配置的凭证恒为空串（`SecretText` 类型的序列化
+      // 形态，见 src-tauri/src/secret/text.rs）。这一句是那条约定的唯一前端落点。
       api_key_set: !!provider.api_key,
       models: (provider.models ?? []).map(normalizeModel),
     }))

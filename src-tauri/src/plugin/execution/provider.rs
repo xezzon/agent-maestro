@@ -56,8 +56,12 @@ fn to_wit_provider(
             endpoints,
             // 选择原样透传，可能缺失或指向未配置的协议：由插件裁定（ADR 0016）。
             selected_protocol: provider.selected_protocol.map(to_wit_protocol),
-            // 未设置凭证即 none（见 WIT 合同）：归一规则由 `ApiKey` 持有。
-            api_key: provider.api_key.as_deref().map(str::to_owned),
+            // 未设置凭证即 none（见 WIT 合同）。
+            //
+            // **过渡态**：引用暂按未设置传递（#146 换成「投影前解析真值」）——
+            // 真值在密钥链里，引用 URI 绝不交给插件，否则插件会把
+            // `secret://…` 当成 API Key 用。
+            api_key: provider.api_key.plaintext().map(str::to_owned),
             custom_header: collect_custom_headers(provider),
             models: provider.models.iter().map(to_wit_model).collect(),
         });
@@ -134,7 +138,10 @@ mod tests {
     use super::*;
     use crate::plugin::execution::testutil::loaded_plugin;
     use crate::plugin::{build_engine, builtin};
-    use crate::provider::{ApiKey, Endpoints, ModelLimit};
+    use crate::{
+        provider::{Endpoints, ModelLimit},
+        secret::{SecretRef, SecretText},
+    };
 
     fn provider(openai: Option<&str>, anthropic: Option<&str>) -> Provider {
         let mut base_url = Endpoints::default();
@@ -213,7 +220,7 @@ mod tests {
                     Protocol::AnthropicMessages,
                     "https://anthropic.example.com".to_owned(),
                 )]),
-                api_key: ApiKey::new("sk-plain".to_owned()),
+                api_key: SecretText::Plaintext("sk-plain".to_owned()),
                 models: vec![
                     ModelEntry {
                         id: "claude-sonnet".to_owned(),
@@ -249,6 +256,37 @@ mod tests {
         assert_eq!(mapped[0].models[0].id, "claude-sonnet");
         assert_eq!(mapped[0].models[0].display_name.as_deref(), Some("Sonnet"));
         assert_eq!(mapped[0].models[1].display_name, None);
+    }
+
+    /// 过渡态（#146 替换此行为）：**引用**按未设置传递，引用 URI 绝不进
+    /// 投影输入——插件会把 `secret://…` 当成 API Key 用。
+    ///
+    /// 真值在密钥链里，投影前解析那一步还没做（#146）。故此刻引用等于「没有
+    /// 凭证」：宁可插件拿不到凭证，也不能让它拿到一个 URI 当凭证使。
+    /// 明文与未设置的行为不变。
+    #[test]
+    fn a_reference_is_projected_as_unset_and_never_as_its_uri() {
+        let providers = BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://api.example.com/v1".to_owned(),
+                )]),
+                api_key: SecretText::referenced(SecretRef::for_provider("gateway").unwrap()),
+                ..Provider::default()
+            },
+        )]);
+
+        let (mapped, _) = to_wit_provider(&providers);
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].api_key, None, "引用暂按未设置传递");
+        let rendered = format!("{:?}", mapped[0].api_key);
+        assert!(
+            !rendered.contains("secret://"),
+            "引用 URI 不得出现在投影输入里：{rendered}"
+        );
     }
 
     /// 自定义 header 按名（字节序）交给插件；值原样映射。
@@ -357,7 +395,7 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                api_key: ApiKey::new("sk-plain".to_owned()),
+                api_key: SecretText::Plaintext("sk-plain".to_owned()),
                 ..provider(Some("https://api.example.com/v1"), None)
             },
         )]);
@@ -447,7 +485,7 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                api_key: ApiKey::new("sk-plain".to_owned()),
+                api_key: SecretText::Plaintext("sk-plain".to_owned()),
                 custom_header: BTreeMap::from([(
                     "X-Gateway-Key".to_owned(),
                     "gw-plain".to_owned(),
@@ -539,7 +577,7 @@ mod tests {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
-                api_key: ApiKey::new("a$b".to_owned()),
+                api_key: SecretText::Plaintext("a$b".to_owned()),
                 custom_header: BTreeMap::from([
                     ("X-Mid".to_owned(), "a$b".to_owned()),
                     ("X-Bang".to_owned(), "!secret".to_owned()),
