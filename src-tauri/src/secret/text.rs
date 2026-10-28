@@ -1,4 +1,4 @@
-//! 凭证字段的三态：未设置 / 密钥链引用 / 旧明文。
+//! 密钥字段的三态：未设置 / 密钥链引用 / 明文。
 
 use std::fmt;
 
@@ -6,51 +6,37 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::secret::reference::{SCHEME, SecretRef};
 
-/// 凭证字段的三态（ADR 0002）。
+/// 密钥字段的三态：值只有这三种形态，与它属于哪个字段无关。
 ///
-/// - **未设置**（[`Unset`](SecretText::Unset)）：没有凭证。落盘为空串。
+/// - **未设置**（[`Unset`](SecretText::Unset)）：没有值。落盘为空串。
 /// - **引用**（[`Ref`](SecretText::Ref)）：真值在系统密钥链里，字段只存
 ///   规范引用 URI。落盘为 `secret://…`。
-/// - **旧明文**（[`Plaintext`](SecretText::Plaintext)）：迁移前的旧配置里
-///   直接写着真值。它**只可能来自旧配置的反序列化**——新写入路径一律产出
-///   引用（写密钥链 → 落引用），不产出明文。
+/// - **明文**（[`Plaintext`](SecretText::Plaintext)）：真值直接写在字段里。
+///   落盘为原字符串。
+///
+/// **允许不允许明文由字段自己决定，本类型不替字段做主**：`Plaintext` 是为
+/// 「密文 / 明文二者皆可」的字段准备的。当前的 API Key 只允许「未设置」或
+/// 「引用」——明文只会在读旧配置时出现，任何**新写入路径都必须先把它换成
+/// 引用**（写密钥链 → 落引用）；这条约束落在 Provider 的写入路径上
+/// （#145 的三态契约），而不是靠本类型拦住构造。
 ///
 /// 脱敏是类型级隔离：[`Debug`](fmt::Debug) 只渲染「配没配」，绝不渲染值
 /// ——调用点不必记得别打印，派生 `Debug` 的容器自动安全。
 ///
 /// 取值只有三个入口：[`is_set`](SecretText::is_set)（配没配）、
 /// [`reference`](SecretText::reference)（引用）与
-/// [`plaintext`](SecretText::plaintext)（旧明文）。**没有**把引用 URI 当密钥
+/// [`plaintext`](SecretText::plaintext)（明文）。**没有**把引用 URI 当密钥
 /// 值取出的方法——那会让调用方在「投影时忘了解析」的情况下，把引用 URI
 /// 当成真值发给工具。
 #[derive(Clone, PartialEq, Eq, Default)]
 pub(crate) enum SecretText {
-    /// 未设置：没有凭证。落盘为空串。
+    /// 未设置：没有值。落盘为空串。
     #[default]
     Unset,
     /// 已设置：指向密钥链条目的规范引用。落盘为 `secret://…`。
     Ref(SecretRef),
-    /// 旧明文：只可能来自旧配置的反序列化。落盘为原字符串。
-    ///
-    /// 载荷是 [`LegacyPlaintext`] 而非 `String`：它的构造入口只开在本模块
-    /// 内，于是**新写入路径造不出旧明文**——写路径要用明文，只能经反序列
-    /// 化从旧配置里读进来（迁移路径，ADR 0002）。
-    Plaintext(LegacyPlaintext),
-}
-
-/// 旧配置里的明文凭证。
-///
-/// 字段私有：构造入口只开在定义它的模块内，故 crate 其余部分拿不到它，
-/// 也就造不出 [`SecretText::Plaintext`]。取值走
-/// [`SecretText::plaintext`]。
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct LegacyPlaintext(String);
-
-impl LegacyPlaintext {
-    /// 明文本身。
-    fn as_str(&self) -> &str {
-        &self.0
-    }
+    /// 已设置：真值直接写在字段里。落盘为原字符串。
+    Plaintext(String),
 }
 
 impl SecretText {
@@ -61,18 +47,18 @@ impl SecretText {
 
     /// 已设置：指向密钥链条目的规范引用。
     ///
-    /// 这是新写入路径唯一的「已设置」构造方式——真值先写进密钥链，配置里
-    /// 只留这个引用（ADR 0002）。
+    /// API Key 这类「只允许密文」的字段，写路径经它落引用：真值先写进
+    /// 密钥链，配置里只留这个引用（ADR 0002）。
     pub(crate) fn referenced(reference: SecretRef) -> Self {
         Self::Ref(reference)
     }
 
-    /// 是否已设置：引用与旧明文都算已设置。
+    /// 是否已设置：引用与明文都算已设置。
     pub(crate) fn is_set(&self) -> bool {
         !matches!(self, Self::Unset)
     }
 
-    /// 规范引用；未设置或旧明文即 `None`。
+    /// 规范引用；未设置或明文即 `None`。
     pub(crate) fn reference(&self) -> Option<&SecretRef> {
         match self {
             Self::Ref(reference) => Some(reference),
@@ -80,19 +66,20 @@ impl SecretText {
         }
     }
 
-    /// 旧明文；未设置或引用即 `None`。
+    /// 明文；未设置或引用即 `None`。
     ///
-    /// 只有迁移路径用它取真值：把旧明文写进密钥链后，配置里换成引用。
+    /// API Key 上它只会出现在读旧配置之后：迁移路径据此取真值，把明文写
+    /// 进密钥链后，配置里换成引用（#147）。
     pub(crate) fn plaintext(&self) -> Option<&str> {
         match self {
-            Self::Plaintext(value) => Some(value.as_str()),
+            Self::Plaintext(value) => Some(value),
             _ => None,
         }
     }
 }
 
 impl fmt::Debug for SecretText {
-    /// 只渲染「配没配」，绝不渲染值——旧明文也不带（ADR 0008：凭证绝不落盘
+    /// 只渲染「配没配」，绝不渲染值——明文也不带（ADR 0008：凭证绝不落盘
     /// 进日志）。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(if self.is_set() { "<set>" } else { "<unset>" })
@@ -100,19 +87,19 @@ impl fmt::Debug for SecretText {
 }
 
 impl Serialize for SecretText {
-    /// 落盘形态：空串（未设置）/ 规范引用 URI（已设置）/ 原字符串（旧明文）。
+    /// 落盘形态：空串（未设置）/ 规范引用 URI（引用）/ 原字符串（明文）。
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Unset => serializer.serialize_str(""),
             Self::Ref(reference) => serializer.serialize_str(&reference.to_string()),
-            Self::Plaintext(value) => serializer.serialize_str(value.as_str()),
+            Self::Plaintext(value) => serializer.serialize_str(value),
         }
     }
 }
 
 impl<'de> Deserialize<'de> for SecretText {
     /// 读入：空串即未设置；`secret://` 开头即引用（形态不合规即拒绝——
-    /// 引用不合法不该被当成明文放行，ADR 0002）；其余即旧明文。
+    /// 引用不合法不该被当成明文放行，ADR 0002）；其余即明文。
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         Ok(match raw.as_str() {
@@ -120,7 +107,7 @@ impl<'de> Deserialize<'de> for SecretText {
             text if text.starts_with(SCHEME) => {
                 Self::Ref(SecretRef::parse(text).map_err(serde::de::Error::custom)?)
             }
-            text => Self::Plaintext(LegacyPlaintext(text.to_owned())),
+            text => Self::Plaintext(text.to_owned()),
         })
     }
 }
@@ -154,7 +141,7 @@ mod tests {
 
     #[test]
     fn plaintext_serializes_as_the_original_string() {
-        let text = SecretText::Plaintext(LegacyPlaintext(CANARY.to_owned()));
+        let text = SecretText::Plaintext(CANARY.to_owned());
 
         assert_eq!(
             serde_json::to_value(&text).unwrap(),
@@ -162,7 +149,7 @@ mod tests {
         );
     }
 
-    /// 三态反序列化：空串 → 未设置，引用 → 引用，其余 → 旧明文。
+    /// 三态反序列化：空串 → 未设置，引用 → 引用，其余 → 明文。
     #[test]
     fn deserialization_reads_the_three_states() {
         let unset: SecretText = serde_json::from_str(r#""""#).unwrap();
@@ -207,7 +194,7 @@ mod tests {
         let cases = [
             SecretText::unset(),
             SecretText::referenced(SecretRef::for_provider("openrouter").unwrap()),
-            SecretText::Plaintext(LegacyPlaintext(CANARY.to_owned())),
+            SecretText::Plaintext(CANARY.to_owned()),
         ];
 
         for case in cases {
@@ -221,19 +208,29 @@ mod tests {
         }
     }
 
-    /// 新写入路径的两个构造入口都不产出旧明文：只有反序列化能造出它。
+    /// 三个取值口把三态分得开：未设置什么都不给、引用只给引用、明文只给明文。
     #[test]
-    fn write_paths_never_produce_plaintext() {
+    fn accessors_separate_the_three_states() {
         let unset = SecretText::unset();
-        let referenced = SecretText::referenced(SecretRef::for_provider("openrouter").unwrap());
-
-        assert_eq!(unset.plaintext(), None);
-        assert_eq!(referenced.plaintext(), None);
+        assert!(!unset.is_set());
         assert_eq!(unset.reference(), None);
-        assert!(referenced.reference().is_some());
+        assert_eq!(unset.plaintext(), None);
+
+        let referenced = SecretText::referenced(SecretRef::for_provider("openrouter").unwrap());
+        assert!(referenced.is_set());
+        assert_eq!(
+            referenced.reference().map(SecretRef::slug),
+            Some("openrouter")
+        );
+        assert_eq!(referenced.plaintext(), None);
+
+        let plaintext = SecretText::Plaintext("sk-standalone".to_owned());
+        assert!(plaintext.is_set());
+        assert_eq!(plaintext.reference(), None);
+        assert_eq!(plaintext.plaintext(), Some("sk-standalone"));
     }
 
-    /// Debug 脱敏：三种形态都不带值（旧明文也不带）。
+    /// Debug 脱敏：三种形态都不带值（明文也不带）。
     #[test]
     fn debug_output_never_contains_the_plaintext() {
         let cases = [
@@ -242,10 +239,7 @@ mod tests {
                 SecretText::referenced(SecretRef::for_provider("openrouter").unwrap()),
                 "<set>",
             ),
-            (
-                SecretText::Plaintext(LegacyPlaintext(CANARY.to_owned())),
-                "<set>",
-            ),
+            (SecretText::Plaintext(CANARY.to_owned()), "<set>"),
         ];
 
         for (case, expected) in cases {
