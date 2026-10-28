@@ -15,9 +15,12 @@
 //! 同时表达不了这两件事。锁毒化（[`LockPoisoned`]）是各存储域共用的标记，
 //! 各经一段 `From` 折进自己那句「存储不可用」。
 //!
+//! 密钥链另有 [`SecretError`] 与 [`SecretRefError`]：它们与配置错误无关，
+//! 讲的是「真值那一侧」的失败（ADR 0002）。
+//!
 //! 每个领域住在自己的子模块里（[`config`] / [`provider`] / [`entry`] /
 //! [`variable`] / [`interpolation`] / [`fetch`] / [`logging`] / [`paths`] /
-//! [`plugin`] / [`preferences`] / [`lock`]），本模块只做两件事：把类型
+//! [`plugin`] / [`preferences`] / [`secret`] / [`lock`]），本模块只做两件事：把类型
 //! re-export 出去（`crate::errors::X` 的路径不变，调用方零改动），以及收纳
 //! 跨领域的契约（见 [`impl_storage_error`]）。
 
@@ -31,6 +34,7 @@ pub(crate) use paths::PathError;
 pub(crate) use plugin::PluginError;
 pub(crate) use preferences::PreferencesError;
 pub(crate) use provider::ProviderError;
+pub(crate) use secret::{SecretCause, SecretError, SecretRefError};
 pub(crate) use variable::VariableError;
 
 mod config;
@@ -43,6 +47,7 @@ mod paths;
 mod plugin;
 mod preferences;
 mod provider;
+mod secret;
 mod variable;
 
 /// 存储错误域的共有形状：把配置错误与锁毒化折进本域的 `Storage` 变体。

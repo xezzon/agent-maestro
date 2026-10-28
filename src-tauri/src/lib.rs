@@ -8,6 +8,7 @@ mod paths;
 mod plugin;
 mod preferences;
 mod provider;
+mod secret;
 mod store;
 mod test_global;
 mod variables;
