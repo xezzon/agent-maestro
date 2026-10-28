@@ -1682,15 +1682,13 @@ fn break_persist(fixture: &Fixture) {
 }
 
 /// 密钥链不可用（后端缺席 / 条目库锁着）。
+///
+/// 「哪个动作折成哪个失败变体」由 [`SecretOp::into_error`] 独家给出，替身与
+/// 生产实现共用同一条规则。
 fn unavailable(op: SecretOp) -> SecretError {
-    let cause = SecretCause::Unavailable {
+    op.into_error(SecretCause::Unavailable {
         reason: "密钥链被锁着".to_owned(),
-    };
-    match op {
-        SecretOp::Write => SecretError::Write { cause },
-        SecretOp::Read => SecretError::Read { cause },
-        SecretOp::Delete => SecretError::Delete { cause },
-    }
+    })
 }
 
 /// 覆盖：真值写进密钥链，配置里只留规范引用。

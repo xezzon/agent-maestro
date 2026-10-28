@@ -194,11 +194,7 @@ impl Store {
         }
         providers::validate_provider(slug, &write.provider, &next.variables)
             .map_err(ProviderError::Interpolation)?;
-        // 凭证先落密钥链：密钥链失败即整体失败，配置一动不动。
-        let SecretWrite { value, rollback } = self.write_credential(slug, &write.api_key, None)?;
-        let mut provider = write.provider;
-        provider.api_key = value;
-        self.commit_provider(slug, next, provider, rollback)
+        self.commit_provider(slug, next, write, None)
     }
 
     /// 整包替换指定 Provider 的端点、模型列表与凭证。
@@ -218,13 +214,7 @@ impl Store {
             .ok_or_else(|| ProviderError::missing_slug(slug))?;
         providers::validate_provider(slug, &write.provider, &next.variables)
             .map_err(ProviderError::Interpolation)?;
-        // 凭证先落密钥链：不变则完全不碰密钥链，覆盖先写后落引用，清除先删
-        // 条目再落空串。
-        let SecretWrite { value, rollback } =
-            self.write_credential(slug, &write.api_key, Some(&original.api_key))?;
-        let mut provider = write.provider;
-        provider.api_key = value;
-        self.commit_provider(slug, next, provider, rollback)?;
+        self.commit_provider(slug, next, write, Some(&original.api_key))?;
         Ok(original)
     }
 
@@ -248,16 +238,24 @@ impl Store {
         Ok(removed)
     }
 
-    /// 写一条 Provider 记录：凭证已落密钥链，配置里只留引用。
+    /// 写一条 Provider 记录：凭证先落密钥链，配置里只留引用。
     ///
-    /// 落盘失败按旧值回滚密钥链；回滚也失败则两次失败一并点名。
+    /// `existing` 是记录里现有的字段值（新建即 `None`）：写入意图按它决定
+    /// 落成什么——不变沿用旧值、清除删条目、覆盖写条目。
+    ///
+    /// 凭证先落密钥链：密钥链失败即整体失败，配置一动不动。落盘失败按旧值
+    /// 回滚密钥链；回滚也失败则两次失败一并点名。
     fn commit_provider(
         &mut self,
         slug: &str,
         mut next: Config,
-        provider: Provider,
-        rollback: Option<Rollback>,
+        write: ProviderWrite,
+        existing: Option<&SecretText>,
     ) -> Result<(), ProviderError> {
+        let SecretWrite { value, rollback } =
+            self.write_credential(slug, &write.api_key, existing)?;
+        let mut provider = write.provider;
+        provider.api_key = value;
         next.providers.insert(slug.to_owned(), provider);
         self.persist_credential(slug, &mut next, rollback)?;
         self.state = ProtectedState::Ready(next);

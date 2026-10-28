@@ -68,9 +68,10 @@ pub(crate) fn persist_version(config: &Config) -> u32 {
         .providers
         .values()
         .any(|provider| provider.api_key.reference().is_some());
-    match has_reference {
-        true => CONFIG_VERSION,
-        false => config.version.max(MIN_CONFIG_VERSION),
+    if has_reference {
+        CONFIG_VERSION
+    } else {
+        config.version.max(MIN_CONFIG_VERSION)
     }
 }
 

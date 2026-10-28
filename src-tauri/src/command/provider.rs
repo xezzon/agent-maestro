@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt};
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use tauri::State;
@@ -7,7 +7,7 @@ use super::log_outcome;
 use crate::{
     AppStore,
     errors::ProviderError,
-    provider::{Endpoints, ModelEntry, Protocol, Provider, ProviderWrite},
+    provider::{ApiKeyIntent, Endpoints, ModelEntry, Protocol, Provider, ProviderWrite},
     secret::{SCHEME, SecretRef, SecretText},
 };
 
@@ -54,31 +54,6 @@ impl From<ProviderRequest> for Provider {
     }
 }
 
-/// `api_key` 载荷解析出的写入意图。
-#[derive(Clone, PartialEq, Eq)]
-enum ApiKeyPayload {
-    /// 缺省或 `null`：不变（新建时即未设置）。
-    Absent,
-    /// 空串：清除。
-    Clear,
-    /// 本 slug 的规范引用：更新时按「不变」处理（防前端回传）。
-    CanonicalReference,
-    /// 其余非空串：覆盖写入。
-    Plaintext(String),
-}
-
-impl fmt::Debug for ApiKeyPayload {
-    /// 明文只渲染「配没配」，绝不渲染值（ADR 0008：凭证绝不落盘进日志）。
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ApiKeyPayload::Absent => f.write_str("Absent"),
-            ApiKeyPayload::Clear => f.write_str("Clear"),
-            ApiKeyPayload::CanonicalReference => f.write_str("CanonicalReference"),
-            ApiKeyPayload::Plaintext(_) => f.write_str("Plaintext(<set>)"),
-        }
-    }
-}
-
 /// 解析 `api_key` 载荷：显式三态。
 ///
 /// 缺省 / `null` = 不变；`""` = 清除；本 slug 的规范引用 = 不变（防前端
@@ -87,23 +62,23 @@ impl fmt::Debug for ApiKeyPayload {
 /// 报错发生在命令层：引用只由 Maestro 自己写入，前端回传的一律不算凭证
 /// （ADR 0002）。`secret://` 是保留前缀，明文密钥不能以它开头——真撞上了
 /// 只能报错，绝不放行。
-fn parse_api_key(slug: &str, payload: Option<&str>) -> Result<ApiKeyPayload, ProviderError> {
+///
+/// 规范引用归成「不变」是**更新**的规则；新建的 Provider 不该由引用起步，
+/// 故新建路径先行拒绝任何引用（见 [`create_write`]）。
+fn parse_api_key(slug: &str, payload: Option<&str>) -> Result<ApiKeyIntent, ProviderError> {
     let Some(text) = payload else {
-        return Ok(ApiKeyPayload::Absent);
+        return Ok(ApiKeyIntent::Unchanged);
     };
     if text.is_empty() {
-        return Ok(ApiKeyPayload::Clear);
+        return Ok(ApiKeyIntent::Clear);
     }
     if text.starts_with(SCHEME) {
-        let canonical = SecretRef::for_provider(slug)
-            .ok()
-            .map(|reference| reference.to_string());
-        if canonical.as_deref() == Some(text) {
-            return Ok(ApiKeyPayload::CanonicalReference);
+        if SecretRef::is_canonical_for(slug, text) {
+            return Ok(ApiKeyIntent::Unchanged);
         }
         return Err(ProviderError::unexpected_secret_reference(slug));
     }
-    Ok(ApiKeyPayload::Plaintext(text.to_owned()))
+    Ok(ApiKeyIntent::Overwrite(text.to_owned()))
 }
 
 /// 创建的一次写入：记录本体 + 凭证的写入意图。
@@ -111,14 +86,16 @@ fn parse_api_key(slug: &str, payload: Option<&str>) -> Result<ApiKeyPayload, Pro
 /// 缺省与清除都落成未设置（新建没有旧值可沿用，也没有条目可删）；任何引用
 /// （含规范引用）一律拒绝——新建的 Provider 不该由引用起步。
 fn create_write(slug: &str, request: ProviderRequest) -> Result<ProviderWrite, ProviderError> {
-    let payload = parse_api_key(slug, request.api_key.as_deref())?;
+    let payload = request.api_key.as_deref();
+    if payload.is_some_and(|text| text.starts_with(SCHEME)) {
+        return Err(ProviderError::unexpected_secret_reference(slug));
+    }
+    let intent = parse_api_key(slug, payload)?;
     let provider: Provider = request.into();
-    Ok(match payload {
-        ApiKeyPayload::Absent | ApiKeyPayload::Clear => ProviderWrite::unchanged(provider),
-        ApiKeyPayload::CanonicalReference => {
-            return Err(ProviderError::unexpected_secret_reference(slug));
-        }
-        ApiKeyPayload::Plaintext(value) => ProviderWrite::overwrite(provider, value),
+    Ok(match intent {
+        // 新建没有条目可删：清除落成未设置。
+        ApiKeyIntent::Unchanged | ApiKeyIntent::Clear => ProviderWrite::unchanged(provider),
+        ApiKeyIntent::Overwrite(value) => ProviderWrite::overwrite(provider, value),
     })
 }
 
@@ -127,14 +104,12 @@ fn create_write(slug: &str, request: ProviderRequest) -> Result<ProviderWrite, P
 /// 缺省与规范引用都按不变处理（规范引用是前端回传，防它产生新密钥）；空串即
 /// 清除；其余非空串即覆盖。
 fn update_write(slug: &str, request: ProviderRequest) -> Result<ProviderWrite, ProviderError> {
-    let payload = parse_api_key(slug, request.api_key.as_deref())?;
+    let intent = parse_api_key(slug, request.api_key.as_deref())?;
     let provider: Provider = request.into();
-    Ok(match payload {
-        ApiKeyPayload::Absent | ApiKeyPayload::CanonicalReference => {
-            ProviderWrite::unchanged(provider)
-        }
-        ApiKeyPayload::Clear => ProviderWrite::clear(provider),
-        ApiKeyPayload::Plaintext(value) => ProviderWrite::overwrite(provider, value),
+    Ok(match intent {
+        ApiKeyIntent::Unchanged => ProviderWrite::unchanged(provider),
+        ApiKeyIntent::Clear => ProviderWrite::clear(provider),
+        ApiKeyIntent::Overwrite(value) => ProviderWrite::overwrite(provider, value),
     })
 }
 
@@ -204,7 +179,6 @@ pub(crate) fn set_provider_enabled(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ApiKeyIntent;
 
     fn parse(text: &str) -> Result<ProviderRequest, serde_json::Error> {
         serde_json::from_str(text)

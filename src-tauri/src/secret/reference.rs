@@ -74,6 +74,17 @@ impl SecretRef {
         })
     }
 
+    /// 这段文本是不是本 slug 的规范引用。
+    ///
+    /// 用于识别「前端回传自己刚拿到的引用」：逐字相同才算，别人的引用与
+    /// 成形不成的 `secret://` 值一律不算（那不是本 Provider 的凭证）。
+    pub(crate) fn is_canonical_for(slug: &str, text: &str) -> bool {
+        match Self::for_provider(slug) {
+            Ok(reference) => reference.to_string() == text,
+            Err(_) => false,
+        }
+    }
+
     /// 引用反推出的 slug：供错误文案点名 Provider。
     ///
     /// slug 正是从 account 的中段反推出来的（`provider/<slug>/api_key`），
