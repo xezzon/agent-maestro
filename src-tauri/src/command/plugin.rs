@@ -223,13 +223,16 @@ pub(crate) async fn set_plugin_config(
 /// `PluginService::apply_providers`）。结果行按 ADR 0008 携带逐插件状态
 /// 摘要——某个插件失败时，日志里要能看出是哪一个；没有插件时不带上下文，
 /// 成功行因此不留尾随的冒号与空格。
+///
+/// 投影前解析密钥要一个「按引用取真值」的端口：`AppStore` 同时实现了它
+/// （另持密钥链句柄，读取不持配置锁），故这里把同一个存储交给两处。
 #[tauri::command]
 pub(crate) fn apply_providers(
     store: State<'_, AppStore>,
     service: State<'_, PluginService>,
 ) -> Result<Vec<PluginApplyReport>, String> {
     let outcomes = service
-        .apply_providers(store.inner())
+        .apply_providers(store.inner(), store.inner())
         .map_err(|err| err.to_string());
     // 摘要取自服务层的内部形状：状态词由服务层产出（ADR 0008 的日志词），
     // 与线格式同形（由 `apply_status_wire_values_are_pinned` 钉住）。

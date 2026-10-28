@@ -408,9 +408,24 @@ pub(crate) struct AppStore {
     /// 同一 Store 上并发；写操作（add_plugin / set_plugin_enabled /
     /// create_provider 等）走 `AppStore::write()` 独占。
     pub(crate) store: RwLock<Store>,
+    /// 密钥链句柄：**另持一份**，不随配置锁进出。
+    ///
+    /// 投影前解析密钥时用它取回真值（#146）。读取发生在配置锁之外——密钥链
+    /// 后端的延迟因此不会占着配置的读锁，其它命令照常读写配置。
+    secrets: Arc<dyn SecretStore>,
 }
 
 impl AppStore {
+    /// 装配：配置存储与密钥链句柄。
+    ///
+    /// 两份密钥链句柄指向**同一个**后端：存储层用它写，投影路径用它读。
+    pub(crate) fn new(store: Store, secrets: Arc<dyn SecretStore>) -> Self {
+        Self {
+            store: RwLock::new(store),
+            secrets,
+        }
+    }
+
     /// 在读锁内执行闭包：闭包的返回值即脱离锁的那份自有值。
     ///
     /// 锁守卫不出作用域——调用方拿不到守卫，自己的 IO 便不会落在锁内。

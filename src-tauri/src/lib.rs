@@ -24,8 +24,8 @@ use command::{
 };
 use plugin::PluginService;
 use preferences::PreferencesStore;
-use secret::KeyringSecrets;
-use std::sync::{Arc, RwLock};
+use secret::{KeyringSecrets, SecretStore};
+use std::sync::Arc;
 use store::{AppStore, Store};
 use tauri::Manager;
 
@@ -102,11 +102,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             // 凭证的真值落系统密钥链，配置里只留引用（ADR 0002）：
-            // 密钥链由这里注入，存储层因此不依赖具体后端。
-            let store = Store::new(paths.config_path(), Arc::new(KeyringSecrets::new()));
-            app.manage(AppStore {
-                store: RwLock::new(store),
-            });
+            // 密钥链由这里注入，存储层因此不依赖具体后端。同一份句柄也给
+            // `AppStore` 另持一份——投影前解析密钥时用它读（#146）。
+            let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecrets::new());
+            let store = Store::new(paths.config_path(), secrets.clone());
+            app.manage(AppStore::new(store, secrets));
             // 偏好是独立的存储（自己的内存状态与锁，ADR 0023）：启动时即加载，
             // 读不出来按缺省值运行——偏好是外观问题，不是启动阻塞。
             app.manage(PreferencesStore::new(paths.preferences_path()));

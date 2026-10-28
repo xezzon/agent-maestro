@@ -12,14 +12,20 @@ use super::{
     PluginRecord, PluginState, ProjectionStatus, apply_summary, builtin,
     manifest::parse_count,
     projection::project_files,
+    secrets::ResolvedSecrets,
     source::is_https_url,
     testutil::{
         LockProbeFetcher, MemoryStore, StubFetcher, fetcher_service, manifest_json, snapshot,
-        store_at, stub_service, test_service,
+        store_at, store_with_secrets, stub_service, test_service,
     },
 };
 use crate::{
-    config::PluginEntry, paths::Paths, provider::Provider, secret::SecretText, testutil::temp_home,
+    config::PluginEntry,
+    errors::{SecretCause, SecretError},
+    paths::Paths,
+    provider::Provider,
+    secret::{MemorySecrets, SecretOp, SecretRef, SecretStore, SecretText},
+    testutil::temp_home,
     variables::Variables,
 };
 
@@ -967,7 +973,7 @@ fn write_providers_reports_per_plugin_and_isolates_failures() {
     )]);
 
     let reports = service
-        .write_providers(&providers, &BTreeMap::new())
+        .write_providers(&providers, &BTreeMap::new(), &ResolvedSecrets::new())
         .unwrap();
 
     let by_id: HashMap<&str, &PluginOutcome> = reports
@@ -1041,8 +1047,12 @@ fn projection_path_never_logs_the_api_key() {
         },
     )]);
 
+    // 凭证确实进了插件（解析结果），canary 的日志断言才有意义。
+    let mut secrets = ResolvedSecrets::new();
+    secrets.insert("gateway".to_owned(), Some(canary.to_owned()));
+
     let reports = service
-        .write_providers(&providers, &BTreeMap::new())
+        .write_providers(&providers, &BTreeMap::new(), &secrets)
         .unwrap();
 
     assert_eq!(
@@ -1091,7 +1101,7 @@ fn projection_path_never_logs_custom_header_values() {
     )]);
 
     let reports = service
-        .write_providers(&providers, &BTreeMap::new())
+        .write_providers(&providers, &BTreeMap::new(), &ResolvedSecrets::new())
         .unwrap();
 
     assert_eq!(
@@ -1136,8 +1146,13 @@ fn write_providers_interpolates_placeholders_before_projection() {
         },
     )]);
     let variables = BTreeMap::from([("HOST".to_owned(), "api.example.com".to_owned())]);
+    // 解析出的凭证（投影前从密钥链取回的那一份）：原样进插件，不参与插值。
+    let mut secrets = ResolvedSecrets::new();
+    secrets.insert("gateway".to_owned(), Some("sk-literal".to_owned()));
 
-    let reports = service.write_providers(&providers, &variables).unwrap();
+    let reports = service
+        .write_providers(&providers, &variables, &secrets)
+        .unwrap();
 
     assert_eq!(
         reports[0].status,
@@ -1200,7 +1215,9 @@ fn write_providers_merges_plugin_variable_overrides_per_plugin() {
         )
         .unwrap();
 
-    let reports = service.write_providers(&providers, &variables).unwrap();
+    let reports = service
+        .write_providers(&providers, &variables, &ResolvedSecrets::new())
+        .unwrap();
 
     let by_id: HashMap<&str, &PluginOutcome> = reports
         .iter()
@@ -1260,7 +1277,7 @@ fn write_providers_fails_the_whole_plugin_and_writes_nothing_on_interpolation_er
     )]);
 
     let reports = service
-        .write_providers(&providers, &BTreeMap::new())
+        .write_providers(&providers, &BTreeMap::new(), &ResolvedSecrets::new())
         .unwrap();
 
     assert_eq!(reports[0].status, ProjectionStatus::Failed);
@@ -1307,7 +1324,7 @@ fn write_providers_fails_the_whole_plugin_when_its_plugin_config_is_corrupt() {
     )]);
 
     let reports = service
-        .write_providers(&providers, &BTreeMap::new())
+        .write_providers(&providers, &BTreeMap::new(), &ResolvedSecrets::new())
         .unwrap();
 
     let report = plugin_outcome(&reports, "pi");
@@ -1350,7 +1367,9 @@ fn endpoint_that_interpolates_to_empty_counts_as_unconfigured() {
     )]);
     let variables = BTreeMap::from([("EMPTY".to_owned(), String::new())]);
 
-    let reports = service.write_providers(&providers, &variables).unwrap();
+    let reports = service
+        .write_providers(&providers, &variables, &ResolvedSecrets::new())
+        .unwrap();
 
     assert_eq!(
         reports[0].status,
@@ -1561,7 +1580,7 @@ fn apply_providers_logs_each_failed_plugin_with_its_reason() {
     )
     .unwrap();
 
-    let reports = service.apply_providers(&store).unwrap();
+    let reports = service.apply_providers(&store, &store).unwrap();
 
     let pi = reports
         .iter()
@@ -1612,7 +1631,7 @@ fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
     service.startup(&store).unwrap();
 
     let models_path = home.path().join(".pi").join("agent").join("models.json");
-    let first = service.apply_providers(&store).unwrap();
+    let first = service.apply_providers(&store, &store).unwrap();
     let pi = plugin_outcome(&first, "pi");
     assert_eq!(pi.status, ProjectionStatus::Applied, "{:?}", pi.reason);
     let written: serde_json::Value =
@@ -1625,7 +1644,7 @@ fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
     store
         .with_write(|s| s.set_provider_enabled("offline", false))
         .unwrap();
-    let second = service.apply_providers(&store).unwrap();
+    let second = service.apply_providers(&store, &store).unwrap();
     let pi = plugin_outcome(&second, "pi");
     assert_eq!(pi.status, ProjectionStatus::Applied, "{:?}", pi.reason);
     let raw = fs::read_to_string(&models_path).unwrap();
@@ -1671,7 +1690,9 @@ fn apply_providers_projects_from_an_in_memory_store_without_writing_the_config_f
         )]));
 
     service.add_plugin(&store, MANIFEST_URL).unwrap();
-    let reports = service.apply_providers(&store).unwrap();
+    // 该 Provider 没配凭证：密钥链空着也不影响投影。
+    let secrets = MemorySecrets::new();
+    let reports = service.apply_providers(&store, &secrets).unwrap();
 
     let pi2 = plugin_outcome(&reports, "pi2");
     assert_eq!(pi2.status, ProjectionStatus::Applied, "{:?}", pi2.reason);
@@ -1686,6 +1707,297 @@ fn apply_providers_projects_from_an_in_memory_store_without_writing_the_config_f
         !home.path().join(".maestro").join("config.json").exists(),
         "配置存储不该落盘：内存替身全程没碰文件系统"
     );
+}
+
+/// 投影接缝（#146）：待投影 Provider 的密钥链条目不存在 → 整个 apply 失败。
+///
+/// 失败发生在逐插件流程**之前**：不产生逐插件报告，也不写出任何投影文件——
+/// 工具侧绝不拿到一份缺密钥的配置。
+#[test]
+fn apply_providers_fails_the_whole_apply_when_the_referenced_secret_is_missing() {
+    use crate::provider::Protocol;
+
+    let home = temp_home();
+    let service = test_service(home.path());
+    let store = MemoryStore::new().with_providers(BTreeMap::from([(
+        "gateway".to_owned(),
+        Provider {
+            enabled: true,
+            base_url: BTreeMap::from([(
+                Protocol::OpenaiCompletions,
+                "https://api.example.com/v1".to_owned(),
+            )]),
+            api_key: SecretText::referenced(SecretRef::for_provider("gateway").unwrap()),
+            ..Provider::default()
+        },
+    )]));
+    service.startup(&store).unwrap();
+
+    // 链上没有这一条：取不到真值。
+    let secrets = MemorySecrets::new();
+    let err = service.apply_providers(&store, &secrets).unwrap_err();
+
+    assert!(err.contains("gateway"), "错误要点名 Provider：{err}");
+    assert!(err.contains("条目不存在"), "错误要说条目不存在：{err}");
+    assert!(err.contains("重新设置"), "错误要请用户重新设置：{err}");
+    assert!(
+        !home
+            .path()
+            .join(".pi")
+            .join("agent")
+            .join("models.json")
+            .exists(),
+        "整体失败不进入逐插件流程：不该写出任何投影文件"
+    );
+}
+
+/// 投影接缝（#146）：密钥链不可用 → 整个 apply 失败，且与「条目不存在」
+/// 分得开——后者请用户重新设置，前者请用户修后端。两种病因给同样的处置，
+/// 用户就不知道该做什么。
+#[test]
+fn apply_providers_fails_the_whole_apply_when_the_keychain_is_unavailable() {
+    use crate::provider::Protocol;
+
+    let home = temp_home();
+    let service = test_service(home.path());
+    let store = MemoryStore::new().with_providers(BTreeMap::from([(
+        "gateway".to_owned(),
+        Provider {
+            enabled: true,
+            base_url: BTreeMap::from([(
+                Protocol::OpenaiCompletions,
+                "https://api.example.com/v1".to_owned(),
+            )]),
+            api_key: SecretText::referenced(SecretRef::for_provider("gateway").unwrap()),
+            ..Provider::default()
+        },
+    )]));
+    service.startup(&store).unwrap();
+
+    // 密钥链不可用：读取失败（不是「没有这一条」）。
+    let secrets = MemorySecrets::new();
+    secrets.fail_next(
+        SecretOp::Read,
+        SecretError::Read {
+            cause: SecretCause::Unavailable {
+                reason: "没有可用的 Secret Service 会话".to_owned(),
+            },
+        },
+    );
+
+    let err = service.apply_providers(&store, &secrets).unwrap_err();
+
+    assert!(err.contains("gateway"), "错误要点名 Provider：{err}");
+    assert!(err.contains("密钥链不可用"), "错误要说密钥链不可用：{err}");
+    assert!(
+        !err.contains("重新设置"),
+        "与「条目不存在，请重新设置」分得开：{err}"
+    );
+    assert!(
+        !home
+            .path()
+            .join(".pi")
+            .join("agent")
+            .join("models.json")
+            .exists(),
+        "整体失败不进入逐插件流程：不该写出任何投影文件"
+    );
+}
+
+/// 投影接缝（#146）：解析出的真值进入**真实内置 pi 组件**的投影结果。
+///
+/// 插件收到的是明文（WIT 合同不变），密钥引用绝不以 URI 形式进插件——插件
+/// 会把 `secret://…` 当成 API Key 用。
+#[test]
+fn apply_providers_projects_the_resolved_plaintext_into_the_real_pi_plugin() {
+    use crate::provider::Protocol;
+
+    let home = temp_home();
+    let service = test_service(home.path());
+    let store = MemoryStore::new().with_providers(BTreeMap::from([(
+        "gateway".to_owned(),
+        Provider {
+            enabled: true,
+            base_url: BTreeMap::from([(
+                Protocol::OpenaiCompletions,
+                "https://api.example.com/v1".to_owned(),
+            )]),
+            api_key: SecretText::referenced(SecretRef::for_provider("gateway").unwrap()),
+            ..Provider::default()
+        },
+    )]));
+    service.startup(&store).unwrap();
+
+    // 链上有这一条：真值是 canary。
+    let canary = "sk-canary-4b7e-do-not-leak";
+    let secrets = MemorySecrets::new();
+    secrets
+        .set(&SecretRef::for_provider("gateway").unwrap(), canary)
+        .unwrap();
+
+    let reports = service.apply_providers(&store, &secrets).unwrap();
+
+    let pi = plugin_outcome(&reports, "pi");
+    assert_eq!(pi.status, ProjectionStatus::Applied, "{:?}", pi.reason);
+    let raw =
+        fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap();
+    let written: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        written["providers"]["gateway"]["apiKey"], canary,
+        "插件收到的是从密钥链取回的明文"
+    );
+    assert!(!raw.contains("secret://"), "引用 URI 不得进插件产物：{raw}");
+    assert_eq!(
+        raw.matches(canary).count(),
+        1,
+        "真值只出现在它该出现的那一处：{raw}"
+    );
+}
+
+/// 投影接缝（#146）：禁用与零端点的 Provider **不需要密钥**，也不该因密钥
+/// 问题阻塞「应用到工具」。
+///
+/// 禁用的压根不参与投影；零端点的本来就会被插件映射跳过。两者都不该去问
+/// 密钥链——问了就会把「没配密钥」变成一次整体失败。
+#[test]
+fn apply_providers_does_not_need_secrets_for_disabled_or_endpoint_less_providers() {
+    use crate::provider::Protocol;
+
+    let home = temp_home();
+    let service = test_service(home.path());
+    let store = MemoryStore::new().with_providers(BTreeMap::from([
+        (
+            "disabled".to_owned(),
+            Provider {
+                enabled: false,
+                base_url: BTreeMap::from([(
+                    Protocol::OpenaiCompletions,
+                    "https://disabled.example.com/v1".to_owned(),
+                )]),
+                api_key: SecretText::referenced(SecretRef::for_provider("disabled").unwrap()),
+                ..Provider::default()
+            },
+        ),
+        (
+            "no-endpoint".to_owned(),
+            Provider {
+                enabled: true,
+                api_key: SecretText::referenced(SecretRef::for_provider("no-endpoint").unwrap()),
+                ..Provider::default()
+            },
+        ),
+    ]));
+    service.startup(&store).unwrap();
+
+    // 链上什么都没有：任何一次读取都会让整体失败。
+    let secrets = MemorySecrets::new();
+
+    let reports = service.apply_providers(&store, &secrets).unwrap();
+
+    let pi = plugin_outcome(&reports, "pi");
+    assert_eq!(pi.status, ProjectionStatus::Applied, "{:?}", pi.reason);
+    assert!(
+        secrets.calls().is_empty(),
+        "这两个 Provider 不该去问密钥链：{:?}",
+        secrets.calls()
+    );
+    let written: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        written["providers"].get("disabled").is_none(),
+        "禁用的 Provider 不参与投影：{written}"
+    );
+    assert!(
+        written["providers"].get("no-endpoint").is_none(),
+        "零端点的 Provider 被跳过：{written}"
+    );
+}
+
+/// 生产接线（#146）：配置里只有引用、真值在密钥链里时，「应用到工具」经
+/// 配置存储实现的 `SecretSource` 取回真值，插件收到的是明文。
+///
+/// 这是真配置的形状：配置文件里没有明文，密钥链里才有。
+#[test]
+fn apply_providers_resolves_the_secret_through_the_config_store_keychain_handle() {
+    let home = temp_home();
+    fs::create_dir_all(home.path().join(".maestro")).unwrap();
+    fs::write(
+        home.path().join(".maestro").join("config.json"),
+        r#"{
+            "version": 2,
+            "providers": {
+                "gateway": {
+                    "base_url": {"openai-completions": "https://api.example.com/v1"},
+                    "api_key": "secret://io.github.xezzon.agent-maestro/provider/gateway/api_key"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+    let (store, secrets) = store_with_secrets(home.path());
+    secrets
+        .set(
+            &SecretRef::for_provider("gateway").unwrap(),
+            "sk-from-the-keychain",
+        )
+        .unwrap();
+    let service = test_service(home.path());
+    service.startup(&store).unwrap();
+
+    let reports = service.apply_providers(&store, &store).unwrap();
+
+    let pi = plugin_outcome(&reports, "pi");
+    assert_eq!(pi.status, ProjectionStatus::Applied, "{:?}", pi.reason);
+    let raw =
+        fs::read_to_string(home.path().join(".pi").join("agent").join("models.json")).unwrap();
+    let written: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        written["providers"]["gateway"]["apiKey"], "sk-from-the-keychain",
+        "插件收到的是从密钥链取回的明文"
+    );
+    assert!(!raw.contains("secret://"), "引用 URI 不得进插件产物：{raw}");
+}
+
+/// 投影接缝（#146）：端点**插值后**为空的 Provider 本来就会被插件映射跳过，
+/// 不该被要求提供密钥——一条用不上的密钥不该把整个「应用到工具」拦下来。
+///
+/// 判据与插件映射同一条规则（空串即未配置，ADR 0015）：`${EMPTY}` 插值成空串
+/// 的端点按未配置处理，那个 Provider 被跳过。
+#[test]
+fn apply_providers_does_not_need_secrets_for_a_provider_whose_endpoint_interpolates_to_empty() {
+    use crate::provider::Protocol;
+
+    let home = temp_home();
+    let service = test_service(home.path());
+    let store = MemoryStore::new()
+        .with_providers(BTreeMap::from([(
+            "gateway".to_owned(),
+            Provider {
+                enabled: true,
+                base_url: BTreeMap::from([(Protocol::OpenaiCompletions, "${EMPTY}".to_owned())]),
+                api_key: SecretText::referenced(SecretRef::for_provider("gateway").unwrap()),
+                ..Provider::default()
+            },
+        )]))
+        .with_variables(Variables::from([("EMPTY".to_owned(), String::new())]));
+    service.startup(&store).unwrap();
+
+    // 链上什么都没有：这个 Provider 用不上密钥，缺了也不该拦住投影。
+    let secrets = MemorySecrets::new();
+
+    let reports = service.apply_providers(&store, &secrets).unwrap();
+
+    let pi = plugin_outcome(&reports, "pi");
+    assert_eq!(pi.status, ProjectionStatus::Applied, "{:?}", pi.reason);
+    assert!(
+        secrets.calls().is_empty(),
+        "被跳过的 Provider 不该去问密钥链：{:?}",
+        secrets.calls()
+    );
+    assert_eq!(pi.skipped.len(), 1, "该 Provider 按未配置端点跳过");
+    assert_eq!(pi.skipped[0].slug, "gateway");
 }
 
 /// 替身遵守它实现的那份端口契约（#141 R3）：条目不存在时 `delete_plugin`

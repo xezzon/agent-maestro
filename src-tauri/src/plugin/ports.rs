@@ -11,8 +11,9 @@ use std::collections::BTreeMap;
 
 use crate::{
     config::PluginEntry,
-    errors::{ConfigError, PluginEntryError},
+    errors::{ConfigError, PluginEntryError, SecretError},
     provider::Provider,
+    secret::SecretRef,
     variables::Variables,
 };
 
@@ -35,6 +36,21 @@ pub(crate) struct ProjectionSnapshot {
 pub(crate) trait ProviderSource {
     /// 投影输入的快照（Provider 表与变量表同源）。
     fn projection_snapshot(&self) -> Result<ProjectionSnapshot, ConfigError>;
+}
+
+/// 只读端口：按密钥引用取真值。
+///
+/// 投影前解析密钥用（#146）：插件服务只拿到「按引用取一条真值」这一件事——
+/// 拿不到密钥链的写入能力，也拿不到配置存储的锁，故读取发生在配置锁之外
+/// （投影全程不持配置锁）。
+///
+/// 「没有这一条」是正常状态（`None`）而非错误：调用方据此提示「请重新设置」；
+/// 密钥链不可用才是错误，调用方据此提示「修密钥链」。两种病因必须分得开
+/// （ADR 0002）：混同二者，要么把「后端缺席」当成「没有值」（真值被静默
+/// 吞掉），要么把「条目缺失」当成故障（每次投影都失败）。
+pub(crate) trait SecretSource {
+    /// 按引用取密钥真值；条目不存在即 `None`。
+    fn secret(&self, reference: &SecretRef) -> Result<Option<String>, SecretError>;
 }
 
 /// 插件条目端口：条目是配置文件的形状，服务层按来源读写它们。

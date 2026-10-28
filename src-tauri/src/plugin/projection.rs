@@ -14,7 +14,10 @@ use crate::{
 
 use super::{
     LoadedPlugin, PluginOutcome, PluginService, PluginState, ProjectionStatus,
-    config::read_plugin_config, execution::SkippedProvider, ports::ProviderSource,
+    config::read_plugin_config,
+    execution::SkippedProvider,
+    ports::{ProviderSource, SecretSource},
+    secrets::{self, ResolvedSecrets},
 };
 
 impl PluginService {
@@ -24,13 +27,21 @@ impl PluginService {
     /// 与写入。配置存储经端口访问（见 [`ProviderSource`]）：读完投影输入即释放，
     /// 注册表锁也仅用于快照——插件执行时长不受应用控制，执行全程不持锁，
     /// 不得阻塞其它命令。
+    ///
+    /// 投影前先解析密钥（#146）：待投影的 Provider 逐个从密钥链取回真值，
+    /// 任一取不到（条目不存在）或密钥链不可用即整体失败——不进入逐插件流程，
+    /// 绝不把引用 URI 或空值交给工具（ADR 0002）。
     pub(crate) fn apply_providers(
         &self,
         store: &impl ProviderSource,
+        secrets: &impl SecretSource,
     ) -> Result<Vec<PluginOutcome>, PluginError> {
         let snapshot = store.projection_snapshot().map_err(PluginError::from)?;
         let (providers, variables) = (snapshot.providers, snapshot.variables);
-        let reports = self.write_providers(&providers, &variables)?;
+        // 密钥解析在逐插件流程**之前**：取不到就整体失败，工具侧因此绝不会
+        // 拿到一份缺密钥的配置。
+        let secrets = secrets::resolve(&providers, &variables, secrets)?;
+        let reports = self.write_providers(&providers, &variables, &secrets)?;
         // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
         // 在此按插件各记一条（ADR 0008：服务层的投影步骤打 DEBUG，默认级别
         // 下不落盘；命令层的结果行按插件携带状态摘要）。
@@ -55,12 +66,17 @@ impl PluginService {
     /// 传入的每个 Provider 都参与投影：是否禁用由调用方先行剔除（#94 在命令层
     /// `enabled_providers` 完成），本函数不感知 `enabled`。
     ///
+    /// 凭证来自**投影前解析出的真值**（见 [`ResolvedSecrets`]）：本函数不碰
+    /// 密钥链，也不读记录里的凭证字段——引用进不了插件，只有解析出的明文
+    /// 进得去。
+    ///
     /// 插件执行时长不受应用控制：注册表锁只在快照阶段短暂持有（克隆 Arc 与
     /// 收集跳过态），wasm 实例化与调用全部在锁外进行，不阻塞其它命令。
     pub(crate) fn write_providers(
         &self,
         providers: &BTreeMap<String, Provider>,
         variables: &Variables,
+        secrets: &ResolvedSecrets,
     ) -> Result<Vec<PluginOutcome>, PluginError> {
         let (mut reports, loaded) = {
             let entries = self
@@ -87,7 +103,8 @@ impl PluginService {
 
         for (id, loaded_plugin) in loaded {
             log::debug!("projecting providers: id={id}");
-            let projected = self.project_one_plugin(&id, &loaded_plugin, providers, variables);
+            let projected =
+                self.project_one_plugin(&id, &loaded_plugin, providers, variables, secrets);
             reports.push(build_report(id, projected));
         }
         Ok(reports)
@@ -108,6 +125,7 @@ impl PluginService {
         loaded_plugin: &LoadedPlugin,
         providers: &BTreeMap<String, Provider>,
         variables: &Variables,
+        secrets: &ResolvedSecrets,
     ) -> Result<(Vec<String>, Vec<SkippedProvider>), PluginError> {
         // 按插件读取插件配置（ADR 0018）：读取或解析失败即整插件失败，不静默降级。
         let plugin_config = read_plugin_config(&self.paths.plugin_dir(id))?;
@@ -132,7 +150,7 @@ impl PluginService {
         let projected = interpolate_providers(providers, &merged).map_err(PluginError::from)?;
         let (files, skipped) = loaded_plugin
             .instantiate_component(&self.engine, form)?
-            .write_provider(&projected)?;
+            .write_provider(&projected, secrets)?;
         // 插件返回的是相对 config_dir 的路径：拼成宿主绝对路径回报给界面。
         let files = project_files(&loaded_plugin.meta.config_dir, files)?;
         Ok((files, skipped))

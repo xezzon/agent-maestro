@@ -286,6 +286,15 @@ impl Debug for Provider {
 }
 
 impl Provider {
+    /// 是否配了至少一个**非空**端点（空串与缺省同义：未配置）。
+    ///
+    /// 投影的两处用同一条规则：插件映射跳过零端点的 Provider，而密钥解析
+    /// 也只问这些 Provider 要密钥——不需要密钥的 Provider 不该因密钥问题被
+    /// 拦下。
+    pub(crate) fn has_endpoint(&self) -> bool {
+        self.base_url.values().any(|base_url| !base_url.is_empty())
+    }
+
     /// 插值（docs/GLOSSARY.md「插值」/ ADR 0015）：把自身全部字符串值里的占位符
     /// 替换为变量实际值，返回字面值副本；失败返回（字段名, 库报错）。
     ///

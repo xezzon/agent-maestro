@@ -42,6 +42,18 @@ pub(crate) enum SecretCause {
     Rejected { reason: String },
 }
 
+impl SecretError {
+    /// 失败的成因：与「哪一步失败」无关的那一维。
+    ///
+    /// 调用方据此区分两种病因：「条目不存在」（该 Provider 的密钥没配）与
+    /// 「密钥链不可用」（后端缺席）——两者要给的处置完全不同（ADR 0002）。
+    pub(crate) fn cause(&self) -> &SecretCause {
+        match self {
+            Self::Read { cause } | Self::Write { cause } | Self::Delete { cause } => cause,
+        }
+    }
+}
+
 impl Display for SecretError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

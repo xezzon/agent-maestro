@@ -175,6 +175,15 @@ pub(crate) enum PluginError {
         file: String,
     },
     Interpolation(ProviderInterpolationError),
+    /// 投影前解析密钥失败：密钥链条目不存在（该 Provider 的密钥没配或已被删）。
+    SecretMissing {
+        slug: String,
+    },
+    /// 投影前解析密钥失败：密钥链不可用，取不出真值。
+    SecretUnavailable {
+        slug: String,
+        reason: String,
+    },
 
     // ---- 端口 ----
     StoreEntry(PluginEntryError),
@@ -199,6 +208,27 @@ impl PluginError {
         Self::RemoveDirectory {
             path: path.to_path_buf(),
             detail: detail.into(),
+        }
+    }
+
+    /// 密钥链条目不存在：点名 Provider，请用户重新设置它的 API Key。
+    ///
+    /// 与「密钥链不可用」分开：前者是这一条没配（用户能自己解决），后者是
+    /// 后端缺席（用户得修环境）。混同二者，用户既不知道该做什么，工具侧也
+    /// 拿不到「缺哪一条」的提示（ADR 0002）。
+    pub(crate) fn secret_missing(slug: &str) -> Self {
+        Self::SecretMissing {
+            slug: slug.to_owned(),
+        }
+    }
+
+    /// 密钥链不可用：点名 Provider，带上平台侧的失败原因。
+    ///
+    /// 原因只描述平台侧的失败，不含密钥值（ADR 0008）。
+    pub(crate) fn secret_unavailable(slug: &str, reason: impl Into<String>) -> Self {
+        Self::SecretUnavailable {
+            slug: slug.to_owned(),
+            reason: reason.into(),
         }
     }
 }
@@ -373,6 +403,13 @@ impl Display for PluginError {
                 )
             }
             PluginError::Interpolation(error) => write!(f, "{error}"),
+            PluginError::SecretMissing { slug } => write!(
+                f,
+                "Provider「{slug}」的密钥条目不存在于系统密钥链，请重新设置该 Provider 的 API Key"
+            ),
+            PluginError::SecretUnavailable { slug, reason } => {
+                write!(f, "Provider「{slug}」的密钥无法从系统密钥链读取：{reason}")
+            }
             PluginError::StoreEntry(error) => write!(f, "{error}"),
             PluginError::StoreConfig(error) => write!(f, "{error}"),
         }

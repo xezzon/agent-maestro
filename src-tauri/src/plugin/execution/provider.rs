@@ -9,6 +9,7 @@ use super::bindings::exports::maestro::plugin::plugin::{
 };
 use crate::{
     errors::PluginError,
+    plugin::secrets::ResolvedSecrets,
     provider::{ModelCapability, ModelEntry, Protocol, Provider},
 };
 
@@ -16,8 +17,9 @@ impl InstantiatedPlugin {
     pub(crate) fn write_provider(
         &mut self,
         providers: &BTreeMap<String, Provider>,
+        secrets: &ResolvedSecrets,
     ) -> Result<(Vec<String>, Vec<SkippedProvider>), PluginError> {
-        let (wit_providers, skipped_providers) = to_wit_provider(providers);
+        let (wit_providers, skipped_providers) = to_wit_provider(providers, secrets);
         let handle = self.world.maestro_plugin_plugin();
         let result = handle
             .call_write_providers(&mut self.store, &wit_providers)
@@ -39,6 +41,7 @@ pub(crate) struct SkippedProvider {
 
 fn to_wit_provider(
     providers: &BTreeMap<String, Provider>,
+    secrets: &ResolvedSecrets,
 ) -> (Vec<WitProvider>, Vec<SkippedProvider>) {
     let mut wit_providers = Vec::new();
     let mut skipped_provider = Vec::new();
@@ -56,12 +59,10 @@ fn to_wit_provider(
             endpoints,
             // 选择原样透传，可能缺失或指向未配置的协议：由插件裁定（ADR 0016）。
             selected_protocol: provider.selected_protocol.map(to_wit_protocol),
-            // 未设置凭证即 none（见 WIT 合同）。
-            //
-            // **过渡态**：引用暂按未设置传递（#146 换成「投影前解析真值」）——
-            // 真值在密钥链里，引用 URI 绝不交给插件，否则插件会把
-            // `secret://…` 当成 API Key 用。
-            api_key: provider.api_key.plaintext().map(str::to_owned),
+            // 凭证只来自**投影前解析出的真值**（slug → 明文 / 未设置）：密钥
+            // 引用绝不以 URI 形式进插件（ADR 0002）。未设置即 `none`（WIT 合同
+            // 如此）。
+            api_key: secrets.get(slug).map(str::to_owned),
             custom_header: collect_custom_headers(provider),
             models: provider.models.iter().map(to_wit_model).collect(),
         });
@@ -143,6 +144,17 @@ mod tests {
         secret::{SecretRef, SecretText},
     };
 
+    /// 投影前解析出的密钥：插件映射拿到的就是这张表。
+    ///
+    /// 凭证**显式**给出，不从记录里的字段推导：推导会让「映射误读了记录里的
+    /// 凭证」这类回归蒙混过关——记录里是引用时，映射读到的也该是解析出的
+    /// 明文，而不是 URI。
+    fn resolved(slug: &str, secret: Option<&str>) -> ResolvedSecrets {
+        let mut secrets = ResolvedSecrets::new();
+        secrets.insert(slug.to_owned(), secret.map(str::to_owned));
+        secrets
+    }
+
     fn provider(openai: Option<&str>, anthropic: Option<&str>) -> Provider {
         let mut base_url = Endpoints::default();
         if let Some(url) = openai {
@@ -168,7 +180,7 @@ mod tests {
         provider.selected_protocol = Some(Protocol::AnthropicMessages);
         let providers = BTreeMap::from([("gateway".to_owned(), provider)]);
 
-        let (mapped, skipped) = to_wit_provider(&providers);
+        let (mapped, skipped) = to_wit_provider(&providers, &resolved("gateway", None));
 
         assert!(skipped.is_empty());
         assert_eq!(mapped.len(), 1);
@@ -201,7 +213,7 @@ mod tests {
         for (openai, anthropic) in [(None, None), (Some(""), None), (None, Some(""))] {
             let providers = BTreeMap::from([("gateway".to_owned(), provider(openai, anthropic))]);
 
-            let (mapped, skipped) = to_wit_provider(&providers);
+            let (mapped, skipped) = to_wit_provider(&providers, &resolved("gateway", None));
 
             assert!(mapped.is_empty(), "{openai:?} / {anthropic:?}");
             assert_eq!(skipped.len(), 1);
@@ -237,7 +249,7 @@ mod tests {
             },
         )]);
 
-        let (mapped, _) = to_wit_provider(&providers);
+        let (mapped, _) = to_wit_provider(&providers, &resolved("gateway", Some("sk-plain")));
 
         assert_eq!(mapped.len(), 1);
         assert_eq!(mapped[0].slug, "gateway");
@@ -258,14 +270,13 @@ mod tests {
         assert_eq!(mapped[0].models[1].display_name, None);
     }
 
-    /// 过渡态（#146 替换此行为）：**引用**按未设置传递，引用 URI 绝不进
-    /// 投影输入——插件会把 `secret://…` 当成 API Key 用。
+    /// 投影前解析出的真值进插件（#146）：密钥引用在配置里，插件收到的是从
+    /// 密钥链取回的**明文**——引用 URI 绝不进插件，否则插件会把
+    /// `secret://…` 当成 API Key 用。
     ///
-    /// 真值在密钥链里，投影前解析那一步还没做（#146）。故此刻引用等于「没有
-    /// 凭证」：宁可插件拿不到凭证，也不能让它拿到一个 URI 当凭证使。
-    /// 明文与未设置的行为不变。
+    /// 真值与 URI 二者只能有一个进插件：这里断言进插件的是明文。
     #[test]
-    fn a_reference_is_projected_as_unset_and_never_as_its_uri() {
+    fn a_resolved_secret_is_projected_as_the_plaintext_and_never_as_its_uri() {
         let providers = BTreeMap::from([(
             "gateway".to_owned(),
             Provider {
@@ -277,11 +288,15 @@ mod tests {
                 ..Provider::default()
             },
         )]);
-
-        let (mapped, _) = to_wit_provider(&providers);
+        // 解析结果：投影前从密钥链取回的明文。
+        let (mapped, _) = to_wit_provider(&providers, &resolved("gateway", Some("sk-resolved")));
 
         assert_eq!(mapped.len(), 1);
-        assert_eq!(mapped[0].api_key, None, "引用暂按未设置传递");
+        assert_eq!(
+            mapped[0].api_key.as_deref(),
+            Some("sk-resolved"),
+            "插件收到的是解析出的明文"
+        );
         let rendered = format!("{:?}", mapped[0].api_key);
         assert!(
             !rendered.contains("secret://"),
@@ -304,7 +319,7 @@ mod tests {
             },
         )]);
 
-        let (mapped, _) = to_wit_provider(&providers);
+        let (mapped, _) = to_wit_provider(&providers, &resolved("gateway", None));
 
         let headers: Vec<(&str, &str)> = mapped[0]
             .custom_header
@@ -320,10 +335,13 @@ mod tests {
             ]
         );
 
-        let (unset, _) = to_wit_provider(&BTreeMap::from([(
-            "gateway".to_owned(),
-            provider(Some("https://api.example.com/v1"), None),
-        )]));
+        let (unset, _) = to_wit_provider(
+            &BTreeMap::from([(
+                "gateway".to_owned(),
+                provider(Some("https://api.example.com/v1"), None),
+            )]),
+            &resolved("gateway", None),
+        );
         assert!(unset[0].custom_header.is_empty(), "未设置即空列表");
     }
 
@@ -376,11 +394,12 @@ mod tests {
     fn write_and_read(
         root: &std::path::Path,
         providers: &BTreeMap<String, Provider>,
+        secrets: &ResolvedSecrets,
     ) -> serde_json::Value {
         let (plugin, config_dir) = loaded_plugin(root, builtin::PI_WASM);
         let mut plugin = plugin.instantiate_component(&build_engine(), None).unwrap();
 
-        let (files, _) = plugin.write_provider(providers).unwrap();
+        let (files, _) = plugin.write_provider(providers, secrets).unwrap();
 
         assert_eq!(files, vec!["agent/models.json"]);
         serde_json::from_str(
@@ -400,7 +419,11 @@ mod tests {
             },
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(
+            root.path(),
+            &providers,
+            &resolved("gateway", Some("sk-plain")),
+        );
 
         assert_eq!(written["providers"]["gateway"]["api"], "openai-completions");
         assert_eq!(
@@ -425,7 +448,7 @@ mod tests {
             },
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(root.path(), &providers, &resolved("gateway", None));
 
         assert_eq!(written["providers"]["gateway"]["api"], "anthropic-messages");
         assert_eq!(
@@ -447,7 +470,7 @@ mod tests {
             ),
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(root.path(), &providers, &resolved("gateway", None));
 
         assert_eq!(written["providers"]["gateway"]["api"], "openai-completions");
         assert_eq!(
@@ -469,7 +492,7 @@ mod tests {
             },
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(root.path(), &providers, &resolved("gateway", None));
 
         assert_eq!(written["providers"]["gateway"]["api"], "anthropic-messages");
         assert_eq!(
@@ -504,7 +527,11 @@ mod tests {
             },
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(
+            root.path(),
+            &providers,
+            &resolved("gateway", Some("sk-plain")),
+        );
 
         assert_eq!(written["providers"]["gateway"]["api"], "openai-completions");
         assert_eq!(
@@ -544,7 +571,7 @@ mod tests {
             "$FOO"
         );
 
-        let written = write_and_read(root.path(), &interpolated);
+        let written = write_and_read(root.path(), &interpolated, &resolved("gateway", None));
 
         assert_eq!(
             written["providers"]["gateway"]["headers"]["X-Gateway-Key"],
@@ -565,7 +592,7 @@ mod tests {
             provider(Some("https://api.example.com/v1"), None),
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(root.path(), &providers, &resolved("gateway", None));
 
         assert!(written["providers"]["gateway"].get("headers").is_none());
     }
@@ -587,7 +614,7 @@ mod tests {
             },
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(root.path(), &providers, &resolved("gateway", Some("a$b")));
 
         assert_eq!(written["providers"]["gateway"]["apiKey"], "a$$b");
         assert_eq!(written["providers"]["gateway"]["headers"]["X-Mid"], "a$$b");
@@ -648,7 +675,7 @@ mod tests {
             },
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(root.path(), &providers, &resolved("gateway", None));
 
         let models = &written["providers"]["gateway"]["models"];
         assert_eq!(
@@ -696,7 +723,7 @@ mod tests {
             },
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(root.path(), &providers, &resolved("gateway", None));
 
         let model = &written["providers"]["gateway"]["models"][0];
         assert_eq!(keys(model), vec!["id"], "未设置即省略：{model}");
@@ -727,7 +754,7 @@ mod tests {
             },
         )]);
 
-        let written = write_and_read(root.path(), &providers);
+        let written = write_and_read(root.path(), &providers, &resolved("gateway", None));
 
         // 三项上限都是 0：全部跳过；能力不受影响，照常投影。
         let model = &written["providers"]["zero-limit-gateway"]["models"][0];
