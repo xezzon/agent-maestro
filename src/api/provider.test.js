@@ -465,12 +465,16 @@ describe("listProviders", () => {
 
   it("视图里既没有凭证值也没有引用：单向写入", async () => {
     invokeMock.mockResolvedValue({
-      acme: makeRecord({ api_key_state: "set" }),
+      acme: makeRecord({ api_key_state: "set", api_key: "sk-canary-7d1f" }),
     });
 
     const [provider] = await listProviders();
 
     expect(provider, "没有 api_key 字段").not.toHaveProperty("api_key");
+    expect(
+      JSON.stringify(provider),
+      "凭证值不得出现在视图的任何字段",
+    ).not.toContain("sk-canary-7d1f");
     expect(provider, "没有旧的只读标记").not.toHaveProperty("api_key_set");
   });
 });

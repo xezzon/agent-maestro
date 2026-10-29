@@ -449,7 +449,7 @@ mod tests {
 
         assert!(
             matches!(error, ProviderError::UnexpectedSecretReference { .. }),
-            "{error:?}"
+            "新建路径不接受任何密钥引用"
         );
     }
 

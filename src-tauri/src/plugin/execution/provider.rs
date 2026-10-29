@@ -297,10 +297,14 @@ mod tests {
             Some("sk-resolved"),
             "插件收到的是解析出的明文"
         );
-        let rendered = format!("{:?}", mapped[0].api_key);
+        // 断言只看真假、不渲染值：失败时的断言输出同样不得带出明文（ADR 0008）。
         assert!(
-            !rendered.contains("secret://"),
-            "引用 URI 不得出现在投影输入里：{rendered}"
+            !mapped[0]
+                .api_key
+                .as_deref()
+                .unwrap_or_default()
+                .contains("secret://"),
+            "引用 URI 不得出现在投影输入里"
         );
     }
 

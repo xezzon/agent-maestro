@@ -931,8 +931,8 @@ fn set_variables_to_empty_clears_the_table() {
 /// L1 红线（ADR 0008）：Config 的派生 Debug 内层调用 Provider 的手工 Debug，
 /// 嵌套渲染同样不得携带 api_key 明文。
 ///
-/// 用旧配置（明文仍在文件里）来验：迁移期内存里确实可能攥着明文，
-/// 脱敏正是那时唯一的防线。
+/// 启动迁移成功后配置里只剩引用：本用例钉住引用形态下的脱敏；明文形态
+/// （迁移失败、明文仍留在配置里）由下一条用例覆盖。
 #[test]
 fn config_debug_output_never_contains_the_api_key() {
     let fixture = Fixture::new();
@@ -946,10 +946,50 @@ fn config_debug_output_never_contains_the_api_key() {
     );
     let store = fixture.store();
 
+    assert!(
+        store.get().unwrap().providers["openrouter"]
+            .api_key
+            .reference()
+            .is_some(),
+        "前提：启动迁移已把明文换成引用"
+    );
     let rendered = format!("{:?}", store.get().unwrap());
 
     assert!(
         !rendered.contains("sk-config-canary-4b7e"),
+        "Config 的 Debug 输出不得包含 api_key：{rendered}"
+    );
+}
+
+/// 密钥链写入失败时迁移保留明文：这时内存里确实攥着明文，Debug 脱敏是那
+/// 时唯一的防线（ADR 0008）。
+#[test]
+fn config_debug_output_never_contains_plaintext_when_the_migration_write_fails() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": {
+                "openrouter": { "api_key": "sk-config-canary-plain" }
+            }
+        }"#,
+    );
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Write, unavailable(SecretOp::Write));
+    let store = fixture.store();
+
+    assert_eq!(
+        store.get().unwrap().providers["openrouter"]
+            .api_key
+            .plaintext(),
+        Some("sk-config-canary-plain"),
+        "前提：写入失败，明文仍留在配置里"
+    );
+    let rendered = format!("{:?}", store.get().unwrap());
+
+    assert!(
+        !rendered.contains("sk-config-canary-plain"),
         "Config 的 Debug 输出不得包含 api_key：{rendered}"
     );
 }
@@ -2226,6 +2266,77 @@ fn a_config_with_a_reference_is_written_as_v2() {
     let text = config_text(&fixture);
     assert!(text.contains(r#""version": 2"#), "出现引用即写 v2：{text}");
     assert!(!text.contains("sk-legacy"), "旧明文被引用取代：{text}");
+}
+
+/// 版本号对齐不依赖迁移：v1 文件里已经有引用（旧版回滚或手改写出）时，
+/// 加载即把它改成 v2——否则旧版 Maestro 会把引用当成 API Key 投影出去。
+#[test]
+fn a_v1_document_that_already_holds_a_reference_is_promoted_to_v2_on_load() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": {
+                "ollama": {
+                    "api_key": "secret://io.github.xezzon.agent-maestro/provider/ollama/api_key"
+                }
+            }
+        }"#,
+    );
+
+    let _store = fixture.store();
+
+    let text = config_text(&fixture);
+    assert!(
+        text.contains(r#""version": 2"#),
+        "含引用的 v1 在加载时升为 v2：{text}"
+    );
+    assert!(text.contains("secret://"), "引用原样保留：{text}");
+}
+
+/// 首次写入引用即写 v2：从「无明文、无存量条目」起步——否则启动迁移会
+/// 先把文件写成 v2，这条断言就失去鉴别力。
+#[test]
+fn a_first_reference_write_is_persisted_as_v2() {
+    let fixture = Fixture::new();
+    fixture.write_config(r#"{ "version": 1, "providers": {} }"#);
+    let mut store = fixture.store();
+
+    store
+        .create_provider(
+            "ollama",
+            ProviderWrite::overwrite(Provider::default(), "sk-new".to_owned()),
+        )
+        .unwrap();
+
+    let text = config_text(&fixture);
+    assert!(
+        text.contains(r#""version": 2"#),
+        "首次写入引用即写 v2：{text}"
+    );
+}
+
+/// 非法 slug 在创建时即拒绝：造不出规范引用的 slug 没有地方放真值，这条
+/// 记录此后永远设不了密钥。与本次是否带凭证无关。
+#[test]
+fn create_provider_rejects_a_slug_that_cannot_hold_a_key() {
+    let fixture = Fixture::new();
+    let mut store = fixture.store();
+
+    for slug in ["", "OpenRouter", "2fast", "open router", "open/router"] {
+        let error = store
+            .create_provider(slug, ProviderWrite::unchanged(Provider::default()))
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ProviderError::InvalidSlug { .. }),
+            "slug={slug} 应被拒绝：{error:?}"
+        );
+    }
+    assert!(
+        store.providers_snapshot().unwrap().is_empty(),
+        "被拒绝的 slug 一条都不该落进配置"
+    );
 }
 
 /// 版本号永不回退：已是 v2 的配置不会因为引用被清掉而退回 v1。

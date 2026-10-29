@@ -40,7 +40,7 @@ use crate::{
     config::{CONFIG_VERSION, Change, Config, MIN_CONFIG_VERSION, PluginEntry},
     errors::{ConfigError, LockPoisoned, PluginEntryError, ProviderError, VariableError},
     provider::{ApiKeyIntent, Provider, ProviderWrite},
-    secret::{SecretStore, SecretText},
+    secret::{SecretRef, SecretStore, SecretText},
     variables::Variables,
 };
 
@@ -102,6 +102,11 @@ impl Store {
     /// 密钥链的条目**不回收**——惰性残余，同 slug 下次写入时即被覆盖
     /// （ADR 0002 接受的风险）。
     ///
+    /// 迁移之外还要对一次版本号：v1 文件里若已经有引用（旧版回滚或手改
+    /// 写出），本次无明文可迁，但含引用的文档必须自报 v2（见
+    /// [`crate::config::persist_version`]），故这时也落盘——否则旧版
+    /// Maestro 会把引用当成 API Key 投影出去。
+    ///
     /// 走 [`Store::mutate`] 这条唯一的配置写路径：它「落盘失败即不改状态」
     /// 的语义正是迁移要的回滚。
     fn migrate_plaintext_secrets(&mut self) {
@@ -121,8 +126,9 @@ impl Store {
                 );
             }
             migrated_slugs = migration.migrated_slugs;
-            if migrated_slugs.is_empty() {
-                // 一个都没迁成：配置一个字都没动，不必落盘。
+            let stale_version = config.version != crate::config::persist_version(config);
+            if migrated_slugs.is_empty() && !stale_version {
+                // 一字未动、版本也相符：不必落盘。
                 Ok(Change::Unchanged(()))
             } else {
                 Ok(Change::Changed(()))
@@ -235,6 +241,11 @@ impl Store {
 
     /// 新建一条 Provider（slug 唯一），成功后原子写回磁盘。
     ///
+    /// slug 在入口处就按密钥引用的规范校验（见 [`SecretRef::for_provider`]）：
+    /// 造不出规范引用的 slug 没有地方放真值，这条记录此后永远设不了密钥
+    /// （界面也校验，这里是后端边界的同一句规则）。所有新建都过这道关——与
+    /// 本次是否带凭证无关。
+    ///
     /// 凭证按三态契约落到密钥链（见 [`ApiKeyIntent`]）：缺省与清除都落成
     /// 未设置，覆盖则**先写密钥链、再落引用**。落盘前对当前变量表插值一次：
     /// 占位符引用必须可解析（变量已定义，或带内联默认值），语法错误同样
@@ -245,6 +256,7 @@ impl Store {
         write: ProviderWrite,
     ) -> Result<(), ProviderError> {
         let next = self.get().map_err(ProviderError::from)?.clone();
+        SecretRef::for_provider(slug).map_err(|_| ProviderError::invalid_slug(slug))?;
         if next.providers.contains_key(slug) {
             return Err(ProviderError::duplicate_slug(slug));
         }
