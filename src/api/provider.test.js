@@ -3,9 +3,11 @@ import {
   ANTHROPIC_MESSAGES,
   OPENAI_COMPLETIONS,
   configuredProtocols,
+  initialApiKeyDraft,
   listProviders,
   normalizeEndpoints,
   normalizeModel,
+  resolveApiKeyAction,
   toProviderPayload,
 } from "./provider.js";
 
@@ -15,7 +17,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 /**
  * 构造一条 Provider 视图（界面形态）：未显式给出的字段取空形态，
- * 让每个用例只写自己关心的那部分输入。`api_key_set` 是读取路径生成的
+ * 让每个用例只写自己关心的那部分输入。`api_key_state` 是读取路径生成的
  * 只读字段，视图里恒存在（写入负载不得携带它）。
  * @param {Partial<import("./provider.js").Provider>} overrides
  */
@@ -27,21 +29,21 @@ function makeProvider(overrides = {}) {
     selected_protocol: null,
     custom_header: [],
     models: [],
-    api_key_set: false,
+    api_key_state: "unset",
     ...overrides,
   };
 }
 
 /**
  * 构造一条后端记录（`list_providers` 的返回形态）。
- * @param {Partial<import("./provider.js").ProviderRequest>} overrides
+ * @param {Partial<import("./provider.js").ProviderRecord>} overrides
  */
 function makeRecord(overrides = {}) {
   return {
     enabled: true,
     base_url: {},
     selected_protocol: null,
-    api_key: "",
+    api_key_state: "unset",
     custom_header: {},
     models: [],
     ...overrides,
@@ -263,23 +265,23 @@ describe("toProviderPayload", () => {
     ]);
   });
 
-  it("api_key_and_enabled_state_are_passed_through_verbatim", () => {
-    const payload = toProviderPayload(
-      makeProvider({ enabled: false, api_key: "sk-test" }),
-    );
+  it("enabled_state_is_passed_through_verbatim", () => {
+    const payload = toProviderPayload(makeProvider({ enabled: false }), {
+      kind: "keep",
+    });
 
-    expect(payload.api_key, "凭证随整包回传").toBe("sk-test");
     expect(payload.enabled, "启用状态随整包回传").toBe(false);
   });
 
   it("payload_carries_only_the_write_fields", () => {
-    const payload = toProviderPayload(makeProvider({ api_key_set: true }));
+    const payload = toProviderPayload(makeProvider({ api_key_state: "set" }), {
+      kind: "keep",
+    });
 
     expect(
       Object.keys(payload).sort(),
       "写入负载的字段集合固定，视图专用字段不越界",
     ).toStrictEqual([
-      "api_key",
       "base_url",
       "custom_header",
       "enabled",
@@ -288,8 +290,117 @@ describe("toProviderPayload", () => {
       "slug",
     ]);
     expect(payload, "只读视图字段不进写入负载").not.toHaveProperty(
-      "api_key_set",
+      "api_key_state",
     );
+  });
+});
+
+describe("toProviderPayload 的密钥动作", () => {
+  it("keep 的负载不带 api_key 字段：后端按「不变」处理", () => {
+    const payload = toProviderPayload(makeProvider(), { kind: "keep" });
+
+    expect(payload, "没动密钥就不带这个字段").not.toHaveProperty("api_key");
+  });
+
+  it("clear 的负载带空串：后端按「清除」处理", () => {
+    const payload = toProviderPayload(makeProvider(), { kind: "clear" });
+
+    expect(payload.api_key, "清除即空串").toBe("");
+  });
+
+  it("set 的负载带新值：后端按「覆盖」处理", () => {
+    const payload = toProviderPayload(makeProvider(), {
+      kind: "set",
+      value: "sk-new",
+    });
+
+    expect(payload.api_key, "覆盖即新值").toBe("sk-new");
+  });
+
+  it("永不把引用当新值回传：负载里的凭证只来自用户此刻输入的值", () => {
+    const payload = toProviderPayload(makeProvider(), {
+      kind: "set",
+      value: "sk-new",
+    });
+
+    expect(
+      payload.api_key,
+      "引用不是新值：视图里压根没有引用，前端也就无从回传它",
+    ).toBe("sk-new");
+  });
+});
+
+describe("initialApiKeyDraft", () => {
+  it("未设置态直接摆出输入框", () => {
+    expect(initialApiKeyDraft("unset"), "未设置态没有旧值可清").toStrictEqual({
+      value: "",
+    });
+  });
+
+  it("已设置 / 明文态先收着：点「更换 API Key」才展开", () => {
+    expect(initialApiKeyDraft("set")).toBeNull();
+    expect(initialApiKeyDraft("plaintext")).toBeNull();
+  });
+});
+
+describe("resolveApiKeyAction", () => {
+  it("未展开输入框 = 不碰密钥", () => {
+    expect(resolveApiKeyAction("set", null), "已设置态未展开").toStrictEqual({
+      kind: "keep",
+    });
+    expect(
+      resolveApiKeyAction("plaintext", null),
+      "明文态未展开",
+    ).toStrictEqual({
+      kind: "keep",
+    });
+  });
+
+  it("未设置态留空 = 不碰密钥", () => {
+    expect(
+      resolveApiKeyAction("unset", { value: "" }),
+      "未设置态没有旧值可清，留空即什么都不做",
+    ).toStrictEqual({ kind: "keep" });
+  });
+
+  it("已设置态展开后留空 = 清除", () => {
+    expect(
+      resolveApiKeyAction("set", { value: "" }),
+      "展开后留空即清除",
+    ).toStrictEqual({
+      kind: "clear",
+    });
+    expect(
+      resolveApiKeyAction("plaintext", { value: "" }),
+      "明文态同样可清除",
+    ).toStrictEqual({ kind: "clear" });
+  });
+
+  it("有值 = 覆盖", () => {
+    expect(resolveApiKeyAction("unset", { value: "sk-x" })).toStrictEqual({
+      kind: "set",
+      value: "sk-x",
+    });
+    expect(resolveApiKeyAction("set", { value: "sk-x" })).toStrictEqual({
+      kind: "set",
+      value: "sk-x",
+    });
+  });
+
+  it("只有空白等同于留空：不会把空格当成新密钥覆盖上去", () => {
+    expect(resolveApiKeyAction("set", { value: "   " })).toStrictEqual({
+      kind: "clear",
+    });
+    expect(resolveApiKeyAction("unset", { value: "   " })).toStrictEqual({
+      kind: "keep",
+    });
+  });
+
+  it("新值去掉首尾空白", () => {
+    expect(resolveApiKeyAction("unset", { value: " sk-x " })).toStrictEqual({
+      kind: "set",
+      value: "sk-x",
+    });
   });
 });
 
@@ -335,10 +446,11 @@ describe("listProviders", () => {
     ).toStrictEqual(["X-Alpha", "X-Zeta", "X_Alpha", "x-Alpha"]);
   });
 
-  it("api_key_set_marks_whether_a_credential_is_configured", async () => {
+  it("api_key_state_tells_the_three_states_apart", async () => {
     invokeMock.mockResolvedValue({
-      withKey: makeRecord({ api_key: "sk-test" }),
-      withoutKey: makeRecord(),
+      withKey: makeRecord({ api_key_state: "set" }),
+      withoutKey: makeRecord({ api_key_state: "unset" }),
+      legacy: makeRecord({ api_key_state: "plaintext" }),
     });
 
     const providers = await listProviders();
@@ -346,8 +458,24 @@ describe("listProviders", () => {
       providers.map((provider) => [provider.slug, provider]),
     );
 
-    expect(bySlug.withKey.api_key_set, "已配凭证").toBe(true);
-    expect(bySlug.withoutKey.api_key_set, "未配凭证").toBe(false);
+    expect(bySlug.withKey.api_key_state, "真值在密钥链里").toBe("set");
+    expect(bySlug.withoutKey.api_key_state, "没有凭证").toBe("unset");
+    expect(bySlug.legacy.api_key_state, "真值仍在配置文件里").toBe("plaintext");
+  });
+
+  it("视图里既没有凭证值也没有引用：单向写入", async () => {
+    invokeMock.mockResolvedValue({
+      acme: makeRecord({ api_key_state: "set", api_key: "sk-canary-7d1f" }),
+    });
+
+    const [provider] = await listProviders();
+
+    expect(provider, "没有 api_key 字段").not.toHaveProperty("api_key");
+    expect(
+      JSON.stringify(provider),
+      "凭证值不得出现在视图的任何字段",
+    ).not.toContain("sk-canary-7d1f");
+    expect(provider, "没有旧的只读标记").not.toHaveProperty("api_key_set");
   });
 });
 

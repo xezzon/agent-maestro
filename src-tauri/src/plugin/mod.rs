@@ -14,6 +14,7 @@
 //! 行为按职责拆在同级子模块：
 //! - [`install`]：获取、落位、启停、移除与重新加载；
 //! - [`projection`]：Provider 投影与文件路径拼接；
+//! - [`secrets`]：投影前解析出的密钥（slug → 明文 / 未设置）；
 //! - [`config`]：插件配置（`config.json`）读写；
 //! - [`source`]：插件来源与 https 地址的判定；
 //! - [`manifest`]：manifest 的解析、校验与 `config_dir` 声明语法；
@@ -27,6 +28,7 @@ mod install;
 mod manifest;
 pub(crate) mod ports;
 mod projection;
+mod secrets;
 mod source;
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ The frontend mirrors `console.*` into the same file (`log`→trace and `debug`�
 
 Commands are thin shells: pass parameters, call the store, and return the raw domain structure (e.g. `providers` keyed by slug). Type mapping to UI view models happens in the frontend (JS), not in Rust.
 
-One exception: the plugin registry and the projection report are wire-format contracts owned by the command layer (`command/plugin.rs` — `PluginView` / `PluginApplyReport` / `ApplyStatus`). Their shape (`config_dir`, `settings_schema`, `error`, the per-plugin status words) exists for the UI, so it lives with the delivery layer; the plugin service returns its own internal shapes (`PluginRecord` / `PluginOutcome` / `ProjectionStatus`) and the command layer maps them.
+One exception: the plugin registry, the projection report and the provider list are wire-format contracts owned by the command layer (`command/plugin.rs` — `PluginView` / `PluginApplyReport` / `ApplyStatus`; `command/provider.rs` — `ProviderView` / `ApiKeyState`). Their shape (`config_dir`, `settings_schema`, `error`, the per-plugin status words, the credential's `api_key_state`) exists for the UI, so it lives with the delivery layer; the plugin service and the store return their own internal shapes (`PluginRecord` / `PluginOutcome` / `ProjectionStatus` / `Provider`) and the command layer maps them.
 
 ### Frontend imports
 

@@ -15,10 +15,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{provider::Provider, variables::Variables};
 
-/// 配置文件 schema 版本（见 ADR 0001）。
-pub(crate) const CONFIG_VERSION: u32 = 1;
+/// 配置文件 schema 版本（见 ADR 0001、ADR 0002）。
+///
+/// v2 是「配置只留引用」的版本：真值在系统密钥链里，配置文件里只保存
+/// `secret://` 引用。旧版 Maestro（≤0.5.x）不认识 v2，撞上即进保护态。
+pub(crate) const CONFIG_VERSION: u32 = 2;
 
-/// `~/.maestro/config.json` 的顶层文档（version 1 schema）。
+/// 仍受支持的最低配置版本。
+///
+/// v1 的旧配置照常打开：它的 `api_key` 还是明文，启动时的一次性迁移把它
+/// 换进密钥链（#147）；迁移失败者仍以明文工作，下次启动再试。
+pub(crate) const MIN_CONFIG_VERSION: u32 = 1;
+
+/// `~/.maestro/config.json` 的顶层文档（version 2 schema）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Config {
     pub(crate) version: u32,
@@ -40,6 +49,29 @@ impl Default for Config {
             variables: Variables::new(),
             plugins: Vec::new(),
         }
+    }
+}
+
+/// 落盘版本：内容里出现引用即 v2；否则保留当前版本（v1 暂留 v1）。
+///
+/// 规则只有一条，但两头都要顾：
+///
+/// - **出现引用即 v2**：旧版 Maestro 见到 `secret://` 会当成 API Key 投影出去，
+///   故含引用的配置必须自报 v2，让旧版进保护态而不是误用；
+/// - **版本号永不回退**：已是 v2 的配置不会因为引用被清掉而退回 v1——退回即
+///   让旧版 Maestro 又能打开它。
+///
+/// 全部仍是明文的 v1 暂留 v1：迁移（#147）失败时明文配置照常工作，
+/// 不必为了版本号把它改写成 v2（那会让旧版 Maestro 直接进保护态）。
+pub(crate) fn persist_version(config: &Config) -> u32 {
+    let has_reference = config
+        .providers
+        .values()
+        .any(|provider| provider.api_key.reference().is_some());
+    if has_reference {
+        CONFIG_VERSION
+    } else {
+        config.version.max(MIN_CONFIG_VERSION)
     }
 }
 

@@ -9,8 +9,9 @@
 
 use crate::{
     config::PluginEntry,
-    errors::{ConfigError, PluginEntryError},
-    plugin::ports::{PluginEntries, PluginStore, ProjectionSnapshot, ProviderSource},
+    errors::{ConfigError, PluginEntryError, SecretError},
+    plugin::ports::{PluginEntries, PluginStore, ProjectionSnapshot, ProviderSource, SecretSource},
+    secret::SecretRef,
     variables::Variables,
 };
 
@@ -25,6 +26,16 @@ impl ProviderSource for AppStore {
                 variables: store.variables_snapshot()?,
             })
         })
+    }
+}
+
+impl SecretSource for AppStore {
+    /// 按引用取密钥真值；条目不存在即 `None`。
+    ///
+    /// 读取**不持配置锁**：密钥链后端的延迟不占着配置的读锁，投影全程也不
+    /// 持配置锁（#146）。
+    fn secret(&self, reference: &SecretRef) -> Result<Option<String>, SecretError> {
+        self.secrets.get(reference)
     }
 }
 

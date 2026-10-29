@@ -8,7 +8,7 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 
 ## 功能
 
-- **统一管理 Provider 和模型**：集中维护模型 Provider、模型与 API Key，并投影到各 harness。一个 Provider 可对 `openai-completions` 与 `anthropic-messages` 两种协议各持一个 Base URL 端点，投影时按所选协议取用；Provider 可逐条启用或禁用，禁用后不参与投影。API Key 以明文保存在本地配置文件 `~/.maestro/config.json` 中，**仅存储在本地，不会上传到任何服务器**。
+- **统一管理 Provider 和模型**：集中维护模型 Provider、模型与 API Key，并投影到各 harness。一个 Provider 可对 `openai-completions` 与 `anthropic-messages` 两种协议各持一个 Base URL 端点，投影时按所选协议取用；Provider 可逐条启用或禁用，禁用后不参与投影。API Key 的真值保存在系统密钥链（macOS Keychain / Windows Credential Manager / Linux Secret Service），本地配置文件 `~/.maestro/config.json` 里只留一条引用，**仅存储在本地，不会上传到任何服务器**。密钥链不可用时启动迁移会失败，此时密钥仍以明文留在配置文件里，界面标记为「明文待迁移」，下次启动重试。
 - **全局变量与插值**：在全局配置中定义具名变量并给出默认值，配置值里用占位符 `${NAME}`、`$NAME`、`${NAME:default}` 引用；投影时由 Maestro 完成一次插值，插件只看到替换后的字面值。
 - **插件化适配 harness**：每类工具由一个 WASM 组件插件适配；内置插件（Pi、Claude Code）随应用分发，其余插件可经 https 来源（正式发布渠道）或本机 file 来源（本地调试）安装、更新、启停与移除。
 - **投影写入工具配置**：把 Maestro 中的配置写入各工具自己的配置文件，是「配置一次、处处生效」的落地环节。配置以 Maestro 为准。
@@ -33,6 +33,7 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 
 - **配置以 Maestro 为准**：请始终在 Maestro 中修改配置后重新投影。直接在 harness 里手动改动的配置不会被 Maestro 读取，下次投影时可能被覆盖。
 - **日志仅存本地**：运行日志写入 `~/.maestro/logs/agent-maestro.log`（按 1 MiB 轮转，保留 15 份归档，总占用约 16 MiB 封顶），报障时可直接提供该目录下的文件；日志中绝不包含 API Key。需要更详细的日志时，以环境变量 `MAESTRO_LOG_LEVEL`（`error|warn|info|debug|trace`，默认 `info`）启动应用。
+- **API Key 只进系统密钥链**：真值不落在配置文件里（迁移失败的旧配置除外，见上），界面也只显示「已设置 / 未设置」，永不回显密钥。密钥链不可用时（如 headless Linux 没有 Secret Service）保存会如实报错，配置保持原样。
 - 对各 harness 的适配由插件（Plugin）提供：内置插件（Pi、Claude Code）；OpenCode、Kimi Code 插件见 [agent-maestro-plugins](https://github.com/xezzon/agent-maestro-plugins)。
 
 ## 插件开发
@@ -53,7 +54,7 @@ Agent Maestro 是一个跨平台桌面应用，用于统一管理 [Pi](https://p
 
 - [ ] MCP Server 的录入与投影
 - [ ] 配置跨设备同步（WebDAV / Git）
-- [ ] 将 API Key 保存到系统密钥链
+- [x] 将 API Key 保存到系统密钥链
 - [ ] 维护 Provider 数据库并在线获取模型列表
 - [ ] 更多 harness 适配（Zed、DeepSeek Harness 等）
 - [ ] 以 CLI 的方式使用 agent-maestro

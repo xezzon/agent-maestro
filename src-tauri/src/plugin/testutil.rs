@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     path::Path,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
 };
 
 pub(super) use super::fetch::testutil::{LockProbeFetcher, StubFetcher};
@@ -11,14 +11,15 @@ pub(super) use super::manifest::testutil::manifest_json;
 use super::{
     PluginService,
     fetch::Fetcher,
-    ports::{PluginEntries, PluginStore, ProjectionSnapshot, ProviderSource},
+    ports::{PluginEntries, PluginStore, ProjectionSnapshot, ProviderSource, SecretSource},
 };
 use crate::{
     config::{Config, PluginEntry},
-    errors::{ConfigError, PluginEntryError},
+    errors::{ConfigError, PluginEntryError, SecretError},
     paths::Paths,
     provider::Provider,
-    store::{AppStore, Store},
+    secret::{MemorySecrets, SecretRef, SecretStore},
+    store::AppStore,
     testutil::setup_paths,
     variables::Variables,
 };
@@ -41,8 +42,28 @@ pub(super) fn fetcher_service(home: &Path, fetcher: Arc<dyn Fetcher>) -> PluginS
 
 pub(crate) fn store_at(home: &Path) -> AppStore {
     setup_paths(home);
-    AppStore {
-        store: RwLock::new(Store::new(Paths::from_home(home).config_path())),
+    // 配置存储一律经夹具构造：密钥链注入只有这一处做法（见 `store::testutil`）。
+    let fixture = crate::store::testutil::Fixture::at(home);
+    AppStore::new(fixture.store(), fixture.secrets().clone())
+}
+
+/// 配置存储 + 它那份内存密钥链：测试要预设条目或断言调用记录时用。
+///
+/// 两者必须成对拿：存储与密钥链句柄指向同一个内存替身，预设的条目才真的
+/// 在存储读得到的地方。
+pub(crate) fn store_with_secrets(home: &Path) -> (AppStore, Arc<MemorySecrets>) {
+    setup_paths(home);
+    let fixture = crate::store::testutil::Fixture::at(home);
+    let secrets = fixture.secrets().clone();
+    (AppStore::new(fixture.store(), secrets.clone()), secrets)
+}
+
+/// 内存密钥链同时充当 `SecretSource` 假实现：投影前解析密钥只需「按引用取
+/// 一条真值」，内存替身正好有这个能力（可预置条目、可脚本化失败、可断言
+/// 调用记录）。
+impl SecretSource for MemorySecrets {
+    fn secret(&self, reference: &SecretRef) -> Result<Option<String>, SecretError> {
+        self.get(reference)
     }
 }
 

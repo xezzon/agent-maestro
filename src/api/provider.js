@@ -37,24 +37,55 @@
  * @property {string} value
  */
 /**
- * 后端 `list_providers` 返回的记录形态：`api_key` 为明文凭证，
- * 空串即未设置；第一期凭证随配置文件落盘，不做密钥链（ADR 0002 推迟采纳）。
+ * 凭证状态的三态（线格式契约，与后端 `ApiKeyState` 一一对应）：
+ * - `unset`：没有凭证；
+ * - `set`：真值在系统密钥链里，配置文件只留引用；
+ * - `plaintext`：真值仍在配置文件里（启动迁移未成功，待迁移）。
+ * @typedef {'unset' | 'set' | 'plaintext'} ApiKeyState
+ */
+/**
+ * 密钥动作：本次保存对 API Key 做了什么。
+ * - `keep`：不碰密钥（负载不带 `api_key` 字段，后端按「不变」处理）；
+ * - `clear`：清除（负载带 `api_key: ""`）；
+ * - `set`：覆盖（负载带 `api_key: 新值`）。
+ * @typedef {{kind: 'keep'} | {kind: 'clear'} | {kind: 'set', value: string}} ApiKeyAction
+ */
+/**
+ * 表单里的密钥草稿（组件本地状态，不是 `Form.Item`）：
+ * - `null`：输入框未展开——已设置 / 明文态只显示「更换 API Key」按钮；
+ * - `{value}`：输入框已展开，`value` 是用户此刻输入的内容。
+ * @typedef {{value: string}|null} ApiKeyDraft
+ */
+/**
+ * 后端 `list_providers` 返回的记录形态：`api_key_state` 是凭证的三态
+ * （`unset` / `set` / `plaintext`）——**不回传真值，也不回传引用 URI**
+ * （单向写入，ADR 0002）。
  * `base_url` 只包含已配置的槽位，缺键即未配置。
  * `custom_header` 是名→值映射（无序），缺键即空映射。
- * 创建/更新命令的 `provider` 负载复用同一组字段名，但恒带 `slug`、
- * `selected_protocol`（未选为 `null`）与 `api_key`（空串即未设置）；
- * 写入字段集合固定，见 `toProviderPayload`。
+ * @typedef {Object} ProviderRecord
+ * @property {boolean} enabled 禁用后不参与投影；旧配置缺此字段视为启用。
+ * @property {Partial<Endpoints>} base_url
+ * @property {ProviderProtocol|null} selected_protocol 界面所选端点；未选为 `null`。
+ * @property {ApiKeyState} api_key_state 凭证状态；真值不在这个形态里。
+ * @property {Record<string, string>=} custom_header 值是明文凭证。
+ * @property {Model[]} models 保序模型列表。
+ */
+/**
+ * 创建/更新命令的 `provider` 负载：字段集合固定为写入字段
+ * （slug、enabled、base_url、selected_protocol、custom_header、models），
+ * `api_key` **按密钥动作决定在不在**（见 `toProviderPayload`）。
  * @typedef {Object} ProviderRequest
  * @property {string} slug
  * @property {boolean} enabled 禁用后不参与投影；旧配置缺此字段视为启用。
  * @property {Partial<Endpoints>} base_url
  * @property {ProviderProtocol|null} selected_protocol 界面所选端点；未选为 `null`。
- * @property {string=} api_key
+ * @property {string=} api_key 缺省即「不变」，`""` 即清除，其余非空串即覆盖。
  * @property {Record<string, string>=} custom_header 值是明文凭证。
  * @property {Model[]} models 保序模型列表。
  */
 /**
- * 列表页/表单使用的 Provider 视图：原样携带明文 `api_key`（空串即未设置）。
+ * 列表页/表单使用的 Provider 视图：**既不带凭证真值，也不带引用 URI**——
+ * 凭证只以状态出现（`api_key_state`），单向写入（ADR 0002）。
  * 创建/更新时按写入字段集回传（见 `toProviderPayload`），只读字段不回传。
  * @typedef {Object} Provider
  * @property {string} slug
@@ -63,8 +94,7 @@
  * @property {ProviderProtocol|null} selected_protocol 投影使用的协议；未选为 `null`。
  * @property {Model[]} models
  * @property {CustomHeader[]} custom_header 界面形态的行列表；读入时按名排序展开。
- * @property {string=} api_key
- * @property {boolean} api_key_set 只读：是否已配置凭证（读取路径生成，不随写入负载回传）。
+ * @property {ApiKeyState} api_key_state 凭证状态；只读，不随写入负载回传。
  */
 import { invoke } from "@tauri-apps/api/core";
 
@@ -86,6 +116,15 @@ const MODEL_CAPABILITIES = [
   CAPABILITY_IMAGE_IN,
   CAPABILITY_THINKING,
 ];
+
+/** @type {ApiKeyState} 凭证未设置。 */
+export const API_KEY_UNSET = "unset";
+/** @type {ApiKeyState} 凭证已设置：真值在系统密钥链里。 */
+export const API_KEY_SET = "set";
+/** @type {ApiKeyState} 凭证仍是明文（启动迁移未成功，待迁移）。 */
+export const API_KEY_PLAINTEXT = "plaintext";
+/** @type {ApiKeyState[]} 凭证状态的全部取值。 */
+export const API_KEY_STATES = [API_KEY_UNSET, API_KEY_SET, API_KEY_PLAINTEXT];
 
 /**
  * 能力枚举串与界面标签。
@@ -201,20 +240,66 @@ export function configuredProtocols(baseUrl) {
 }
 
 /**
+ * 密钥草稿的初值：未设置态直接把输入框摆出来（留空即不设置）；已设置 / 明文
+ * 态先收着，点「更换 API Key」才展开。
+ *
+ * 与 [`resolveApiKeyAction`] 是一对：前者定「打开表单时是什么形态」，后者定
+ * 「保存时对密钥做什么」——两条规则同属密钥动作，故住在同一处。
+ * @param {ApiKeyState} state 当前凭证状态
+ * @returns {ApiKeyDraft}
+ */
+export function initialApiKeyDraft(state) {
+  return state === API_KEY_UNSET ? { value: "" } : null;
+}
+
+/**
+ * 由「当前状态 + 表单草稿」推出密钥动作。
+ *
+ * 草稿是组件本地状态（与 `enabled` 同类，不是 `Form.Item`）：它决定这次保存
+ * 对密钥做了什么，而密钥值本身从不进表单状态。
+ *
+ * - 未展开输入框（草稿为 `null`）= 不碰密钥；
+ * - 未设置态留空 = 不碰密钥（没有旧值可清）；
+ * - 已设置 / 明文态展开后留空 = 清除；
+ * - 有值 = 覆盖。
+ *
+ * 值先去掉首尾空白：只有空白等同留空——否则一次手滑（展开后敲了个空格就保存）
+ * 就会把旧密钥覆盖成空格。
+ * @param {ApiKeyState} state 当前凭证状态
+ * @param {ApiKeyDraft} draft 表单草稿
+ * @returns {ApiKeyAction}
+ */
+export function resolveApiKeyAction(state, draft) {
+  if (!draft) {
+    return { kind: "keep" };
+  }
+  const value = (draft.value ?? "").trim();
+  if (value === "") {
+    return state === API_KEY_UNSET ? { kind: "keep" } : { kind: "clear" };
+  }
+  return { kind: "set", value };
+}
+
+/**
  * 创建/更新命令共用的 `provider` 负载：字段集合固定为写入字段
- * （slug、enabled、base_url、selected_protocol、api_key、custom_header、models），
- * 只读视图字段（如 `api_key_set`）不进负载——后端 `ProviderRequest` 不拒绝未知字段，
- * 视图模型越过持久化边界只会被静默丢弃。
+ * （slug、enabled、base_url、selected_protocol、custom_header、models），
+ * 只读视图字段（如 `api_key_state`）不进负载——后端 `ProviderRequest` 不拒绝
+ * 未知字段，视图模型越过持久化边界只会被静默丢弃。
+ *
+ * `api_key` **按密钥动作决定在不在**：不碰密钥时压根不带这个字段（后端按
+ * 「不变」处理，一个字节都不碰密钥链）；清除时带空串；覆盖时带新值。引用
+ * URI 永远不会出现在这里——视图里压根没有引用（ADR 0002）。
  *
  * `base_url` 只携带已填写的槽位，`selected_protocol` 归一化为已填槽位之一
- * （否则 `null`，投影时由插件兜底）。`api_key` 与模型列表随整包替换回传（保序）；
+ * （否则 `null`，投影时由插件兜底）。模型列表随整包替换回传（保序）；
  * `custom_header` 由行列表还原为名→值映射。归一化归前端：映射本无序，
  * 按名排序后落盘才能让产物确定（issue #58 决定 21）。
  * 导出供单元测试直接调用（调用方是 `createProvider` / `updateProvider`）。
  * @param {Provider} provider
+ * @param {ApiKeyAction} action 本次保存对密钥的动作
  * @returns {ProviderRequest}
  */
-export function toProviderPayload(provider) {
+export function toProviderPayload(provider, action) {
   const endpoints = normalizeEndpoints(provider.base_url);
   const base_url = Object.fromEntries(
     configuredProtocols(endpoints).map((protocol) => [
@@ -227,57 +312,67 @@ export function toProviderPayload(provider) {
       ? provider.selected_protocol
       : null;
   const custom_header = fromHeaderRows(provider.custom_header);
-  return {
+  const payload = {
     slug: provider.slug,
     enabled: provider.enabled,
     base_url,
     selected_protocol,
-    api_key: provider.api_key ?? "",
     custom_header,
     models: (provider.models ?? []).map(normalizeModel),
   };
+  if (action?.kind === "clear") {
+    payload.api_key = "";
+  } else if (action?.kind === "set") {
+    payload.api_key = action.value;
+  }
+  return payload;
 }
 
 /**
  * @param {Provider} provider
+ * @param {ApiKeyAction} action 本次保存对密钥的动作
  */
-export async function createProvider(provider) {
+export async function createProvider(provider, action) {
   await invoke("create_provider", {
-    provider: toProviderPayload(provider),
+    provider: toProviderPayload(provider, action),
   });
 }
 
 /**
  * @param {Provider} provider
+ * @param {ApiKeyAction} action 本次保存对密钥的动作
  */
-export async function updateProvider(provider) {
+export async function updateProvider(provider, action) {
   await invoke("update_provider", {
-    provider: toProviderPayload(provider),
+    provider: toProviderPayload(provider, action),
   });
 }
 
 /**
  * 读取 Provider 列表：端点槽位补空串，模型归一化（见 `normalizeModel`），
  * slug 列表与 header 行都按字节序排序（与记录层 `BTreeMap` 的键序一致）。
+ *
+ * 视图**逐字段构造**，不整包透传后端记录：凭证那条线路上后端只给状态，
+ * 整包透传一旦遇上后端多带一个字段，密钥就会溜进渲染进程（单向写入，
+ * ADR 0002）。
  * @returns {Promise<Provider[]>}
  */
 export async function listProviders() {
   /**
-   * @type {Record<string, ProviderRequest>}
+   * @type {Record<string, ProviderRecord>}
    */
   const providers = await invoke("list_providers");
   return Object.entries(providers)
     .map(([slug, provider]) => ({
-      ...provider,
       slug,
+      enabled: provider.enabled,
       base_url: normalizeEndpoints(provider.base_url),
       selected_protocol: provider.selected_protocol ?? null,
       // 记录层是 BTreeMap，但 JSON 传进 JS 对象后键序不保证（整数字样键还会前置），
       // 故显式按名排序展开成行列表，与表单的 Form.List 对齐。
       custom_header: toHeaderRows(provider.custom_header),
-      // 后端的「未设置」约定：未配置的凭证恒为空串（`ApiKey` 类型的序列化形态，
-      // 见 src-tauri/src/provider.rs）。这一句是那条约定的唯一前端落点。
-      api_key_set: !!provider.api_key,
+      // 凭证只以状态出现：真值与引用 URI 都不进前端（ADR 0002）。
+      api_key_state: provider.api_key_state,
       models: (provider.models ?? []).map(normalizeModel),
     }))
     .sort((a, b) => compareByteOrder(a.slug, b.slug));
