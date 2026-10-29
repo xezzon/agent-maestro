@@ -2,6 +2,7 @@
 //!
 //! 模块按职责拆开：
 //! - [`protected`]：保护态（配置文件损坏时拒绝一切读写）；
+//! - [`migrate`]：启动时把旧明文 API Key 迁进密钥链（尽力而为，失败保留）；
 //! - [`persist`]：原子落盘（临时文件 + rename，写法见 crate 级 `fs_util`）；
 //! - [`providers`]：Provider 的领域规则（参与投影的筛选、落盘前的一致性校验、
 //!   启停）；
@@ -13,6 +14,7 @@
 //! [`crate::config`]：存储层与插件服务两侧都消费它，故它不属于任何一侧；
 //! 错误类型住在 [`crate::errors`]，同样两侧共享。
 
+mod migrate;
 mod persist;
 mod plugins;
 mod ports;
@@ -68,19 +70,73 @@ impl Store {
     /// 取全局环境，依赖在签名上可见，测试也能指向任意配置文件（#141 I-4）。
     ///
     /// 密钥链同样由构造方注入：生产装配传系统密钥链，测试夹具传内存替身。
+    ///
+    /// 构造的最后一步是**启动迁移**（#147）：配置里的旧明文 API Key 一次性
+    /// 换进密钥链，配置文件随之只剩引用。迁移在任何失败下都不让启动失败
+    /// ——密钥链不可用时配置里仍是明文，下次启动再试。
     pub(crate) fn new(config_path: PathBuf, secrets: Arc<dyn SecretStore>) -> Self {
         let state = match fs::read_to_string(&config_path) {
             Ok(text) => Self::parse(&config_path, &text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(ConfigError::io(&config_path, e.to_string())),
         };
-        Self {
+        let mut store = Self {
             config_path,
             state: match state {
                 Ok(config) => ProtectedState::Ready(config),
                 Err(reason) => ProtectedState::unavailable(reason),
             },
             secrets,
+        };
+        store.migrate_plaintext_secrets();
+        store
+    }
+
+    /// 启动时迁移旧明文 API Key（#147）。
+    ///
+    /// 逐 Provider 尽力而为：换成功的字段落成规范引用，换不成的保留明文
+    /// 原样并记一条 ERROR（只含 slug 与原因，绝不含密钥值）。全部尝试完
+    /// **只落盘一次**：成功的写引用、失败的写回明文。
+    ///
+    /// 落盘失败则内存状态保持迁移前的样子（配置压根没被换掉），而本次写进
+    /// 密钥链的条目**不回收**——惰性残余，同 slug 下次写入时即被覆盖
+    /// （ADR 0002 接受的风险）。
+    ///
+    /// 走 [`Store::mutate`] 这条唯一的配置写路径：它「落盘失败即不改状态」
+    /// 的语义正是迁移要的回滚。
+    fn migrate_plaintext_secrets(&mut self) {
+        if self.state.config().is_err() {
+            // 保护态：配置读不出来，没什么可迁移的。
+            return;
+        }
+        let secrets = self.secrets.clone();
+        let mut migrated_slugs: Vec<String> = Vec::new();
+        let outcome = self.mutate::<(), ConfigError>(|config| {
+            let migration = migrate::migrate(config, secrets.as_ref());
+            for failure in &migration.failures {
+                log::error!(
+                    "secret migration failed: slug={}: {}",
+                    failure.slug,
+                    failure.reason
+                );
+            }
+            migrated_slugs = migration.migrated_slugs;
+            if migrated_slugs.is_empty() {
+                // 一个都没迁成：配置一个字都没动，不必落盘。
+                Ok(Change::Unchanged(()))
+            } else {
+                Ok(Change::Changed(()))
+            }
+        });
+        if let Err(error) = outcome {
+            // 落盘失败：内存状态仍是迁移前的样子（配置没被换掉），密钥链
+            // 条目留着——下次启动重试时同 slug 覆盖它。
+            //
+            // 闭包不会失败，故此处只剩落盘这一种病因（保护态在上面就挡住了）。
+            log::error!(
+                "secret migration persist failed: slugs={}: {error}",
+                migrated_slugs.join(",")
+            );
         }
     }
 

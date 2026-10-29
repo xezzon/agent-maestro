@@ -23,8 +23,8 @@ pub(crate) const CONFIG_VERSION: u32 = 2;
 
 /// 仍受支持的最低配置版本。
 ///
-/// v1 的旧配置照常打开：它的 `api_key` 还是明文，明文配置继续以明文工作，
-/// 等启动迁移（#147）把它换进密钥链。
+/// v1 的旧配置照常打开：它的 `api_key` 还是明文，启动时的一次性迁移把它
+/// 换进密钥链（#147）；迁移失败者仍以明文工作，下次启动再试。
 pub(crate) const MIN_CONFIG_VERSION: u32 = 1;
 
 /// `~/.maestro/config.json` 的顶层文档（version 2 schema）。
@@ -61,7 +61,7 @@ impl Default for Config {
 /// - **版本号永不回退**：已是 v2 的配置不会因为引用被清掉而退回 v1——退回即
 ///   让旧版 Maestro 又能打开它。
 ///
-/// 全部仍是明文的 v1 暂留 v1：迁移（#147）没跑之前，明文配置照常工作，
+/// 全部仍是明文的 v1 暂留 v1：迁移（#147）失败时明文配置照常工作，
 /// 不必为了版本号把它改写成 v2（那会让旧版 Maestro 直接进保护态）。
 pub(crate) fn persist_version(config: &Config) -> u32 {
     let has_reference = config

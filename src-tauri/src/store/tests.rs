@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::errors::{SecretCause, SecretError};
+use crate::logging::capture::capture_window;
 use crate::provider::{ModelEntry, Protocol};
 use crate::secret::{SecretOp, SecretRef};
 use crate::store::testutil::Fixture;
@@ -505,9 +506,14 @@ fn create_provider_preserves_other_providers_models_and_endpoints() {
     let reopened = fixture.store();
     let openrouter = &reopened.get().unwrap().providers["openrouter"];
     assert_eq!(
-        openrouter.api_key.plaintext(),
-        Some("sk-live"),
-        "旧配置里的明文照常读入"
+        openrouter.api_key.reference().map(SecretRef::slug),
+        Some("openrouter"),
+        "旧配置里的明文在启动时迁成了引用"
+    );
+    assert_eq!(
+        fixture.secrets().entry(&reference("openrouter")),
+        Some("sk-live".to_owned()),
+        "真值搬进了密钥链"
     );
     assert_eq!(openrouter.models.len(), 2);
     assert_eq!(openrouter.models[0].id, "z-model");
@@ -1377,9 +1383,9 @@ fn legacy_config_without_enabled_reads_as_enabled_and_round_trips() {
         Some("http://localhost:11434/v1")
     );
     assert_eq!(
-        provider.api_key.plaintext(),
-        Some("sk-legacy"),
-        "旧配置里的明文照常读入"
+        provider.api_key.reference().map(SecretRef::slug),
+        Some("ollama"),
+        "旧配置里的明文在启动时迁成了引用"
     );
     assert_eq!(provider.models.len(), 1);
     assert_eq!(provider.models[0].id, "deepseek-chat");
@@ -1681,6 +1687,35 @@ fn break_persist(fixture: &Fixture) {
     fs::create_dir_all(&path).unwrap();
 }
 
+/// 让落盘失败：配置目录改成只读——配置照样读得到，临时文件却建不出来。
+///
+/// 「读得到、写不下去」是**启动迁移**落盘失败的入口：迁移读得到旧明文，
+/// 写回引用时却写不下去（配置目录只读）。与 [`break_persist`] 的区别在于
+/// 那个换掉的是配置文件本身，启动时连读都读不到。
+///
+/// 只在 Unix 上成立：Windows 的目录只读属性拦不住「在目录里建文件」，那边
+/// 换用别的造法（本仓库的 CI 只跑 Linux）。以 root 运行时只读拦不住写入，
+/// 落盘会照常成功——那条用例随即失败（而不是悄悄放过）。
+///
+/// 返回原权限：恢复时原样还回去，不猜一个模式。
+#[cfg(unix)]
+fn freeze_persist(fixture: &Fixture) -> fs::Permissions {
+    use std::os::unix::fs::PermissionsExt;
+    let path = fixture.paths().config_path();
+    let dir = path.parent().unwrap();
+    let original = fs::metadata(dir).unwrap().permissions();
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+    original
+}
+
+/// 恢复可写：落盘重新可行（重启重试的前提）。
+#[cfg(unix)]
+fn thaw_persist(fixture: &Fixture, original: fs::Permissions) {
+    let path = fixture.paths().config_path();
+    let dir = path.parent().unwrap();
+    fs::set_permissions(dir, original).unwrap();
+}
+
 /// 密钥链不可用（后端缺席 / 条目库锁着）。
 ///
 /// 「哪个动作折成哪个失败变体」由 [`SecretOp::into_error`] 独家给出，替身与
@@ -1852,7 +1887,10 @@ fn clearing_a_missing_entry_is_idempotent() {
     );
 }
 
-/// 删除 Provider：只有引用才级联到密钥链，明文与未设置不碰密钥链。
+/// 删除 Provider 只在字段为引用时级联删除条目；明文与未设置的记录没有
+/// 条目可删，直接删记录、不碰密钥链。
+///
+/// 明文只在迁移失败时残留（#147）：密钥链写不进去，明文原样留在配置里。
 #[test]
 fn deleting_a_provider_cascades_to_the_keychain_only_for_a_reference() {
     let fixture = Fixture::new();
@@ -1865,6 +1903,10 @@ fn deleting_a_provider_cascades_to_the_keychain_only_for_a_reference() {
             }
         }"#,
     );
+    // 迁移写不进密钥链：legacy 的明文原样留在配置里，它没有条目可删。
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Write, unavailable(SecretOp::Write));
     let mut store = fixture.store();
     store
         .create_provider(
@@ -2127,9 +2169,12 @@ fn a_failed_rollback_reports_both_failures() {
     );
 }
 
-/// v1 配置照常打开：明文仍在文件里，继续以明文工作。
+/// v1 配置照常打开：迁移写不进密钥链时，明文原样留着，配置仍是 v1。
+///
+/// 「明文继续以明文工作」只在迁移失败时成立（#147）：密钥链可用时明文在
+/// 启动时就换成了引用，配置随之升到 v2。
 #[test]
-fn a_v1_config_is_read_and_keeps_working_with_plaintext() {
+fn a_v1_config_keeps_working_with_plaintext_when_the_keychain_is_unavailable() {
     let fixture = Fixture::new();
     fixture.write_config(
         r#"{
@@ -2137,12 +2182,15 @@ fn a_v1_config_is_read_and_keeps_working_with_plaintext() {
             "providers": { "ollama": { "api_key": "sk-legacy" } }
         }"#,
     );
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Write, unavailable(SecretOp::Write));
     let mut store = fixture.store();
 
     assert_eq!(
         store.get().unwrap().providers["ollama"].api_key.plaintext(),
         Some("sk-legacy"),
-        "旧明文照常读入"
+        "迁移失败时旧明文照常读入"
     );
 
     // 一次无关的落盘：版本仍是 v1（全部仍是明文），明文一字不丢。
@@ -2199,6 +2247,342 @@ fn the_version_never_goes_backwards() {
     let text = config_text(&fixture);
     assert!(text.contains(r#""version": 2"#), "版本号不回退：{text}");
     assert!(!text.contains("secret://"), "引用清掉后不再有引用：{text}");
+}
+
+// ---------------------------------------------------------------------------
+// 启动迁移（#147）：旧明文 API Key 一次性换进密钥链。
+//
+// 这一段钉的是**存储层接缝**：临时配置文件里放一份带明文的旧配置，打开
+// 存储即触发迁移；观察到的只有「密钥链里有什么」「配置文件里有什么」
+// ——真值任何时候都不该出现在配置或断言输出里。
+// ---------------------------------------------------------------------------
+
+/// 启动即迁移：旧明文搬进密钥链，配置文件只剩引用。
+#[test]
+fn startup_migrates_plaintext_api_keys_into_the_keychain() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": { "ollama": { "api_key": "sk-legacy" } }
+        }"#,
+    );
+
+    let store = fixture.store();
+
+    assert_eq!(
+        fixture.secrets().entry(&reference("ollama")),
+        Some("sk-legacy".to_owned()),
+        "真值搬进了密钥链"
+    );
+    assert_eq!(
+        store.get().unwrap().providers["ollama"]
+            .api_key
+            .reference()
+            .map(SecretRef::slug),
+        Some("ollama"),
+        "内存里的字段是规范引用"
+    );
+    let text = config_text(&fixture);
+    assert!(
+        text.contains("secret://io.github.xezzon.agent-maestro/provider/ollama/api_key"),
+        "配置文件只剩引用：{text}"
+    );
+    assert!(!text.contains("sk-legacy"), "配置文件不得含真值：{text}");
+    assert!(
+        text.contains(r#""version": 2"#),
+        "含引用的配置按 v2 落盘：{text}"
+    );
+}
+
+/// 部分失败：一个 Provider 迁走了，另一个的明文原样留着，启动照常。
+#[test]
+fn a_failed_migration_keeps_the_plaintext_and_does_not_block_startup() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": {
+                "alpha": { "api_key": "sk-alpha" },
+                "beta": { "api_key": "sk-beta" }
+            }
+        }"#,
+    );
+    // 迁移按 slug 序逐个尝试：第一个（alpha）写不进密钥链。
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Write, unavailable(SecretOp::Write));
+
+    let store = fixture.store();
+
+    assert_eq!(
+        fixture.secrets().entry(&reference("beta")),
+        Some("sk-beta".to_owned()),
+        "成功的那个真值搬进了密钥链"
+    );
+    assert_eq!(
+        store.get().unwrap().providers["beta"]
+            .api_key
+            .reference()
+            .map(SecretRef::slug),
+        Some("beta"),
+        "成功的那个换成了引用"
+    );
+    assert_eq!(
+        store.get().unwrap().providers["alpha"].api_key.plaintext(),
+        Some("sk-alpha"),
+        "失败的明文原样保留"
+    );
+    let text = config_text(&fixture);
+    assert!(text.contains("sk-alpha"), "失败者的明文写回配置：{text}");
+    assert!(!text.contains("sk-beta"), "成功者的明文不再落盘：{text}");
+}
+
+/// 迁移失败记一条 ERROR：只含 slug 与原因，绝不含密钥值。
+#[test]
+fn a_failed_migration_logs_the_slug_and_the_reason_without_the_secret() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": { "alpha": { "api_key": "sk-canary-4b7e" } }
+        }"#,
+    );
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Write, unavailable(SecretOp::Write));
+
+    let window = capture_window();
+    let _store = fixture.store();
+    let lines = window.lines();
+
+    assert_eq!(lines.len(), 1, "一个失败一条日志：{lines:?}");
+    assert!(lines[0].contains("[ERROR]"), "失败记 ERROR：{lines:?}");
+    assert!(lines[0].contains("alpha"), "日志点名 Provider：{lines:?}");
+    assert!(
+        lines[0].contains("密钥链不可用"),
+        "日志带失败原因：{lines:?}"
+    );
+    assert!(
+        !lines[0].contains("sk-canary-4b7e"),
+        "日志不得携带真值：{lines:?}"
+    );
+}
+
+/// slug 不合法就构造不出引用：明文留着，失败原因点名 slug。
+///
+/// 这种 Provider 永远迁不掉（除非改 slug）——但密钥一个都不丢，下次启动
+/// 再试一次，代价只是一条 ERROR。
+#[test]
+fn a_provider_with_an_invalid_slug_stays_plaintext() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": { "Ollama": { "api_key": "sk-legacy" } }
+        }"#,
+    );
+
+    let window = capture_window();
+    let store = fixture.store();
+    let lines = window.lines();
+
+    assert_eq!(lines.len(), 1, "一条失败一条日志：{lines:?}");
+    assert!(lines[0].contains("Ollama"), "日志点名 Provider：{lines:?}");
+    assert_eq!(
+        store.get().unwrap().providers["Ollama"].api_key.plaintext(),
+        Some("sk-legacy"),
+        "构造不出引用，明文只能留着"
+    );
+    assert!(
+        fixture.secrets().calls().is_empty(),
+        "压根没有条目可写：{:?}",
+        fixture.secrets().calls()
+    );
+}
+
+/// 一个都没迁成时不落盘：配置没被改动，落盘压根不尝试。
+///
+/// 目录只读 + 密钥链写不进去：若落盘被尝试过，它必失败并记一条 ERROR——
+/// 日志里只有迁移失败那一条，即证明落盘没被尝试。
+#[cfg(unix)]
+#[test]
+fn a_migration_that_changed_nothing_does_not_persist() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": { "ollama": { "api_key": "sk-legacy" } }
+        }"#,
+    );
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Write, unavailable(SecretOp::Write));
+    let original = freeze_persist(&fixture);
+
+    let window = capture_window();
+    let store = fixture.store();
+    let lines = window.lines();
+
+    assert_eq!(lines.len(), 1, "只有迁移失败那一条：{lines:?}");
+    assert!(
+        !lines[0].contains("persist"),
+        "一个都没迁成就不该落盘：{lines:?}"
+    );
+    assert_eq!(
+        store.get().unwrap().providers["ollama"].api_key.plaintext(),
+        Some("sk-legacy"),
+        "明文原样留着"
+    );
+    thaw_persist(&fixture, original);
+}
+
+/// 落盘失败：内存状态回滚为迁移前的样子，本次写进密钥链的条目留着。
+///
+/// 恢复可写后再开一次存储即「重启」：迁移重跑，这次落盘成功，配置只剩
+/// 引用——「下次启动重试」的路径成立。
+#[cfg(unix)]
+#[test]
+fn a_failed_migration_persist_rolls_the_memory_back_and_keeps_the_keychain_entry() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": { "ollama": { "api_key": "sk-canary-4b7e" } }
+        }"#,
+    );
+    let original = freeze_persist(&fixture);
+
+    let window = capture_window();
+    let store = fixture.store();
+    let lines = window.lines();
+
+    assert_eq!(lines.len(), 1, "落盘失败记一条日志：{lines:?}");
+    assert!(lines[0].contains("[ERROR]"), "落盘失败记 ERROR：{lines:?}");
+    assert!(
+        lines[0].contains("slugs=ollama"),
+        "日志点名迁成的 Provider：{lines:?}"
+    );
+    assert!(
+        !lines[0].contains("sk-canary-4b7e"),
+        "日志不得携带真值：{lines:?}"
+    );
+    assert_eq!(
+        fixture.secrets().entry(&reference("ollama")),
+        Some("sk-canary-4b7e".to_owned()),
+        "本次写进密钥链的条目留着（惰性残余，同 slug 下次写入时覆盖）"
+    );
+    assert_eq!(
+        store.get().unwrap().providers["ollama"].api_key.plaintext(),
+        Some("sk-canary-4b7e"),
+        "内存状态回滚为迁移前的样子"
+    );
+    let text = config_text(&fixture);
+    assert!(text.contains("sk-canary-4b7e"), "配置文件没被改写：{text}");
+
+    // 恢复可写后再开一次存储即「重启」：迁移重跑并落盘成功。
+    thaw_persist(&fixture, original);
+    let restarted = fixture.store();
+
+    assert_eq!(
+        restarted.get().unwrap().providers["ollama"]
+            .api_key
+            .reference()
+            .map(SecretRef::slug),
+        Some("ollama"),
+        "重启后迁移重跑，字段换成了引用"
+    );
+    let text = config_text(&fixture);
+    assert!(
+        text.contains("secret://io.github.xezzon.agent-maestro/provider/ollama/api_key"),
+        "配置只剩引用：{text}"
+    );
+    assert!(!text.contains("sk-canary-4b7e"), "配置不得含真值：{text}");
+}
+
+/// 清除明文不需要密钥链：明文没有条目可删，密钥链不可用也清得掉。
+///
+/// 明文只在迁移失败时残留（#147）：它压根不指向密钥链条目，故清除压根不
+/// 碰密钥链。
+#[test]
+fn clearing_a_plaintext_credential_needs_no_keychain() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": { "ollama": { "api_key": "sk-legacy" } }
+        }"#,
+    );
+    // 迁移写不进密钥链：明文原样留在配置里。
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Write, unavailable(SecretOp::Write));
+    let mut store = fixture.store();
+    // 就算密钥链真的不可用，清除明文也不该受影响（压根没有条目可删）。
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Delete, unavailable(SecretOp::Delete));
+
+    store
+        .update_provider("ollama", ProviderWrite::clear(Provider::default()))
+        .unwrap();
+
+    assert!(
+        !store.get().unwrap().providers["ollama"].api_key.is_set(),
+        "明文被清掉了"
+    );
+    assert!(
+        !fixture
+            .secrets()
+            .calls()
+            .iter()
+            .any(|call| call.op == SecretOp::Delete),
+        "明文没有条目可删，压根不该发起删除：{:?}",
+        fixture.secrets().calls()
+    );
+}
+
+/// 更换密钥顺带完成迁移：明文 Provider 被覆盖后，字段是引用，真值在密钥链。
+///
+/// 迁移失败留下的明文不必等下次启动：用户重新设置一次，明文即换成引用
+/// （ADR 0002 的写入路径「先密钥链、后配置」）。
+#[test]
+fn replacing_a_plaintext_credential_completes_the_migration() {
+    let fixture = Fixture::new();
+    fixture.write_config(
+        r#"{
+            "version": 1,
+            "providers": { "ollama": { "api_key": "sk-legacy" } }
+        }"#,
+    );
+    // 迁移写不进密钥链：明文原样留在配置里。
+    fixture
+        .secrets()
+        .fail_next(SecretOp::Write, unavailable(SecretOp::Write));
+    let mut store = fixture.store();
+
+    store
+        .update_provider(
+            "ollama",
+            ProviderWrite::overwrite(Provider::default(), "sk-new".to_owned()),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fixture.secrets().entry(&reference("ollama")),
+        Some("sk-new".to_owned()),
+        "真值在密钥链里"
+    );
+    assert_eq!(
+        store.get().unwrap().providers["ollama"]
+            .api_key
+            .reference()
+            .map(SecretRef::slug),
+        Some("ollama"),
+        "字段换成了引用"
+    );
+    let text = config_text(&fixture);
+    assert!(!text.contains("sk-legacy"), "旧明文不再落盘：{text}");
 }
 
 /// 真值任何时候都不出现在错误消息与 Debug 输出里。

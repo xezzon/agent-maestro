@@ -1607,7 +1607,7 @@ fn apply_providers_logs_each_failed_plugin_with_its_reason() {
 fn apply_providers_skips_a_disabled_provider_through_the_real_path() {
     let home = temp_home();
     // 旧配置（明文仍在文件里）：写路径不再接受明文，故这类凭证只能从旧
-    // 配置读入——迁移（#147）之前它们照常投影。
+    // 配置读入——启动迁移（#147）把它们换进密钥链，投影再取回真值。
     fs::create_dir_all(home.path().join(".maestro")).unwrap();
     fs::write(
         home.path().join(".maestro").join("config.json"),

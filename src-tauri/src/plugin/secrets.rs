@@ -118,7 +118,8 @@ fn resolve_one(
     provider: &Provider,
     secrets: &impl SecretSource,
 ) -> Result<Option<String>, PluginError> {
-    // 旧明文（迁移前的配置）：原样用；迁移路径（#147）会把它换进密钥链。
+    // 旧明文（迁移失败的配置）：原样用。启动迁移（#147）已把它换进密钥链，
+    // 换不进去的才留到投影这一层。
     if let Some(value) = provider.api_key.plaintext() {
         return Ok(Some(value.to_owned()));
     }
