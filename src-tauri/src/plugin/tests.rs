@@ -1835,6 +1835,8 @@ fn apply_providers_projects_the_resolved_plaintext_into_the_real_pi_plugin() {
         .set(&SecretRef::for_provider("gateway").unwrap(), canary)
         .unwrap();
 
+    // 捕获窗口盖住整条解析路径：从密钥链取回真值与投影都在这段里。
+    let window = crate::logging::capture::capture_window();
     let reports = service.apply_providers(&store, &secrets).unwrap();
 
     let pi = plugin_outcome(&reports, "pi");
@@ -1851,6 +1853,10 @@ fn apply_providers_projects_the_resolved_plaintext_into_the_real_pi_plugin() {
         raw.matches(canary).count(),
         1,
         "真值只出现在它该出现的那一处：{raw}"
+    );
+    assert!(
+        !window.lines().iter().any(|line| line.contains(canary)),
+        "解析凭证的路径不得把明文写入日志"
     );
 }
 
@@ -1998,6 +2004,140 @@ fn apply_providers_does_not_need_secrets_for_a_provider_whose_endpoint_interpola
     );
     assert_eq!(pi.skipped.len(), 1, "该 Provider 按未配置端点跳过");
     assert_eq!(pi.skipped[0].slug, "gateway");
+}
+
+/// 密钥判据看**每个插件**的变量覆盖（#146）：全局插值为空、某插件覆盖成
+/// 非空时，那个插件仍会投影这个 Provider——密钥因此必须解析出来。
+///
+/// 只按全局表判会漏掉它：插件静默拿到一份缺密钥的配置。
+#[test]
+fn apply_providers_resolves_a_secret_when_a_plugin_override_makes_the_endpoint_non_empty() {
+    use crate::provider::{Protocol, ProviderWrite};
+
+    let home = temp_home();
+    let (store, secrets) = store_with_secrets(home.path());
+    let service = stub_service(home.path(), https_stub("pi2"));
+    service.startup(&store).unwrap();
+    service.add_plugin(&store, MANIFEST_URL).unwrap();
+    store
+        .with_write(|s| {
+            s.set_variables(Variables::from([("GATEWAY_URL".to_owned(), String::new())]))
+        })
+        .unwrap();
+    let canary = "sk-canary-a7d2-override";
+    store
+        .with_write(|s| {
+            s.create_provider(
+                "gateway",
+                ProviderWrite::overwrite(
+                    Provider {
+                        base_url: BTreeMap::from([(
+                            Protocol::OpenaiCompletions,
+                            "${GATEWAY_URL}".to_owned(),
+                        )]),
+                        ..Provider::default()
+                    },
+                    canary.to_owned(),
+                ),
+            )
+        })
+        .unwrap();
+    // 只有 pi2 把这个变量覆盖成非空。
+    service
+        .set_config(
+            &store,
+            MANIFEST_URL,
+            &PluginConfig {
+                variables: BTreeMap::from([(
+                    "GATEWAY_URL".to_owned(),
+                    "https://api.example.com/v1".to_owned(),
+                )]),
+                form: None,
+            },
+        )
+        .unwrap();
+
+    let reports = service.apply_providers(&store, secrets.as_ref()).unwrap();
+
+    let pi2 = plugin_outcome(&reports, "pi2");
+    assert_eq!(pi2.status, ProjectionStatus::Applied, "{:?}", pi2.reason);
+    let written: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.path().join(".pi2").join("agent").join("models.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        written["providers"]["gateway"]["baseUrl"], "https://api.example.com/v1",
+        "插件覆盖把这个 Provider 投影出去了"
+    );
+    assert_eq!(
+        written["providers"]["gateway"]["apiKey"], canary,
+        "被投影的 Provider 必须拿到密钥，绝不静默投影成 none"
+    );
+    assert_eq!(
+        plugin_outcome(&reports, "pi").skipped[0].slug,
+        "gateway",
+        "未覆盖的插件按未配置端点跳过"
+    );
+}
+
+/// 反向（#146）：全局端点非空、但**每个**插件都覆盖成空——没有任何插件会
+/// 投影它，缺密钥就不该拦住「应用到工具」。
+#[test]
+fn apply_providers_does_not_need_secrets_when_every_plugin_overrides_the_endpoint_empty() {
+    let home = temp_home();
+    fs::create_dir_all(home.path().join(".maestro")).unwrap();
+    fs::write(
+        home.path().join(".maestro").join("config.json"),
+        r#"{
+            "version": 2,
+            "variables": { "GATEWAY_URL": "https://api.example.com/v1" },
+            "providers": {
+                "gateway": {
+                    "base_url": {"openai-completions": "${GATEWAY_URL}"},
+                    "api_key": "secret://io.github.xezzon.agent-maestro/provider/gateway/api_key"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+    let (store, secrets) = store_with_secrets(home.path());
+    let service = stub_service(home.path(), https_stub("pi2"));
+    service.startup(&store).unwrap();
+    service.add_plugin(&store, MANIFEST_URL).unwrap();
+    // 每个已加载插件都把端点覆盖成空：没有插件会投影它。
+    let sources = builtin::BUILTINS
+        .iter()
+        .map(builtin::BuiltinPlugin::source)
+        .chain(std::iter::once(MANIFEST_URL.to_owned()));
+    for source in sources {
+        service
+            .set_config(
+                &store,
+                &source,
+                &PluginConfig {
+                    variables: BTreeMap::from([("GATEWAY_URL".to_owned(), String::new())]),
+                    form: None,
+                },
+            )
+            .unwrap();
+    }
+
+    // 链上什么都没有：一旦有人去解析就会整体失败。
+    let reports = service.apply_providers(&store, secrets.as_ref()).unwrap();
+
+    assert!(
+        secrets.calls().is_empty(),
+        "没有插件投影它，就不该去问密钥链：{:?}",
+        secrets.calls()
+    );
+    assert_eq!(
+        plugin_outcome(&reports, "pi").status,
+        ProjectionStatus::Applied
+    );
+    assert_eq!(
+        plugin_outcome(&reports, "pi2").status,
+        ProjectionStatus::Applied
+    );
 }
 
 /// 替身遵守它实现的那份端口契约（#141 R3）：条目不存在时 `delete_plugin`

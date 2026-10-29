@@ -11,7 +11,7 @@
 //! 取不到就整体失败（见 [`resolve`]）。
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::{self, Debug},
 };
 
@@ -19,7 +19,6 @@ use crate::{
     errors::{PluginError, SecretCause},
     plugin::ports::SecretSource,
     provider::Provider,
-    variables::Variables,
 };
 
 /// 已解析的密钥表：Provider slug → 明文 / 未设置。
@@ -65,9 +64,10 @@ impl Debug for ResolvedSecrets {
 
 /// 投影前解析密钥：待投影的 Provider 逐个取回真值。
 ///
-/// 谁参与解析：**启用且会被投影**的 Provider——即端点插值后仍非空者
-/// （见 [`is_projected`]）。零端点的 Provider 本来就会被插件映射跳过，
-/// 禁用的压根不参与投影：两者都不该因密钥问题阻塞「应用到工具」。
+/// 谁参与解析：**启用且会被投影**的 Provider——`required` 是逐插件投影表里
+/// 「端点非空」者的并集（见 `PluginService::required_slugs`）：任一会投影它的
+/// 插件都算数，零端点的 Provider 本来就会被插件映射跳过，禁用的压根不参与
+/// 投影：两者都不该因密钥问题阻塞「应用到工具」。
 ///
 /// 失败即整体失败：任一 Provider 的密钥取不到（条目不存在）或密钥链不可用，
 /// 整个解析失败并点名该 Provider——绝不把引用 URI 或空值交给工具
@@ -75,37 +75,19 @@ impl Debug for ResolvedSecrets {
 /// 不可用」请用户修后端。
 pub(crate) fn resolve(
     providers: &BTreeMap<String, Provider>,
-    variables: &Variables,
+    required: &BTreeSet<String>,
     secrets: &impl SecretSource,
 ) -> Result<ResolvedSecrets, PluginError> {
     let mut resolved = ResolvedSecrets::new();
     for (slug, provider) in providers {
         // 禁用项由端口契约挡在外面（快照只含启用的 Provider），这里再问一遍：
         // 规则住在它执行的地方，端口契约被改坏时也不会把禁用项带进投影。
-        if !provider.enabled || !is_projected(provider, variables) {
+        if !provider.enabled || !required.contains(slug) {
             continue;
         }
         resolved.insert(slug.clone(), resolve_one(slug, provider, secrets)?);
     }
     Ok(resolved)
-}
-
-/// 这个 Provider 会不会被投影：端点插值后仍非空即会。
-///
-/// 判据与插件映射**同一条规则**（空串与缺省同义：未配置）：映射跳过的
-/// Provider 压根不会写进工具的配置，故不该被要求提供密钥——否则一条用不上的
-/// 密钥就能把整个「应用到工具」拦下来。
-///
-/// 插值用的是**全局变量表**：插件自己的变量覆盖只在逐插件流程里生效，而密钥
-/// 解析必须发生在逐插件流程之前（#146）。
-///
-/// 插值失败的 Provider 在逐插件流程里本来就会失败（那个插件失败），它同样
-/// 不需要密钥。
-fn is_projected(provider: &Provider, variables: &Variables) -> bool {
-    provider
-        .interpolate(variables)
-        .map(|interpolated| interpolated.has_endpoint())
-        .unwrap_or(false)
 }
 
 /// 单个 Provider 的凭证：引用去密钥链取真值，明文原样用，未设置即没有。

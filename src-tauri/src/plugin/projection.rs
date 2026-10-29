@@ -1,7 +1,7 @@
 //! 投影：把 Provider 写入各插件的配置目录，并把插件回报的相对路径拼成宿主绝对路径。
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path},
     sync::Arc,
 };
@@ -20,6 +20,24 @@ use super::{
     secrets::{self, ResolvedSecrets},
 };
 
+/// 一个已备好的插件投影输入：插件配置只读一次，结果同时喂给密钥判据与投影。
+///
+/// 配置读取、form 序列化或插值失败都留在 `prepared` 里——投影时归为该插件
+/// `failed`，失败原因照旧逐插件回报。
+struct PreparedPlugin {
+    id: String,
+    plugin: Arc<LoadedPlugin>,
+    prepared: Result<PreparedProjection, PluginError>,
+}
+
+/// 插件的投影输入：全局变量 ⊕ 该插件覆盖后的插值结果，与实例化前就位的 form。
+struct PreparedProjection {
+    /// form 段：原始 JSON 文本，先把位置留好（宿主不解释其内容，ADR 0017）。
+    form: Option<String>,
+    /// 该插件口径下的 Provider 表——密钥判据与投影共用这一份。
+    providers: BTreeMap<String, Provider>,
+}
+
 impl PluginService {
     /// 应用到工具：把 Provider 投影进各插件，返回逐插件结果。
     ///
@@ -31,6 +49,9 @@ impl PluginService {
     /// 投影前先解析密钥（#146）：待投影的 Provider 逐个从密钥链取回真值，
     /// 任一取不到（条目不存在）或密钥链不可用即整体失败——不进入逐插件流程，
     /// 绝不把引用 URI 或空值交给工具（ADR 0002）。
+    ///
+    /// 插件配置在解析密钥之前**只读一次**（见 [`Self::prepare_plugins`]）：密钥
+    /// 判据与投影因此看的是同一份「全局变量 ⊕ 插件覆盖」的插值结果。
     pub(crate) fn apply_providers(
         &self,
         store: &impl ProviderSource,
@@ -38,10 +59,11 @@ impl PluginService {
     ) -> Result<Vec<PluginOutcome>, PluginError> {
         let snapshot = store.projection_snapshot().map_err(PluginError::from)?;
         let (providers, variables) = (snapshot.providers, snapshot.variables);
+        let (reports, prepared) = self.prepare_plugins(&providers, &variables)?;
         // 密钥解析在逐插件流程**之前**：取不到就整体失败，工具侧因此绝不会
         // 拿到一份缺密钥的配置。
-        let secrets = secrets::resolve(&providers, &variables, secrets)?;
-        let reports = self.write_providers(&providers, &variables, &secrets)?;
+        let secrets = secrets::resolve(&providers, &required_slugs(&prepared), secrets)?;
+        let reports = self.project_prepared(prepared, &secrets, reports);
         // 逐插件的失败不是命令的失败（命令整体成功），故不进命令层的错误路径：
         // 在此按插件各记一条（ADR 0008：服务层的投影步骤打 DEBUG，默认级别
         // 下不落盘；命令层的结果行按插件携带状态摘要）。
@@ -58,10 +80,10 @@ impl PluginService {
         Ok(reports)
     }
 
-    /// 对注册表中的每个插件执行投影，返回逐插件报告：
-    /// Loaded 交给 [`Self::project_one_plugin`]；Disabled 与 Error 态不执行投影。
-    /// 单个插件的失败不影响其它插件，失败原因写入该插件的报告——即该插件整体
-    /// `failed`、不写任何文件（判定细则见 [`Self::project_one_plugin`]）。
+    /// 逐插件投影，返回逐插件报告；密钥表由调用方给出。
+    ///
+    /// **测试接缝**：生产路径走 [`Self::apply_providers`]（先解析密钥，再走
+    /// 同一条投影路径）。本函数让测试直接喂一张密钥表，不必搭密钥链。
     ///
     /// 传入的每个 Provider 都参与投影：是否禁用由调用方先行剔除（#94 在命令层
     /// `enabled_providers` 完成），本函数不感知 `enabled`。
@@ -69,16 +91,31 @@ impl PluginService {
     /// 凭证来自**投影前解析出的真值**（见 [`ResolvedSecrets`]）：本函数不碰
     /// 密钥链，也不读记录里的凭证字段——引用进不了插件，只有解析出的明文
     /// 进得去。
-    ///
-    /// 插件执行时长不受应用控制：注册表锁只在快照阶段短暂持有（克隆 Arc 与
-    /// 收集跳过态），wasm 实例化与调用全部在锁外进行，不阻塞其它命令。
+    #[cfg(test)]
     pub(crate) fn write_providers(
         &self,
         providers: &BTreeMap<String, Provider>,
         variables: &Variables,
         secrets: &ResolvedSecrets,
     ) -> Result<Vec<PluginOutcome>, PluginError> {
-        let (mut reports, loaded) = {
+        let (reports, prepared) = self.prepare_plugins(providers, variables)?;
+        Ok(self.project_prepared(prepared, secrets, reports))
+    }
+
+    /// 备好逐插件的投影输入：注册表快照 + 每个已加载插件的配置与插值结果。
+    ///
+    /// Disabled 与 Error 态的插件不执行投影，各自产出一条 `skipped` 报告。
+    /// 配置只读一次：结果同时供密钥判据（[`required_slugs`]）与投影使用——
+    /// 即便 `set_plugin_config` 在两段之间改写了文件，两者也不会看不同的变量表。
+    ///
+    /// 插件执行时长不受应用控制：注册表锁只在快照阶段短暂持有（克隆 Arc 与
+    /// 收集跳过态），配置读取、wasm 实例化与调用全部在锁外进行。
+    fn prepare_plugins(
+        &self,
+        providers: &BTreeMap<String, Provider>,
+        variables: &Variables,
+    ) -> Result<(Vec<PluginOutcome>, Vec<PreparedPlugin>), PluginError> {
+        let (reports, loaded) = {
             let entries = self
                 .entries
                 .read()
@@ -101,32 +138,29 @@ impl PluginService {
             (reports, loaded)
         };
 
-        for (id, loaded_plugin) in loaded {
-            log::debug!("projecting providers: id={id}");
-            let projected =
-                self.project_one_plugin(&id, &loaded_plugin, providers, variables, secrets);
-            reports.push(build_report(id, projected));
-        }
-        Ok(reports)
+        let prepared = loaded
+            .into_iter()
+            .map(|(id, plugin)| PreparedPlugin {
+                prepared: self.prepare_one_plugin(&id, providers, variables),
+                id,
+                plugin,
+            })
+            .collect();
+        Ok((reports, prepared))
     }
 
-    /// 对一个已加载插件完成完整投影：读插件配置 → 合并变量覆盖 → 序列化 form →
-    /// 插值 → 实例化 → 写投影 → 拼绝对路径。成功返回已写入文件的宿主绝对路径与
-    /// 被跳过的 Provider。
+    /// 读一个插件的配置并算出它的投影输入：全局变量表 ⊕ 该插件的 `variables`
+    /// 覆盖后插值（同一占位符可按插件解析出不同值），`form` 段在组件实例化
+    /// 之前就位、经 `get-config` import 递送（ADR 0018）。
     ///
-    /// 投影按插件读取插件配置（ADR 0018）：全局变量表 ⊕ 该插件的 `variables` 覆盖
-    /// 后插值（同一占位符可按插件解析出不同值），`form` 段在组件实例化之前就位、
-    /// 经 `get-config` import 递送；先插值、后映射端点（ADR 0015）、端点选择见
-    /// ADR 0016。插件配置读取或解析失败、任一字段插值失败即该插件整体 `failed`
-    /// ——不实例化、不调用插件、不写任何文件。
-    fn project_one_plugin(
+    /// 读取/解析失败、form 序列化失败或任一字段插值失败都留在返回值里：投影时
+    /// 该插件整体 `failed`——不实例化、不调用插件、不写任何文件。
+    fn prepare_one_plugin(
         &self,
         id: &str,
-        loaded_plugin: &LoadedPlugin,
         providers: &BTreeMap<String, Provider>,
         variables: &Variables,
-        secrets: &ResolvedSecrets,
-    ) -> Result<(Vec<String>, Vec<SkippedProvider>), PluginError> {
+    ) -> Result<PreparedProjection, PluginError> {
         // 按插件读取插件配置（ADR 0018）：读取或解析失败即整插件失败，不静默降级。
         let plugin_config = read_plugin_config(&self.paths.plugin_dir(id))?;
         // 全局变量表 ⊕ 该插件的变量覆盖：覆盖键优先，只影响本插件的插值。
@@ -147,14 +181,73 @@ impl PluginService {
             .map_err(|e| PluginError::SerializeForm {
                 detail: e.to_string(),
             })?;
-        let projected = interpolate_providers(providers, &merged).map_err(PluginError::from)?;
+        let providers = interpolate_providers(providers, &merged).map_err(PluginError::from)?;
+        Ok(PreparedProjection { form, providers })
+    }
+
+    /// 按已备好的输入逐插件投影：实例化、写投影、拼绝对路径，产出逐插件报告。
+    ///
+    /// 单个插件的失败不影响其它插件，失败原因写入该插件的报告——即该插件整体
+    /// `failed`、不写任何文件。成功返回已写入文件的宿主绝对路径与被跳过的
+    /// Provider。
+    fn project_prepared(
+        &self,
+        prepared: Vec<PreparedPlugin>,
+        secrets: &ResolvedSecrets,
+        mut reports: Vec<PluginOutcome>,
+    ) -> Vec<PluginOutcome> {
+        for PreparedPlugin {
+            id,
+            plugin,
+            prepared,
+        } in prepared
+        {
+            log::debug!("projecting providers: id={id}");
+            let projected =
+                prepared.and_then(|prepared| self.project_one_plugin(&plugin, prepared, secrets));
+            reports.push(build_report(id, projected));
+        }
+        reports
+    }
+
+    /// 对一个已加载插件完成投影。本函数不读插件配置、不插值：输入由
+    /// [`Self::prepare_one_plugin`] 就位——密钥判据与投影看的是同一份结果。
+    fn project_one_plugin(
+        &self,
+        loaded_plugin: &LoadedPlugin,
+        PreparedProjection { form, providers }: PreparedProjection,
+        secrets: &ResolvedSecrets,
+    ) -> Result<(Vec<String>, Vec<SkippedProvider>), PluginError> {
         let (files, skipped) = loaded_plugin
             .instantiate_component(&self.engine, form)?
-            .write_provider(&projected, secrets)?;
+            .write_provider(&providers, secrets)?;
         // 插件返回的是相对 config_dir 的路径：拼成宿主绝对路径回报给界面。
         let files = project_files(&loaded_plugin.meta.config_dir, files)?;
         Ok((files, skipped))
     }
+}
+
+/// 待解析密钥的 Provider：任一插件投影表里端点非空者的并集。
+///
+/// 判据与插件映射**同一条规则**（空串与缺省同义：未配置，映射会跳过零端点
+/// 的 Provider）。之所以取并集：同一个 Provider 在不同插件的变量覆盖下可能
+/// 一侧会被投影、另一侧不会，而解析结果对所有插件共用一份——只有并集里也
+/// 没有它，才能确定没有插件会投影它，那时才不必要求密钥。反过来，全局插值
+/// 为空、某插件覆盖成非空的 Provider 也因此落在并集里，不会漏取密钥。
+///
+/// 配置读取或插值失败的插件不会投影任何东西（整体 `failed`），故不贡献要求。
+fn required_slugs(prepared: &[PreparedPlugin]) -> BTreeSet<String> {
+    prepared
+        .iter()
+        .filter_map(|plugin| plugin.prepared.as_ref().ok())
+        .flat_map(|projection| {
+            projection
+                .providers
+                .iter()
+                .filter(|(_, provider)| provider.has_endpoint())
+                .map(|(slug, _)| slug.clone())
+        })
+        .collect()
 }
 
 /// 把单插件投影结果构造成逐插件报告：成功即 `applied`（含已写文件与跳过项），
