@@ -39,7 +39,7 @@ export default function ProviderReadonlyForm({
   const [busy, run] = useAsyncAction();
   const { token } = theme.useToken();
   // 凭证只显示状态：真值与引用 URI 都不进界面（单向写入，ADR 0002）。
-  const apiKey = apiKeyStatePresentation(provider.api_key_state);
+  const apiKeyPresentation = apiKeyStatePresentation(provider.api_key_state);
 
   async function handleDelete() {
     await run(async () => {
@@ -77,9 +77,12 @@ export default function ProviderReadonlyForm({
         ))}
       </Form>
       <div className="provider-meta">
-        <span>API Key {apiKey ? <Tag>{apiKey.label}</Tag> : null}</span>
+        <span>
+          API Key{" "}
+          {apiKeyPresentation ? <Tag>{apiKeyPresentation.label}</Tag> : null}
+        </span>
       </div>
-      {apiKey?.pendingMigration ? <PlaintextPendingAlert /> : null}
+      {apiKeyPresentation?.pendingMigration ? <PlaintextPendingAlert /> : null}
       {(provider.custom_header?.length ?? 0) > 0 && (
         // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
         <div className="provider-headers">

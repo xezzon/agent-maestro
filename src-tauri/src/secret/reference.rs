@@ -40,12 +40,7 @@ impl SecretRef {
     /// slug 不合法即拒绝：构造出的引用一定能被 [`SecretRef::parse`] 原样解析
     /// 回来——「引用解析不回来」这种状态不该存在。
     pub(crate) fn for_provider(slug: &str) -> Result<Self, SecretRefError> {
-        if !is_valid_slug(slug) {
-            return Err(SecretRefError::InvalidSlug);
-        }
-        Ok(Self {
-            slug: slug.to_owned(),
-        })
+        Self::validated(slug)
     }
 
     /// 严格解析：逐字比对，任何偏差一律拒绝。
@@ -66,6 +61,12 @@ impl SecretRef {
         let slug = rest
             .strip_suffix(ACCOUNT_SUFFIX)
             .ok_or(SecretRefError::WrongAccount)?;
+        Self::validated(slug)
+    }
+
+    /// 校验 slug 的字符集后构造引用：构造与解析共用同一条规则，故校验只写
+    /// 一遍——两处各抄一份的话，一处放宽就有一处能造出解析不回来的引用。
+    fn validated(slug: &str) -> Result<Self, SecretRefError> {
         if !is_valid_slug(slug) {
             return Err(SecretRefError::InvalidSlug);
         }
