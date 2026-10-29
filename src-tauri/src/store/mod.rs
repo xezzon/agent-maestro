@@ -40,7 +40,7 @@ use crate::{
     config::{CONFIG_VERSION, Change, Config, MIN_CONFIG_VERSION, PluginEntry},
     errors::{ConfigError, LockPoisoned, PluginEntryError, ProviderError, VariableError},
     provider::{ApiKeyIntent, Provider, ProviderWrite},
-    secret::{SecretRef, SecretStore, SecretText},
+    secret::{SecretStore, SecretText},
     variables::Variables,
 };
 
@@ -241,7 +241,7 @@ impl Store {
 
     /// 新建一条 Provider（slug 唯一），成功后原子写回磁盘。
     ///
-    /// slug 在入口处就按密钥引用的规范校验（见 [`SecretRef::for_provider`]）：
+    /// slug 在入口处就按密钥引用的规范校验（见 [`secrets::canonical`]）：
     /// 造不出规范引用的 slug 没有地方放真值，这条记录此后永远设不了密钥
     /// （界面也校验，这里是后端边界的同一句规则）。所有新建都过这道关——与
     /// 本次是否带凭证无关。
@@ -256,7 +256,7 @@ impl Store {
         write: ProviderWrite,
     ) -> Result<(), ProviderError> {
         let next = self.get().map_err(ProviderError::from)?.clone();
-        SecretRef::for_provider(slug).map_err(|_| ProviderError::invalid_slug(slug))?;
+        secrets::canonical(slug)?;
         if next.providers.contains_key(slug) {
             return Err(ProviderError::duplicate_slug(slug));
         }
@@ -373,20 +373,21 @@ impl Store {
         config: &mut Config,
         rollback: Option<Rollback>,
     ) -> Result<(), ProviderError> {
-        match self.persist(config) {
-            Ok(()) => Ok(()),
-            Err(persist_error) => match rollback {
-                None => Err(ProviderError::Storage(persist_error)),
-                Some(rollback) => match rollback.apply(self.secrets.as_ref()) {
-                    Ok(()) => Err(ProviderError::Storage(persist_error)),
-                    Err(rollback_error) => Err(ProviderError::SecretRollback {
-                        slug: slug.to_owned(),
-                        persist: Box::new(persist_error),
-                        rollback: rollback_error,
-                    }),
-                },
-            },
+        let Err(persist_error) = self.persist(config) else {
+            return Ok(());
+        };
+        // 落盘失败：配置没动，密钥链要回到变更前的样子。
+        let Some(rollback) = rollback else {
+            return Err(ProviderError::Storage(persist_error));
+        };
+        if let Err(rollback_error) = rollback.apply(self.secrets.as_ref()) {
+            return Err(ProviderError::SecretRollback {
+                slug: slug.to_owned(),
+                persist: Box::new(persist_error),
+                rollback: rollback_error,
+            });
         }
+        Err(ProviderError::Storage(persist_error))
     }
 
     /// 启用/禁用单个 Provider（独立于编辑表单的开关）。

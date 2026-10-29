@@ -192,7 +192,7 @@ impl PluginService {
     /// Provider。
     fn project_prepared(
         &self,
-        prepared: Vec<PreparedPlugin>,
+        plugins: Vec<PreparedPlugin>,
         secrets: &ResolvedSecrets,
         mut reports: Vec<PluginOutcome>,
     ) -> Vec<PluginOutcome> {
@@ -200,11 +200,11 @@ impl PluginService {
             id,
             plugin,
             prepared,
-        } in prepared
+        } in plugins
         {
             log::debug!("projecting providers: id={id}");
-            let projected =
-                prepared.and_then(|prepared| self.project_one_plugin(&plugin, prepared, secrets));
+            let projected = prepared
+                .and_then(|projection| self.project_one_plugin(&plugin, projection, secrets));
             reports.push(build_report(id, projected));
         }
         reports
@@ -236,8 +236,8 @@ impl PluginService {
 /// 为空、某插件覆盖成非空的 Provider 也因此落在并集里，不会漏取密钥。
 ///
 /// 配置读取或插值失败的插件不会投影任何东西（整体 `failed`），故不贡献要求。
-fn required_slugs(prepared: &[PreparedPlugin]) -> BTreeSet<String> {
-    prepared
+fn required_slugs(plugins: &[PreparedPlugin]) -> BTreeSet<String> {
+    plugins
         .iter()
         .filter_map(|plugin| plugin.prepared.as_ref().ok())
         .flat_map(|projection| {

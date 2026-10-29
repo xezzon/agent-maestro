@@ -292,19 +292,11 @@ mod tests {
         let (mapped, _) = to_wit_provider(&providers, &resolved("gateway", Some("sk-resolved")));
 
         assert_eq!(mapped.len(), 1);
+        // 逐字相等即同时钉住「是解析出的明文」与「不是引用 URI」。
         assert_eq!(
             mapped[0].api_key.as_deref(),
             Some("sk-resolved"),
-            "插件收到的是解析出的明文"
-        );
-        // 断言只看真假、不渲染值：失败时的断言输出同样不得带出明文（ADR 0008）。
-        assert!(
-            !mapped[0]
-                .api_key
-                .as_deref()
-                .unwrap_or_default()
-                .contains("secret://"),
-            "引用 URI 不得出现在投影输入里"
+            "插件收到的是解析出的明文，引用 URI 不得出现在投影输入里"
         );
     }
 
