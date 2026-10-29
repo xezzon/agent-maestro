@@ -19,8 +19,10 @@ const PROTOCOL_OPTIONS = [
 ];
 
 /**
- * Provider 自身的标量字段：slug、两个协议槽位的端点、投影使用的协议与 API Key。
- * 行列表（自定义 Header、模型）分别在 `HeaderRows` / `ModelRows` 里。
+ * Provider 自身的标量字段：slug、两个协议槽位的端点与投影使用的协议。
+ * API Key 不在这里：它是单向写入的密钥字段，由 `ApiKeyField` 单独承接（动作
+ * 是组件本地状态，不是 `Form.Item`）。行列表（自定义 Header、模型）分别在
+ * `HeaderRows` / `ModelRows` 里。
  *
  * 端点槽位实时决定投影选项的可用性：没填端点的协议不可选。
  *
@@ -71,18 +73,6 @@ export default function ProviderFields({ mode, rules }) {
             ...option,
             disabled: !filledProtocols.includes(option.value),
           }))}
-        />
-      </Form.Item>
-
-      <Form.Item
-        name="api_key"
-        label="API Key"
-        extra="可选；本地网关可留空。以明文保存在本地配置文件中"
-      >
-        <Input.Password
-          placeholder="留空则不设置"
-          autoComplete="new-password"
-          visibilityToggle={false}
         />
       </Form.Item>
     </>

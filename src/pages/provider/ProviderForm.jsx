@@ -1,8 +1,14 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Form } from "antd";
-import { createProvider, updateProvider } from "@/api/provider";
+import {
+  createProvider,
+  initialApiKeyDraft,
+  resolveApiKeyAction,
+  updateProvider,
+} from "@/api/provider";
 import FormActions from "@/components/FormActions";
 import useAsyncAction from "@/hooks/useAsyncAction";
+import ApiKeyField from "./ApiKeyField";
 import HeaderRows from "./HeaderRows";
 import ModelRows from "./ModelRows";
 import ProviderFields from "./ProviderFields";
@@ -45,14 +51,24 @@ export default function ProviderForm({
     [form, mode, providers],
   );
   const [saving, runSave] = useAsyncAction();
+  // 密钥动作是组件本地状态（与 `enabled` 同类，不是 `Form.Item`）：它决定这次
+  // 保存对密钥做什么，而密钥值从不进表单状态。未设置态直接给输入框（草稿恒
+  // 展开）；已设置 / 明文态先收着，点「更换 API Key」才展开。
+  const [apiKeyDraft, setApiKeyDraft] = useState(
+    initialApiKeyDraft(provider.api_key_state),
+  );
 
   // 命令成功即已落盘，由调用方刷新列表。
   // `enabled` 不是 Form.Item（开关独立于表单），提交值里没有它；
   // 显式与 provider 合并回传，避免缺字段被后端默认值静默重置为启用。
-  // 校验失败由各 Form.Item 内联展示，不会走到这里；这里的错误都是命令调用失败。
+  // 密钥同样不是 Form.Item：它的动作由本地草稿推出（不变 / 清除 / 覆盖），
+  // 负载里带不带 `api_key` 由动作决定。
+  // 校验失败由各 Form.Item 内联展示，不会走到这里；这里的错误都是命令调用失败
+  // （含密钥链不可用——如实报错，绝不静默）。
   async function handleFinish(values) {
     await runSave(async () => {
-      await SAVE_BY_MODE[mode]({ ...provider, ...values });
+      const action = resolveApiKeyAction(provider.api_key_state, apiKeyDraft);
+      await SAVE_BY_MODE[mode]({ ...provider, ...values }, action);
       onSaved();
     });
   }
@@ -68,6 +84,11 @@ export default function ProviderForm({
       onFinish={handleFinish}
     >
       <ProviderFields mode={mode} rules={rules} />
+      <ApiKeyField
+        state={provider.api_key_state}
+        draft={apiKeyDraft}
+        onDraftChange={setApiKeyDraft}
+      />
       <HeaderRows rules={rules} saving={saving} />
       <ModelRows rules={rules} saving={saving} disabled={disabled} />
 

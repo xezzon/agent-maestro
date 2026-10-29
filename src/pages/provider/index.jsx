@@ -9,7 +9,11 @@ import {
   Spin,
   Typography,
 } from "antd";
-import { listProviders, normalizeEndpoints } from "@/api/provider";
+import {
+  API_KEY_UNSET,
+  listProviders,
+  normalizeEndpoints,
+} from "@/api/provider";
 import { applyProviders, isUsablePlugin } from "@/api/plugins";
 import { listVariables } from "@/api/variables";
 import VariablesCard from "@/components/VariablesCard";
@@ -145,7 +149,7 @@ export default function ProvidersPage({ plugins }) {
                       selected_protocol: null,
                       models: [],
                       enabled: true,
-                      api_key_set: false,
+                      api_key_state: API_KEY_UNSET,
                     }}
                     providers={providers}
                     onCancel={() => setCreating(false)}

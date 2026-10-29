@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use super::log_outcome;
@@ -113,12 +113,84 @@ fn update_write(slug: &str, request: ProviderRequest) -> Result<ProviderWrite, P
     })
 }
 
+/// 凭证状态（线格式）：未设置 / 已设置 / 明文待迁移。
+///
+/// 合法值由类型固定，线格式为小写词（`unset` / `set` / `plaintext`），前端按
+/// 同一组词渲染标签。序列化形态与线格式由本模块的测试钉住：改词即前端标签
+/// 静默失效。
+///
+/// 三态**完全由配置推导**：读列表不碰密钥链（#148）——真值在不在、还在不在
+/// 配置文件里，配置自己说了算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ApiKeyState {
+    /// 未设置：没有凭证。
+    Unset,
+    /// 已设置：真值在系统密钥链里，配置里只留引用。
+    Set,
+    /// 明文待迁移：真值仍在配置文件里（启动迁移未成功，下次启动重试）。
+    Plaintext,
+}
+
+impl From<&SecretText> for ApiKeyState {
+    fn from(text: &SecretText) -> Self {
+        match text {
+            SecretText::Unset => Self::Unset,
+            SecretText::Ref(_) => Self::Set,
+            SecretText::Plaintext(_) => Self::Plaintext,
+        }
+    }
+}
+
+/// Provider 列表视图（命令返回给前端的形态）：**线格式契约**。
+///
+/// 与插件注册表的视图同理（见 `command/plugin.rs` 的 `PluginView`）：形状本来
+/// 就是给界面看的，硬塞回领域反而更假，故它住在交付层。领域层给的是
+/// [`Provider`]（凭证字段是 [`SecretText`] 形态），此处映射成界面要的形状。
+///
+/// 凭证**只以状态出现**：既不回传真值，也不回传引用 URI——单向写入的姿态
+/// （ADR 0002）。
+#[derive(Debug, Serialize)]
+pub(crate) struct ProviderView {
+    enabled: bool,
+    base_url: Endpoints,
+    selected_protocol: Option<Protocol>,
+    /// 凭证状态（`unset` / `set` / `plaintext`）。
+    api_key_state: ApiKeyState,
+    custom_header: BTreeMap<String, String>,
+    models: Vec<ModelEntry>,
+}
+
+impl From<Provider> for ProviderView {
+    fn from(provider: Provider) -> Self {
+        Self {
+            enabled: provider.enabled,
+            base_url: provider.base_url,
+            selected_protocol: provider.selected_protocol,
+            api_key_state: ApiKeyState::from(&provider.api_key),
+            custom_header: provider.custom_header,
+            models: provider.models,
+        }
+    }
+}
+
+/// 领域记录 → 视图：列表的线格式映射。
+///
+/// 凭证在映射这一步就变成状态：真值与引用 URI 都不进视图（ADR 0002）。
+fn provider_views(providers: BTreeMap<String, Provider>) -> BTreeMap<String, ProviderView> {
+    providers
+        .into_iter()
+        .map(|(slug, provider)| (slug, ProviderView::from(provider)))
+        .collect()
+}
+
 #[tauri::command]
 pub(crate) fn list_providers(
     store: State<'_, AppStore>,
-) -> Result<BTreeMap<String, Provider>, String> {
+) -> Result<BTreeMap<String, ProviderView>, String> {
     let outcome = store
         .with_read(|s| s.providers_snapshot())
+        .map(provider_views)
         .map_err(|err| err.to_string());
     log_outcome("list_providers", None, &outcome);
     outcome
@@ -182,6 +254,103 @@ mod tests {
 
     fn parse(text: &str) -> Result<ProviderRequest, serde_json::Error> {
         serde_json::from_str(text)
+    }
+
+    /// 视图契约的线格式钉死：序列化出来就是 `unset` / `set` / `plaintext`
+    /// 三个小写词。前端按同一组词渲染标签（见 `src/api/provider.js`），改词即
+    /// 前端标签静默失效——故这三条断言是跨端契约的护栏。
+    #[test]
+    fn api_key_state_wire_values_are_pinned() {
+        let cases = [
+            (ApiKeyState::Unset, "unset"),
+            (ApiKeyState::Set, "set"),
+            (ApiKeyState::Plaintext, "plaintext"),
+        ];
+
+        for (state, wire) in cases {
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                serde_json::json!(wire),
+                "序列化形态与线格式词一致"
+            );
+        }
+    }
+
+    /// 视图只带状态：既不回传真值，也不回传引用 URI，更没有 `api_key` 字段
+    /// （单向写入：渲染进程拿不到密钥，ADR 0002）。
+    #[test]
+    fn provider_view_carries_the_state_but_neither_value_nor_reference() {
+        let cases = [
+            (SecretText::unset(), "unset"),
+            (
+                SecretText::referenced(SecretRef::for_provider("openrouter").unwrap()),
+                "set",
+            ),
+            (
+                SecretText::Plaintext("sk-canary-do-not-leak".to_owned()),
+                "plaintext",
+            ),
+        ];
+
+        for (text, expected) in cases {
+            let view = ProviderView::from(Provider {
+                api_key: text,
+                ..Provider::default()
+            });
+            let value = serde_json::to_value(&view).unwrap();
+
+            assert_eq!(
+                value["api_key_state"],
+                serde_json::json!(expected),
+                "状态词逐字对应"
+            );
+            assert!(
+                value.get("api_key").is_none(),
+                "视图里没有 api_key 字段：{value}"
+            );
+            assert!(
+                !value.to_string().contains("secret://"),
+                "视图不回传引用 URI：{value}"
+            );
+            assert!(
+                !value.to_string().contains("sk-canary-do-not-leak"),
+                "视图不回传真值：{value}"
+            );
+        }
+    }
+
+    /// 列表读取不触发任何密钥链调用：状态完全由配置推导（#148）。
+    #[test]
+    fn listing_providers_does_not_touch_the_keychain() {
+        use crate::store::testutil::Fixture;
+
+        let fixture = Fixture::new();
+        let mut store = fixture.store();
+        store
+            .create_provider(
+                "openrouter",
+                ProviderWrite::overwrite(Provider::default(), "sk-live".to_owned()),
+            )
+            .unwrap();
+        let app_store = AppStore::new(store, fixture.secrets().clone());
+        let before = fixture.secrets().calls().len();
+
+        let providers = app_store
+            .with_read(|s| s.providers_snapshot())
+            .map(provider_views)
+            .unwrap();
+
+        assert_eq!(
+            fixture.secrets().calls().len(),
+            before,
+            "列表读取不碰密钥链：{:?}",
+            fixture.secrets().calls()
+        );
+        assert_eq!(
+            providers["openrouter"].api_key_state,
+            ApiKeyState::Set,
+            "状态仍由配置推导"
+        );
     }
 
     /// 缺省与 `null` 都读作「不变」。

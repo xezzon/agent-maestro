@@ -17,6 +17,8 @@ import {
   deleteProvider,
 } from "@/api/provider";
 import useAsyncAction from "@/hooks/useAsyncAction";
+import { apiKeyStatePresentation } from "./apiKeyState";
+import PlaintextPendingAlert from "./PlaintextPendingAlert";
 
 /** 只读展示一项 token 上限：未设置就显示「未设置」，不编造默认值。 */
 function formatLimit(value) {
@@ -36,6 +38,8 @@ export default function ProviderReadonlyForm({
 }) {
   const [busy, run] = useAsyncAction();
   const { token } = theme.useToken();
+  // 凭证只显示状态：真值与引用 URI 都不进界面（单向写入，ADR 0002）。
+  const apiKey = apiKeyStatePresentation(provider.api_key_state);
 
   async function handleDelete() {
     await run(async () => {
@@ -73,10 +77,9 @@ export default function ProviderReadonlyForm({
         ))}
       </Form>
       <div className="provider-meta">
-        <span>
-          API Key <Tag>{provider.api_key_set ? "已设置" : "未设置"}</Tag>
-        </span>
+        <span>API Key {apiKey ? <Tag>{apiKey.label}</Tag> : null}</span>
       </div>
+      {apiKey?.pendingMigration ? <PlaintextPendingAlert /> : null}
       {(provider.custom_header?.length ?? 0) > 0 && (
         // 只列键名，绝不显示值：值是凭证（issue #58 决定 9）。
         <div className="provider-headers">
